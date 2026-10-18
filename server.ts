@@ -377,7 +377,8 @@ app.get('/api/podman/probe', async (req, res) => {
   for (const url of backendUrls) {
     try {
       const resp = await fetch(
-        `${url}/api/podman/probe?host=${encodeURIComponent(targetHostParam)}&user=${encodeURIComponent(sshUser)}`
+        `${url}/api/podman/probe?host=${encodeURIComponent(targetHostParam)}&user=${encodeURIComponent(sshUser)}`,
+        { signal: AbortSignal.timeout(2000) }
       );
       if (resp.ok) {
         const liveUsers = await resp.json();
@@ -449,6 +450,64 @@ app.post('/api/nodes/:id/identities', (req, res) => {
   };
   hostCache.addCustomIdentity(targetNode.id, newIdentity);
   res.json({ success: true, identity: newIdentity });
+});
+
+// Live Storage & ZFS Endpoint
+app.get('/api/nodes/:id/storage', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  try {
+    const cmd = [
+      'findmnt -J -l -t ext4,xfs,btrfs,zfs,nfs,cifs,smb3 2>/dev/null || true',
+      'echo "===ZFS==="',
+      'which zfs >/dev/null 2>&1 && zfs list 2>&1 || echo "NO_ZFS"',
+      'echo "===ZPOOL==="',
+      'which zpool >/dev/null 2>&1 && zpool status 2>&1 || echo "NO_ZPOOL"',
+      'echo "===BTRFS==="',
+      'which btrfs >/dev/null 2>&1 && btrfs filesystem show 2>&1 || echo "NO_BTRFS"',
+    ].join('; ');
+
+    const out = await runNodeCommand(targetNode, cmd, 5000);
+    const [findmntRaw, rest1 = ''] = out.split('===ZFS===');
+    const [zfsRaw, rest2 = ''] = rest1.split('===ZPOOL===');
+    const [zpoolRaw, btrfsRaw = ''] = rest2.split('===BTRFS===');
+
+    res.json({
+      success: true,
+      findmnt: findmntRaw.trim(),
+      zfsList: zfsRaw.trim(),
+      zpoolStatus: zpoolRaw.trim(),
+      btrfs: btrfsRaw.trim(),
+    });
+  } catch (err: any) {
+    res.json({ success: false, error: err?.message || 'Storage probe failed' });
+  }
+});
+
+// Live NFS & Samba Shares Endpoint
+app.get('/api/nodes/:id/shares', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  try {
+    const cmd = [
+      'which exportfs >/dev/null 2>&1 && cat /var/lib/nfs/etab /etc/exports 2>/dev/null || echo "NO_NFS"',
+      'echo "===SAMBA==="',
+      'which testparm >/dev/null 2>&1 && testparm -s 2>/dev/null || cat /etc/samba/smb.conf 2>/dev/null || echo "NO_SAMBA"',
+      'echo "===SERVICES==="',
+      'systemctl is-active nfs-server smb smbd 2>&1 || true',
+    ].join('; ');
+
+    const out = await runNodeCommand(targetNode, cmd, 5000);
+    const [nfsRaw, rest = ''] = out.split('===SAMBA===');
+    const [smbRaw, srvRaw = ''] = rest.split('===SERVICES===');
+
+    res.json({
+      success: true,
+      nfs: nfsRaw.trim(),
+      samba: smbRaw.trim(),
+      services: srvRaw.trim(),
+    });
+  } catch (err: any) {
+    res.json({ success: false, error: err?.message || 'Shares probe failed' });
+  }
 });
 
 app.post('/api/podman/probe', (req, res) => {
@@ -657,7 +716,12 @@ async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
   if (!isProd) {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        watch: {
+          ignored: ['**/data/**', '**/*.sqlite*', '**/backend-go/**'],
+        },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

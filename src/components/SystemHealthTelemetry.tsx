@@ -38,12 +38,32 @@ export const SystemHealthTelemetry: React.FC<SystemHealthTelemetryProps> = ({
             </span>
           </div>
           <div className="flex items-center gap-2 font-mono text-xs">
+            {telemetry.metricsSource && (
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                telemetry.metricsSource === 'glances'
+                  ? 'bg-[#8cd6cb]/20 text-[#8cd6cb] border-[#8cd6cb]/30'
+                  : telemetry.metricsSource === 'pcp'
+                  ? 'bg-[#b0c9ff]/20 text-[#b0c9ff] border-[#b0c9ff]/30'
+                  : 'bg-[#ffd97d]/20 text-[#ffd97d] border-[#ffd97d]/30'
+              }`}>
+                {telemetry.metricsSource.toUpperCase()}
+              </span>
+            )}
             <span className="px-1.5 py-0.5 bg-[#8cd6cb]/20 text-[#8cd6cb] rounded font-bold border border-[#8cd6cb]/30">
               HEALTHY
             </span>
-            <span className="text-[#8d909b]">Up: 16h 44m</span>
           </div>
         </div>
+
+        {/* Warning banner when Glances is not installed and fallback is used */}
+        {telemetry.metricsWarning && (
+          <div className="mt-2 bg-[#ffd97d]/10 border border-[#ffd97d]/30 rounded px-2.5 py-1.5 flex items-center gap-2 font-mono text-[11px] text-[#ffd97d]">
+            <span className="material-symbols-outlined text-[15px] shrink-0 text-[#ffd97d]">
+              warning
+            </span>
+            <span className="flex-1">{telemetry.metricsWarning}</span>
+          </div>
+        )}
 
         {/* 4 Telemetry Metrics Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">

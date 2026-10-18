@@ -140,7 +140,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
         {
           id: `infra-${Date.now()}`,
           name: `${newPodName.trim()}-infra`,
-          image: 'localhost/podman-pause:latest',
+          image: 'registry.k8s.io/pause:3.10',
           status: 'Running',
           cpu: '0.01%',
           memory: '8 MiB',

@@ -4,7 +4,6 @@ import { Header } from './components/Header.tsx';
 import { ServerViewSidebar } from './components/ServerViewSidebar.tsx';
 import { TopSubNav } from './components/TopSubNav.tsx';
 import { NodeBreadcrumbBar } from './components/NodeBreadcrumbBar.tsx';
-import { OperationalTabs } from './components/OperationalTabs.tsx';
 import { CockpitSubSidebar } from './components/CockpitSubSidebar.tsx';
 import { SystemHealthTelemetry } from './components/SystemHealthTelemetry.tsx';
 import { TailscaleMeshCard } from './components/TailscaleMeshCard.tsx';
@@ -429,8 +428,32 @@ export default function App() {
           setTelemetry(prev => ({ ...prev, ...data }));
         }
         if (data?.node) {
-          setSelectedNode(prev => (prev.id === data.node.id ? { ...prev, ...data.node } : prev));
-          setNodesList(prev => prev.map(n => (n.id === data.node.id ? { ...n, ...data.node } : n)));
+          setSelectedNode(prev => {
+            if (prev.id !== data.node.id) return prev;
+            if (
+              prev.uptime === data.node.uptime &&
+              prev.status === data.node.status &&
+              prev.sshConnected === data.node.sshConnected &&
+              prev.specs?.cpu === data.node.specs?.cpu
+            ) {
+              return prev;
+            }
+            return { ...prev, ...data.node };
+          });
+          setNodesList(prev =>
+            prev.map(n => {
+              if (n.id !== data.node.id) return n;
+              if (
+                n.uptime === data.node.uptime &&
+                n.status === data.node.status &&
+                n.sshConnected === data.node.sshConnected &&
+                n.specs?.cpu === data.node.specs?.cpu
+              ) {
+                return n;
+              }
+              return { ...n, ...data.node };
+            })
+          );
         }
       })
       .catch(() => {});
@@ -728,18 +751,17 @@ export default function App() {
                 onEditNode={() => setEditNodeTarget(selectedNode)}
               />
 
-              <div className="flex items-center justify-between border-t border-[#26293c]">
-                <OperationalTabs
-                  activeTab={activeOpTab}
-                  onSelectTab={tabId => {
-                    setActiveOpTab(tabId);
-                    setActiveCockpitItem(tabId);
-                    if (tabId === 'logs') setLogsTarget('kernel-dmesg');
-                  }}
-                />
+              <div className="flex items-center justify-between border-t border-[#26293c] px-3 py-1.5 bg-[#121528] text-xs font-mono">
+                <div className="flex items-center gap-2 text-[#dfe1fa]">
+                  <span className="material-symbols-outlined text-[#8cd6cb] text-[16px]">tune</span>
+                  <span className="font-bold text-[#b0c9ff]">ACTIVE COCKPIT SECTION:</span>
+                  <span className="px-2 py-0.5 rounded bg-[#26293c] text-[#8cd6cb] font-bold border border-[#8cd6cb]/30 uppercase tracking-wider text-[11px]">
+                    {activeCockpitItem}
+                  </span>
+                </div>
 
                 {/* UX Controls: High Contrast & Sidebar Resizing */}
-                <div className="hidden md:flex items-center gap-1.5 px-3 py-1 font-mono text-[10px] text-[#8d909b] shrink-0">
+                <div className="flex items-center gap-1.5 font-mono text-[10px] text-[#8d909b] shrink-0">
                   <button
                     type="button"
                     onClick={() => setHighContrast(!highContrast)}
@@ -809,6 +831,32 @@ export default function App() {
                   <NetworkSharesView node={selectedNode} />
                 )}
 
+                {activeOpTab === 'smart' && (
+                  <ZfsManagementView node={selectedNode} />
+                )}
+
+                {activeOpTab === 'tailscale' && (
+                  <TailscaleMeshCard
+                    node={selectedNode}
+                    peers={nodesList}
+                    onReauth={() => setTerminalOpen(true)}
+                    onEditNode={() => setEditNodeTarget(selectedNode)}
+                  />
+                )}
+
+                {activeOpTab === 'metrics' && (
+                  <SystemHealthTelemetry telemetry={telemetry} />
+                )}
+
+                {activeOpTab === 'containers' && (
+                  <PodmanManager
+                    selectedNode={selectedNode}
+                    onOpenLogs={setLogsTarget}
+                    onOpenExec={() => setTerminalOpen(true)}
+                    onRestartPod={podName => handleRunPlaybook('site.yml', podName)}
+                  />
+                )}
+
                 {activeOpTab === 'vms' && (
                   <VirtualMachinesKVM
                     onOpenConsole={() => setTerminalOpen(true)}
@@ -834,7 +882,7 @@ export default function App() {
                 )}
 
                 {/* Default Overview / Reorderable Interactive Workspace */}
-                {(activeOpTab === 'overview' || activeOpTab === 'containers') && (
+                {activeOpTab === 'overview' && (
                   <div className="flex flex-col gap-2">
                     {panelOrder.map((panelId, idx) => {
                       if (panelId === 'telemetry_mesh') {

@@ -403,6 +403,9 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
       'uptime -p 2>/dev/null || uptime',
       '. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"',
       'df -BG / | awk \'NR==2 {gsub(/G/, "", $2); gsub(/G/, "", $3); print $2, $3}\'',
+      'which glances 2>/dev/null || echo "NO_GLANCES"',
+      'which pcp 2>/dev/null || echo "NO_PCP"',
+      'which cockpit-bridge 2>/dev/null || echo "NO_COCKPIT"',
     ].join(' && echo "---SPLIT---" && ');
 
     const out = await runNodeCommand(node, script, 5000);
@@ -427,6 +430,26 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
     const rootTotalGb = Number.parseFloat(dfParts[0]) || 64;
     const rootUsedGb = Number.parseFloat(dfParts[1]) || 18;
 
+    const hasGlances = sections[7] && !sections[7].includes('NO_GLANCES');
+    const hasPcp = sections[8] && !sections[8].includes('NO_PCP');
+    const hasCockpit = sections[9] && !sections[9].includes('NO_COCKPIT');
+
+    let metricsSource: 'glances' | 'pcp' | 'cockpit-bridge' | 'kernel' = 'kernel';
+    let metricsWarning: string | undefined;
+
+    if (hasGlances) {
+      metricsSource = 'glances';
+    } else if (hasPcp) {
+      metricsSource = 'pcp';
+      metricsWarning = 'Glances not installed on host. Falling back to PCP (Performance Co-Pilot) daemon.';
+    } else if (hasCockpit) {
+      metricsSource = 'cockpit-bridge';
+      metricsWarning = 'Glances not installed on host. Sourcing system metrics via Cockpit Bridge.';
+    } else {
+      metricsSource = 'kernel';
+      metricsWarning = 'Glances not installed on host. Sourcing metrics directly from /proc & sysfs.';
+    }
+
     const cpuUsage = Math.max(0.5, Math.min(99.0, +((load1 / Math.max(1, vCpus)) * 100).toFixed(1)));
 
     return {
@@ -445,6 +468,8 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
       loadAvg15m: load15,
       uptime: uptimeRaw,
       osDescription: osPretty,
+      metricsSource,
+      metricsWarning,
     };
   } catch {
     return {
@@ -453,6 +478,8 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
       memoryTotalGiB: node.specs.ramGiB,
       memoryUsedGiB: +(node.specs.ramGiB * 0.4).toFixed(1),
       zfsScrubStatus: `Host: ${node.shortName} (Cached)`,
+      metricsSource: 'cockpit-bridge',
+      metricsWarning: 'Glances not reachable. Using cached Cockpit system telemetry.',
     };
   }
 }
@@ -470,7 +497,8 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<{
     let goProbed: UnprivilegedPodmanUser[] = [];
     try {
       const resp = await fetch(
-        `http://127.0.0.1:18090/api/podman/probe?host=${encodeURIComponent(targetHostParam)}&user=${encodeURIComponent(sshUser)}`
+        `http://127.0.0.1:18090/api/podman/probe?host=${encodeURIComponent(targetHostParam)}&user=${encodeURIComponent(sshUser)}`,
+        { signal: AbortSignal.timeout(2000) }
       );
       if (resp.ok) {
         const data = await resp.json();

@@ -57,6 +57,8 @@ export interface TelemetryData {
   fanSpeedRpm: number;
   packageWatts: number;
   sparkline: number[];
+  metricsSource?: 'glances' | 'pcp' | 'cockpit-bridge' | 'kernel';
+  metricsWarning?: string;
 }
 
 export interface ContainerItem {

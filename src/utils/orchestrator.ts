@@ -80,20 +80,7 @@ function extractContainersFromConmonProcesses(
     });
   }
 
-  if (containers.length === 0 && hasCatatonit) {
-    containers.push({
-      id: `podman-pause-${user}-${uid}`,
-      name: `podman-pause (${user})`,
-      image: 'podman/catatonit-pause',
-      status: 'Running (Namespace Active)',
-      cpu: '0.0%',
-      memory: '4 MiB',
-      user,
-      uid,
-      rootless: uid !== 0,
-    });
-  }
-
+  // Do not synthesize podman-pause containers for idle namespace processes
   return containers;
 }
 

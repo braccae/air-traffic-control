@@ -250,13 +250,9 @@ func (m *Manager) ProbeUnprivilegedUsers() ([]types.UnprivilegedPodmanUser, erro
 func extractContainersFromProcesses(processes []string, user string, uid int) []types.PodmanContainer {
 	var containers []types.PodmanContainer
 	seen := make(map[string]bool)
-	hasCatatonit := false
 
 	for _, proc := range processes {
 		lower := strings.ToLower(proc)
-		if strings.Contains(lower, "catatonit") {
-			hasCatatonit = true
-		}
 		if !strings.Contains(lower, "conmon") {
 			continue
 		}
@@ -303,17 +299,7 @@ func extractContainersFromProcesses(processes []string, user string, uid int) []
 			Rootless: uid != 0,
 		})
 	}
-	if len(containers) == 0 && hasCatatonit {
-		containers = append(containers, types.PodmanContainer{
-			ID:       fmt.Sprintf("podman-pause-%s-%d", user, uid),
-			Name:     fmt.Sprintf("podman-pause (%s)", user),
-			Image:    "podman/catatonit-pause",
-			Status:   "Running (Namespace Active)",
-			User:     user,
-			UID:      uid,
-			Rootless: uid != 0,
-		})
-	}
+	// Do not synthesize podman-pause for idle namespaces
 	return containers
 }
 
