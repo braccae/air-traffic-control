@@ -55,8 +55,23 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager) *http.ServeMux 
 		})
 	})
 
+	sshManager := ssh.NewClientManager()
+	runner := &sshWithLocalFallbackRunner{sshMgr: sshManager}
+
 	mux.HandleFunc("/api/podman/probe", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		host := r.URL.Query().Get("host")
+		user := r.URL.Query().Get("user")
+		if user == "" {
+			user = "core"
+		}
+		if host != "" && host != "127.0.0.1" && host != "localhost" {
+			remoteMgr := podman.NewManager(runner, ssh.Config{Host: host, Port: 22, User: user})
+			if probed, err := remoteMgr.ProbeUnprivilegedUsers(); err == nil {
+				json.NewEncoder(w).Encode(probed)
+				return
+			}
+		}
 		if podmanMgr != nil {
 			if probed, err := podmanMgr.ProbeUnprivilegedUsers(); err == nil && len(probed) > 0 {
 				json.NewEncoder(w).Encode(probed)

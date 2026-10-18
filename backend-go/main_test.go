@@ -80,7 +80,7 @@ func (r *failingSSHWithLocalFallback) RunCommand(cfg ssh.Config, cmd string) (st
 		return "root:x:0:0:root:/root:/bin/bash\npants:x:1000:1000:pants:/home/pants:/bin/bash\n", nil
 	case strings.Contains(cmd, "/etc/subuid"):
 		return "pants:100000:65536\n", nil
-	case strings.HasPrefix(cmd, "sudo -n -u pants"):
+	case strings.Contains(cmd, "sudo ") && strings.Contains(cmd, "pants"):
 		return "", http.ErrNotSupported
 	case strings.HasPrefix(cmd, "su - pants"):
 		return "", http.ErrNotSupported

@@ -250,9 +250,14 @@ func (m *Manager) ProbeUnprivilegedUsers() ([]types.UnprivilegedPodmanUser, erro
 func extractContainersFromProcesses(processes []string, user string, uid int) []types.PodmanContainer {
 	var containers []types.PodmanContainer
 	seen := make(map[string]bool)
+	hasCatatonit := false
 
 	for _, proc := range processes {
-		if !strings.Contains(strings.ToLower(proc), "conmon") {
+		lower := strings.ToLower(proc)
+		if strings.Contains(lower, "catatonit") {
+			hasCatatonit = true
+		}
+		if !strings.Contains(lower, "conmon") {
 			continue
 		}
 		tokens := strings.Fields(proc)
@@ -293,6 +298,17 @@ func extractContainersFromProcesses(processes []string, user string, uid int) []
 			ID:       cid,
 			Name:     cname,
 			Status:   "Running",
+			User:     user,
+			UID:      uid,
+			Rootless: uid != 0,
+		})
+	}
+	if len(containers) == 0 && hasCatatonit {
+		containers = append(containers, types.PodmanContainer{
+			ID:       fmt.Sprintf("podman-pause-%s-%d", user, uid),
+			Name:     fmt.Sprintf("podman-pause (%s)", user),
+			Image:    "podman/catatonit-pause",
+			Status:   "Running (Namespace Active)",
 			User:     user,
 			UID:      uid,
 			Rootless: uid != 0,
@@ -356,7 +372,7 @@ func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContai
 }
 
 func (m *Manager) listUserContainers(user string, uid int) ([]types.PodmanContainer, error) {
-	cmd := fmt.Sprintf("sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman ps --format json", user, uid)
+	cmd := fmt.Sprintf("cd / && sudo -n -i -u %s XDG_RUNTIME_DIR=/run/user/%d podman ps --format json", user, uid)
 	out, err := m.sshMgr.RunCommand(m.cfg, cmd)
 	if err != nil {
 		suCmd := fmt.Sprintf("su - %s -s /bin/sh -c \"XDG_RUNTIME_DIR=/run/user/%d podman ps --format json\"", user, uid)
@@ -373,7 +389,7 @@ func (m *Manager) listUserContainers(user string, uid int) ([]types.PodmanContai
 }
 
 func (m *Manager) listUserPods(user string, uid int) ([]types.PodmanPod, error) {
-	cmd := fmt.Sprintf("sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json", user, uid)
+	cmd := fmt.Sprintf("cd / && sudo -n -i -u %s XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json", user, uid)
 	out, err := m.sshMgr.RunCommand(m.cfg, cmd)
 	if err != nil {
 		suCmd := fmt.Sprintf("su - %s -s /bin/sh -c \"XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json\"", user, uid)

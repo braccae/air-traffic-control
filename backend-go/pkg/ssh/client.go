@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"prox-orch/backend/pkg/types"
 )
 
@@ -36,9 +38,50 @@ func NewClientManager() *ClientManager {
 	}
 }
 
+func resolveAgentSocketPath() string {
+	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+		if _, err := os.Stat(sock); err == nil {
+			return sock
+		}
+	}
+	uid := os.Getuid()
+	candidates := []string{
+		fmt.Sprintf("/run/user/%d/ssh-agent.socket", uid),
+		fmt.Sprintf("/run/user/%d/keyring/ssh", uid),
+		fmt.Sprintf("/run/user/%d/gnupg/S.gpg-agent.ssh", uid),
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
+func getSSHAgentAuthMethod() (ssh.AuthMethod, io.Closer) {
+	sock := resolveAgentSocketPath()
+	if sock == "" {
+		return nil, nil
+	}
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		return nil, nil
+	}
+	agentClient := agent.NewClient(conn)
+	return ssh.PublicKeysCallback(agentClient.Signers), conn
+}
+
 // GetClient retrieves or dials an SSH client
 func (m *ClientManager) GetClient(cfg Config) (*ssh.Client, error) {
-	key := fmt.Sprintf("%s@%s:%d", cfg.User, cfg.Host, cfg.Port)
+	port := cfg.Port
+	if port == 0 {
+		port = 22
+	}
+	user := cfg.User
+	if user == "" {
+		user = "core"
+	}
+	key := fmt.Sprintf("%s@%s:%d", user, cfg.Host, port)
 
 	m.mu.RLock()
 	if client, ok := m.clients[key]; ok {
@@ -56,6 +99,9 @@ func (m *ClientManager) GetClient(cfg Config) (*ssh.Client, error) {
 	}
 
 	authMethods := []ssh.AuthMethod{}
+	if agentAuth, _ := getSSHAgentAuthMethod(); agentAuth != nil {
+		authMethods = append(authMethods, agentAuth)
+	}
 	if len(cfg.PrivateKey) > 0 {
 		var signer ssh.Signer
 		var err error
@@ -72,14 +118,19 @@ func (m *ClientManager) GetClient(cfg Config) (*ssh.Client, error) {
 		authMethods = append(authMethods, ssh.Password(cfg.Password))
 	}
 
-	sshConfig := &ssh.ClientConfig{
-		User:            cfg.User,
-		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Configurable in production
-		Timeout:         cfg.Timeout,
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = 8 * time.Second
 	}
 
-	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
+	sshConfig := &ssh.ClientConfig{
+		User:            user,
+		Auth:            authMethods,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Configurable in production
+		Timeout:         timeout,
+	}
+
+	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", port))
 	client, err := ssh.Dial("tcp", addr, sshConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial ssh to %s: %w", addr, err)

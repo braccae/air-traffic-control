@@ -392,7 +392,7 @@ func TestProbeUnprivilegedUsers_FallbackToSuAndConmonArgs(t *testing.T) {
 					"mediauser:x:1005:1005::/home/mediauser:/sbin/nologin",
 					"suonly:x:1006:1006::/home/suonly:/bin/bash",
 				}, "\n"), nil
-			case strings.HasPrefix(cmd, "sudo ") && strings.Contains(cmd, "suonly"):
+			case strings.Contains(cmd, "sudo ") && strings.Contains(cmd, "suonly"):
 				return "", fmt.Errorf("sudo: command not found")
 			case strings.HasPrefix(cmd, "su - suonly") && strings.Contains(cmd, "podman ps"):
 				return `[{"Id": "112233445566", "Names": ["navidrome"], "Image": "deluan/navidrome:latest", "State": "running", "Status": "Up 4h"}]`, nil
@@ -455,5 +455,42 @@ func TestListPods_SucceedsWhenRootPodmanFailsButUnprivilegedSucceeds(t *testing.
 		t.Errorf("unexpected pods: %+v", pods)
 	}
 }
+
+func TestListUserContainers_UsesLoginShellOrMachinectlWhenHomeDirRestricted(t *testing.T) {
+	runner := &mockRunner{
+		handler: func(cfg ssh.Config, cmd string) (string, error) {
+			switch {
+			case strings.Contains(cmd, "ps -eo"):
+				return "1001 uosserver /usr/libexec/podman/catatonit -P\n1001 uosserver /usr/bin/conmon --api-version 1 -c 417811aa3ef5 -u 417811aa3ef5\n", nil
+			case strings.Contains(cmd, "/etc/passwd"):
+				return "core:x:1000:1000:Core:/var/home/core:/bin/bash\nuosserver:x:1001:1001:UOS:/var/home/uosserver:/bin/bash\n", nil
+			case strings.Contains(cmd, "/etc/subuid"):
+				return "uosserver:589824:65536\n", nil
+			case strings.Contains(cmd, "/var/lib/systemd/linger"):
+				return "uosserver\n", nil
+			case strings.Contains(cmd, "sudo -n -u uosserver") && !strings.Contains(cmd, "cd /") && !strings.Contains(cmd, "-i"):
+				// Simulates AlmaLinux 10.2 /var/home/core permission denied when running sudo -n -u without cd / or -i
+				return "", fmt.Errorf("sudo: cannot chdir to /var/home/core: Permission denied")
+			case strings.Contains(cmd, "cd /") && strings.Contains(cmd, "uosserver") && strings.Contains(cmd, "podman ps"):
+				return `[{"Id": "417811aa3ef5", "Names": ["uosserver"], "Image": "docker.io/library/uosserver:c9603dec9010", "State": "running", "Status": "Up 3 days (healthy)"}]`, nil
+			default:
+				return `[]`, nil
+			}
+		},
+	}
+
+	mgr := NewManager(runner, ssh.Config{Host: "ping.leo-banjo.ts.net", Port: 22, User: "core"})
+	users, err := mgr.ProbeUnprivilegedUsers()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(users) != 1 || users[0].User != "uosserver" || len(users[0].Containers) != 1 {
+		t.Fatalf("expected uosserver with 1 container from AlmaLinux sudo login shell, got: %+v", users)
+	}
+	if users[0].Containers[0].Name != "uosserver" || users[0].Containers[0].Image != "docker.io/library/uosserver:c9603dec9010" {
+		t.Errorf("expected full container metadata from podman ps json, got: %+v", users[0].Containers[0])
+	}
+}
+
 
 
