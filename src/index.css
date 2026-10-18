@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface-dim: #0f1224;
+  --color-surface: #0f1224;
+  --color-surface-container-lowest: #0a0d1f;
+  --color-surface-container-low: #171a2d;
+  --color-surface-container: #1b1e31;
+  --color-surface-container-high: #26293c;
+  --color-surface-container-highest: #313447;
+  --color-surface-bright: #35384c;
+
+  --color-primary: #b0c9ff;
+  --color-primary-fixed: #d8e2ff;
+  --color-primary-container: #8aadf4;
+  --color-on-primary: #002e68;
+  --color-on-primary-container: #143f7f;
+
+  --color-secondary: #d9b9ff;
+  --color-secondary-container: #573583;
+  --color-on-secondary: #401d6b;
+
+  --color-tertiary: #8cd6cb;
+  --color-tertiary-container: #71bab0;
+  --color-on-tertiary: #003732;
+
+  --color-error: #ffb4ab;
+  --color-error-container: #93000a;
+  --color-on-error: #690005;
+
+  --color-outline: #8d909b;
+  --color-outline-variant: #434750;
+  --color-on-surface: #dfe1fa;
+  --color-on-surface-variant: #c3c6d2;
+
+  --font-sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--color-surface);
+    color: var(--color-on-surface);
+    overflow-x: hidden;
+  }
+  code, pre, kbd, samp {
+    font-family: var(--font-mono);
+  }
+}
+
+/* Custom sleek dark scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0d1f;
+}
+::-webkit-scrollbar-thumb {
+  background: #26293c;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #434750;
+}
+
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 20px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'liga';
+}
