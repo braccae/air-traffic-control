@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os/exec"
 	"time"
 
 	"prox-orch/backend/pkg/podman"
@@ -14,6 +15,26 @@ import (
 	"prox-orch/backend/pkg/types"
 	"prox-orch/backend/pkg/websocket"
 )
+
+type sshWithLocalFallbackRunner struct {
+	sshMgr *ssh.ClientManager
+}
+
+func (r *sshWithLocalFallbackRunner) RunCommand(cfg ssh.Config, command string) (string, error) {
+	if r.sshMgr != nil {
+		if out, err := r.sshMgr.RunCommand(cfg, command); err == nil {
+			return out, nil
+		}
+	}
+	if cfg.Host == "127.0.0.1" || cfg.Host == "localhost" || cfg.Host == "" {
+		out, err := exec.Command("sh", "-c", command).CombinedOutput()
+		if err != nil {
+			return string(out), fmt.Errorf("local exec failed (%w): %s", err, string(out))
+		}
+		return string(out), nil
+	}
+	return "", fmt.Errorf("ssh and local fallback failed for host %s", cfg.Host)
+}
 
 func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager) *http.ServeMux {
 	mux := http.NewServeMux()
@@ -260,7 +281,8 @@ func main() {
 	log.Printf("Starting PROX-ORCH Go Core Daemon on port %d...", *port)
 
 	sshManager := ssh.NewClientManager()
-	podmanMgr := podman.NewManager(sshManager, ssh.Config{Host: "127.0.0.1", Port: 22, User: "root"})
+	runner := &sshWithLocalFallbackRunner{sshMgr: sshManager}
+	podmanMgr := podman.NewManager(runner, ssh.Config{Host: "127.0.0.1", Port: 22, User: "root"})
 	hub := websocket.NewHub()
 	go hub.Run()
 

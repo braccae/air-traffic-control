@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
-import type { PodItem, StandaloneDaemon } from '../types/index.ts';
+import React, { useState, useEffect } from 'react';
+import type { PodItem, StandaloneDaemon, UnprivilegedPodmanUser } from '../types/index.ts';
 import {
   countPodmanStatuses,
   filterPodsByStatus,
   filterStandaloneDaemons,
+  mergeLiveProbeIntoPods,
 } from '../utils/podmanViewModel.ts';
 
 interface PodmanManagerProps {
@@ -151,8 +152,22 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
     },
   ];
 
-  const statusCounts = countPodmanStatuses(pods, standaloneState);
-  const filteredPods = filterPodsByStatus(pods, filter);
+  const [probedUsers, setProbedUsers] = useState<UnprivilegedPodmanUser[]>([]);
+
+  useEffect(() => {
+    fetch('/api/podman/probe')
+      .then(res => res.json())
+      .then(data => {
+        if (Array.isArray(data)) {
+          setProbedUsers(data);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const allPods = mergeLiveProbeIntoPods(pods, probedUsers);
+  const statusCounts = countPodmanStatuses(allPods, standaloneState);
+  const filteredPods = filterPodsByStatus(allPods, filter);
   const filteredDaemons = filterStandaloneDaemons(standaloneState, filter);
 
   return (

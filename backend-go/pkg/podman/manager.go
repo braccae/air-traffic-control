@@ -362,7 +362,11 @@ func (m *Manager) listUserContainers(user string, uid int) ([]types.PodmanContai
 		suCmd := fmt.Sprintf("su - %s -s /bin/sh -c \"XDG_RUNTIME_DIR=/run/user/%d podman ps --format json\"", user, uid)
 		out, err = m.sshMgr.RunCommand(m.cfg, suCmd)
 		if err != nil {
-			return nil, err
+			directCmd := fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d podman ps --format json", uid)
+			out, err = m.sshMgr.RunCommand(m.cfg, directCmd)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	return parseContainersJSON(out, user, uid)
@@ -375,7 +379,11 @@ func (m *Manager) listUserPods(user string, uid int) ([]types.PodmanPod, error) 
 		suCmd := fmt.Sprintf("su - %s -s /bin/sh -c \"XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json\"", user, uid)
 		out, err = m.sshMgr.RunCommand(m.cfg, suCmd)
 		if err != nil {
-			return nil, err
+			directCmd := fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json", uid)
+			out, err = m.sshMgr.RunCommand(m.cfg, directCmd)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 

@@ -453,7 +453,27 @@ app.get('/api/tasks', (req, res) => {
   res.json(tasks);
 });
 
-app.get('/api/podman/probe', (req, res) => {
+app.get('/api/podman/probe', async (req, res) => {
+  const backendUrls = [
+    process.env.GO_BACKEND_URL,
+    'http://127.0.0.1:18090',
+    'http://127.0.0.1:18080',
+  ].filter(Boolean) as string[];
+
+  for (const url of backendUrls) {
+    try {
+      const resp = await fetch(`${url}/api/podman/probe`);
+      if (resp.ok) {
+        const liveUsers = await resp.json();
+        if (Array.isArray(liveUsers) && liveUsers.length > 0) {
+          res.json(liveUsers);
+          return;
+        }
+      }
+    } catch {
+      // Try next backend URL
+    }
+  }
   res.json(getDefaultHostPodmanProbe());
 });
 

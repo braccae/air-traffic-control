@@ -5,6 +5,7 @@ import {
   filterStandaloneDaemons,
   countPodmanStatuses,
   correlateIdentitiesWithProbe,
+  mergeLiveProbeIntoPods,
 } from './podmanViewModel.ts';
 import { getDefaultHostPodmanProbe } from './orchestrator.ts';
 import type { PodItem, ServiceUser, StandaloneDaemon } from '../types/index.ts';
@@ -206,3 +207,67 @@ test('correlateIdentitiesWithProbe identifies unprivileged users running podman 
   assert.ok(cockpit.uid > 0);
   assert.equal(cockpit.containerCount, 0);
 });
+
+test('buildPodmanStateFromProbe converts live probed unprivileged users into PodItems, StandaloneDaemons, and dynamic ServiceUsers', () => {
+  const liveProbe = [
+    {
+      user: 'pants',
+      uid: 1000,
+      gid: 1000,
+      homeDir: '/home/pants',
+      subUidRange: '100000:65536',
+      linger: true,
+      activeProcesses: [
+        '/usr/bin/conmon -c 628e92ae175f -n hungry_swirles',
+        '/usr/bin/conmon -c 97a2a7c3695f -n eloquent_hermann',
+      ],
+      containers: [
+        {
+          id: '628e92ae175f',
+          name: 'hungry_swirles',
+          image: 'localhost/alma:bug5-test',
+          status: 'Up 44 hours',
+          user: 'pants',
+          uid: 1000,
+          rootless: true,
+        },
+        {
+          id: '97a2a7c3695f',
+          name: 'eloquent_hermann',
+          image: 'localhost/dx:c1-verify',
+          status: 'Up 44 hours',
+          user: 'pants',
+          uid: 1000,
+          rootless: true,
+        },
+      ],
+    },
+  ];
+
+  const baseIdentities: ServiceUser[] = [
+    {
+      user: 'deployer',
+      uidGid: '1000:1000',
+      rolesGroups: 'wheel, sudo, docker',
+      authMechanism: 'ssh-ed25519 (Ansible Vault managed)',
+      lingerSubUid: 'Linger: Yes',
+      icon: 'badge',
+    },
+  ];
+
+  const correlated = correlateIdentitiesWithProbe(baseIdentities, liveProbe);
+  // Should include newly discovered live user 'pants' even if not in baseIdentities!
+  const pantsIdentity = correlated.find(c => c.user === 'pants');
+  assert.ok(pantsIdentity, 'expected newly probed unprivileged user pants to be added to correlated identities');
+  assert.equal(pantsIdentity.uid, 1000);
+  assert.equal(pantsIdentity.isRunningPodman, true);
+  assert.equal(pantsIdentity.containerCount, 2);
+
+  const mergedPods = mergeLiveProbeIntoPods(samplePods, liveProbe);
+  assert.equal(mergedPods.length, 3);
+  assert.equal(mergedPods[0].id, 'rootless-pants-1000');
+  assert.equal(mergedPods[0].user, 'pants');
+  assert.equal(mergedPods[0].uid, 1000);
+  assert.equal(mergedPods[0].containers.length, 2);
+});
+
