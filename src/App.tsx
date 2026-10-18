@@ -13,6 +13,10 @@ import { VirtualMachinesKVM } from './components/VirtualMachinesKVM.tsx';
 import { ResticBackupPolicy } from './components/ResticBackupPolicy.tsx';
 import { ServiceIdentitiesTable } from './components/ServiceIdentitiesTable.tsx';
 import { GlobalTasksExecutionLog } from './components/GlobalTasksExecutionLog.tsx';
+import { NetworkInterfacesView } from './components/NetworkInterfacesView.tsx';
+import { FirewallView } from './components/FirewallView.tsx';
+import { ZfsManagementView } from './components/ZfsManagementView.tsx';
+import { NetworkSharesView } from './components/NetworkSharesView.tsx';
 
 // Modals
 import { TerminalModal } from './components/modals/TerminalModal.tsx';
@@ -610,8 +614,61 @@ export default function App() {
     setTasks(prev => [rebootTask, ...prev]);
   };
 
+  // Drag-and-drop panel order state
+  const [panelOrder, setPanelOrder] = useState<string[]>([
+    'telemetry_mesh',
+    'containers',
+    'vms_restic',
+    'identities',
+  ]);
+  const [draggedPanel, setDraggedPanel] = useState<string | null>(null);
+
+  // Section density / contrast toggle
+  const [highContrast, setHighContrast] = useState(true);
+
+  // Cockpit sub-sidebar width resizer state
+  const [subSidebarWidth, setSubSidebarWidth] = useState<'normal' | 'wide' | 'compact'>('normal');
+
+  const handleDragStart = (id: string) => {
+    setDraggedPanel(id);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (targetId: string) => {
+    if (!draggedPanel || draggedPanel === targetId) return;
+    setPanelOrder(prev => {
+      const next = [...prev];
+      const fromIdx = next.indexOf(draggedPanel);
+      const toIdx = next.indexOf(targetId);
+      if (fromIdx !== -1 && toIdx !== -1) {
+        next.splice(fromIdx, 1);
+        next.splice(toIdx, 0, draggedPanel);
+      }
+      return next;
+    });
+    setDraggedPanel(null);
+  };
+
+  const movePanel = (id: string, direction: 'up' | 'down') => {
+    setPanelOrder(prev => {
+      const idx = prev.indexOf(id);
+      if (idx === -1) return prev;
+      const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (targetIdx < 0 || targetIdx >= prev.length) return prev;
+      const next = [...prev];
+      const [item] = next.splice(idx, 1);
+      next.splice(targetIdx, 0, item);
+      return next;
+    });
+  };
+
   return (
-    <div className="bg-[#0f1224] text-[#dfe1fa] min-h-screen selection:bg-[#395d9f] selection:text-white font-sans">
+    <div className={`min-h-screen selection:bg-[#395d9f] selection:text-white font-sans ${
+      highContrast ? 'bg-[#080a16] text-[#f0f2ff]' : 'bg-[#0f1224] text-[#dfe1fa]'
+    }`}>
       {/* Top Header */}
       <Header
         onOpenAddNode={() => setAddNodeOpen(true)}
@@ -644,16 +701,24 @@ export default function App() {
             if (tabId === 'xterm_console') setTerminalOpen(true);
             if (tabId === 'playbooks') setPlaybookOpen(true);
             if (tabId === 'group_vars') setGroupVarsOpen(true);
+            if (tabId === 'task_queue') {
+              const el = document.getElementById('global-tasks-drawer');
+              el?.scrollIntoView({ behavior: 'smooth' });
+            }
           }}
           clusterCpu={`${telemetry.cpuUsage.toFixed(1)}%`}
           clusterRam={`${telemetry.memoryUsedGiB} / ${telemetry.memoryTotalGiB} GiB`}
         />
 
         {/* Main Content Workspace */}
-        <main className="relative pt-18 pb-48 w-full px-3 min-h-screen bg-[#0f1224]">
+        <main className={`relative pt-18 pb-48 w-full px-3 min-h-screen ${
+          highContrast ? 'bg-[#080a16]' : 'bg-[#0f1224]'
+        }`}>
           <div className="flex flex-col w-full">
             {/* Secondary Context Bar & System Breadcrumb */}
-            <div className="flex flex-col bg-[#171a2d] shadow-sm rounded-t border border-[#26293c]">
+            <div className={`flex flex-col shadow-md rounded-t border ${
+              highContrast ? 'bg-[#121528] border-[#383c54]' : 'bg-[#171a2d] border-[#26293c]'
+            }`}>
               <NodeBreadcrumbBar
                 node={selectedNode}
                 onOpenTerminal={() => setTerminalOpen(true)}
@@ -663,58 +728,95 @@ export default function App() {
                 onEditNode={() => setEditNodeTarget(selectedNode)}
               />
 
-              <OperationalTabs
-                activeTab={activeOpTab}
-                onSelectTab={tabId => {
-                  setActiveOpTab(tabId);
-                  if (tabId === 'logs') setLogsTarget('kernel-dmesg');
-                }}
-              />
+              <div className="flex items-center justify-between border-t border-[#26293c]">
+                <OperationalTabs
+                  activeTab={activeOpTab}
+                  onSelectTab={tabId => {
+                    setActiveOpTab(tabId);
+                    setActiveCockpitItem(tabId);
+                    if (tabId === 'logs') setLogsTarget('kernel-dmesg');
+                  }}
+                />
+
+                {/* UX Controls: High Contrast & Sidebar Resizing */}
+                <div className="hidden md:flex items-center gap-1.5 px-3 py-1 font-mono text-[10px] text-[#8d909b] shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setHighContrast(!highContrast)}
+                    className="px-2 py-0.5 rounded bg-[#1f2238] hover:bg-[#2c304d] text-[#b0c9ff] cursor-pointer border border-[#3b405e]"
+                    title="Toggle high contrast UI"
+                  >
+                    Contrast: {highContrast ? 'HIGH' : 'STANDARD'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSubSidebarWidth(w => (w === 'normal' ? 'wide' : w === 'wide' ? 'compact' : 'normal'));
+                    }}
+                    className="px-2 py-0.5 rounded bg-[#1f2238] hover:bg-[#2c304d] text-[#8cd6cb] cursor-pointer border border-[#3b405e]"
+                    title="Resize Sub-sidebar panel"
+                  >
+                    Sidebar: {subSidebarWidth.toUpperCase()}
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* Cockpit Nested Split Layout: Sub-Sidebar + Main Control Workspace */}
             <div className="grid grid-cols-12 gap-2 mt-2 w-full">
-              {/* Cockpit Sub-Sidebar */}
-              <CockpitSubSidebar
-                node={selectedNode}
-                activeItem={activeCockpitItem}
-                onSelectItem={item => {
-                  setActiveCockpitItem(item);
-                  if (item === 'logs') setLogsTarget('dmesg / journald');
-                }}
-                onEditNode={() => setEditNodeTarget(selectedNode)}
-              />
+              {/* Cockpit Sub-Sidebar with Resizable Width */}
+              <div className={
+                subSidebarWidth === 'wide'
+                  ? 'col-span-12 lg:col-span-4 xl:col-span-3'
+                  : subSidebarWidth === 'compact'
+                  ? 'col-span-12 lg:col-span-2 xl:col-span-2'
+                  : 'col-span-12 lg:col-span-3 xl:col-span-2'
+              }>
+                <CockpitSubSidebar
+                  node={selectedNode}
+                  activeItem={activeCockpitItem}
+                  onSelectItem={item => {
+                    setActiveCockpitItem(item);
+                    setActiveOpTab(item);
+                    if (item === 'logs') setLogsTarget('dmesg / journald');
+                  }}
+                  onEditNode={() => setEditNodeTarget(selectedNode)}
+                />
+              </div>
 
               {/* Main Operational Workspace Grid */}
-              <div className="col-span-12 lg:col-span-9 xl:col-span-10 flex flex-col gap-2">
-                {/* TOP ROW: Panel 1 (Telemetry) & Panel 2 (Tailscale Mesh) */}
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
-                  <SystemHealthTelemetry telemetry={telemetry} />
-                  <TailscaleMeshCard
-                    node={selectedNode}
-                    peers={nodesList}
-                    onReauth={() => setTerminalOpen(true)}
-                    onEditNode={() => setEditNodeTarget(selectedNode)}
-                  />
-                </div>
+              <div className={
+                subSidebarWidth === 'wide'
+                  ? 'col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-2'
+                  : subSidebarWidth === 'compact'
+                  ? 'col-span-12 lg:col-span-10 xl:col-span-10 flex flex-col gap-2'
+                  : 'col-span-12 lg:col-span-9 xl:col-span-10 flex flex-col gap-2'
+              }>
+                {/* Specific dedicated Views when selected from Menu */}
+                {activeOpTab === 'interfaces' && (
+                  <NetworkInterfacesView node={selectedNode} />
+                )}
 
-                {/* MIDDLE ROW: Panel 3 (Podman Containers & Pods) */}
-                <PodmanManager
-                  selectedNode={selectedNode}
-                  onOpenLogs={name => setLogsTarget(name)}
-                  onOpenExec={() => {
-                    setLogsTarget(null);
-                    setTerminalOpen(true);
-                  }}
-                  onRestartPod={handleRestartPod}
-                />
+                {activeOpTab === 'firewall' && (
+                  <FirewallView node={selectedNode} />
+                )}
 
-                {/* BOTTOM ROW 1: Panel 4 (KVM VMs) & Panel 5 (Restic Backups) */}
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
+                {activeOpTab === 'zfs' && (
+                  <ZfsManagementView node={selectedNode} />
+                )}
+
+                {activeOpTab === 'shares' && (
+                  <NetworkSharesView node={selectedNode} />
+                )}
+
+                {activeOpTab === 'vms' && (
                   <VirtualMachinesKVM
                     onOpenConsole={() => setTerminalOpen(true)}
                     onNewVM={() => setAddNodeOpen(true)}
                   />
+                )}
+
+                {activeOpTab === 'restic' && (
                   <ResticBackupPolicy
                     onIntegrityCheck={() =>
                       handleRunPlaybook('security-hardening.yml', selectedNode.tailscaleHost)
@@ -722,13 +824,238 @@ export default function App() {
                     onBrowseFiles={() => setLogsTarget('restic-repo-browser')}
                     onSnapshot={handleTriggerRestic}
                   />
-                </div>
+                )}
 
-                {/* BOTTOM ROW 2: Panel 6 (Service Users & System Identities) */}
-                <ServiceIdentitiesTable
-                  selectedNode={selectedNode}
-                  onAudit={target => setLogsTarget(target || 'pam-audit-log')}
-                />
+                {activeOpTab === 'identities' && (
+                  <ServiceIdentitiesTable
+                    selectedNode={selectedNode}
+                    onAudit={target => setLogsTarget(target || 'pam-audit-log')}
+                  />
+                )}
+
+                {/* Default Overview / Reorderable Interactive Workspace */}
+                {(activeOpTab === 'overview' || activeOpTab === 'containers') && (
+                  <div className="flex flex-col gap-2">
+                    {panelOrder.map((panelId, idx) => {
+                      if (panelId === 'telemetry_mesh') {
+                        return (
+                          <div
+                            key="telemetry_mesh"
+                            draggable
+                            onDragStart={() => handleDragStart('telemetry_mesh')}
+                            onDragOver={handleDragOver}
+                            onDrop={() => handleDrop('telemetry_mesh')}
+                            className={`rounded-lg border transition-all ${
+                              draggedPanel === 'telemetry_mesh' ? 'opacity-40 border-dashed border-[#b0c9ff]' : ''
+                            } ${highContrast ? 'border-[#313447]' : 'border-[#26293c]'}`}
+                          >
+                            <div className="bg-[#121528] px-2 py-1 flex items-center justify-between border-b border-[#26293c] text-[10px] font-mono text-[#8d909b]">
+                              <span className="flex items-center gap-1 cursor-grab active:cursor-grabbing font-bold text-[#b0c9ff]">
+                                <span className="material-symbols-outlined text-[13px]">drag_indicator</span>
+                                TELEMETRY &amp; TAILSCALE MESH (Drag to reorder)
+                              </span>
+                              <div className="flex items-center gap-1">
+                                {idx > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => movePanel('telemetry_mesh', 'up')}
+                                    className="p-0.5 hover:text-[#dfe1fa] cursor-pointer"
+                                    title="Move section up"
+                                  >
+                                    ▲
+                                  </button>
+                                )}
+                                {idx < panelOrder.length - 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => movePanel('telemetry_mesh', 'down')}
+                                    className="p-0.5 hover:text-[#dfe1fa] cursor-pointer"
+                                    title="Move section down"
+                                  >
+                                    ▼
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 p-1">
+                              <SystemHealthTelemetry telemetry={telemetry} />
+                              <TailscaleMeshCard
+                                node={selectedNode}
+                                peers={nodesList}
+                                onReauth={() => setTerminalOpen(true)}
+                                onEditNode={() => setEditNodeTarget(selectedNode)}
+                              />
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (panelId === 'containers') {
+                        return (
+                          <div
+                            key="containers"
+                            draggable
+                            onDragStart={() => handleDragStart('containers')}
+                            onDragOver={handleDragOver}
+                            onDrop={() => handleDrop('containers')}
+                            className={`rounded-lg border transition-all ${
+                              draggedPanel === 'containers' ? 'opacity-40 border-dashed border-[#b0c9ff]' : ''
+                            } ${highContrast ? 'border-[#313447]' : 'border-[#26293c]'}`}
+                          >
+                            <div className="bg-[#121528] px-2 py-1 flex items-center justify-between border-b border-[#26293c] text-[10px] font-mono text-[#8d909b]">
+                              <span className="flex items-center gap-1 cursor-grab active:cursor-grabbing font-bold text-[#d9b9ff]">
+                                <span className="material-symbols-outlined text-[13px]">drag_indicator</span>
+                                PODMAN CONTAINERS &amp; PODS (Drag to reorder)
+                              </span>
+                              <div className="flex items-center gap-1">
+                                {idx > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => movePanel('containers', 'up')}
+                                    className="p-0.5 hover:text-[#dfe1fa] cursor-pointer"
+                                    title="Move section up"
+                                  >
+                                    ▲
+                                  </button>
+                                )}
+                                {idx < panelOrder.length - 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => movePanel('containers', 'down')}
+                                    className="p-0.5 hover:text-[#dfe1fa] cursor-pointer"
+                                    title="Move section down"
+                                  >
+                                    ▼
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            <div className="p-1">
+                              <PodmanManager
+                                selectedNode={selectedNode}
+                                onOpenLogs={name => setLogsTarget(name)}
+                                onOpenExec={() => {
+                                  setLogsTarget(null);
+                                  setTerminalOpen(true);
+                                }}
+                                onRestartPod={handleRestartPod}
+                              />
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (panelId === 'vms_restic') {
+                        return (
+                          <div
+                            key="vms_restic"
+                            draggable
+                            onDragStart={() => handleDragStart('vms_restic')}
+                            onDragOver={handleDragOver}
+                            onDrop={() => handleDrop('vms_restic')}
+                            className={`rounded-lg border transition-all ${
+                              draggedPanel === 'vms_restic' ? 'opacity-40 border-dashed border-[#b0c9ff]' : ''
+                            } ${highContrast ? 'border-[#313447]' : 'border-[#26293c]'}`}
+                          >
+                            <div className="bg-[#121528] px-2 py-1 flex items-center justify-between border-b border-[#26293c] text-[10px] font-mono text-[#8d909b]">
+                              <span className="flex items-center gap-1 cursor-grab active:cursor-grabbing font-bold text-[#8cd6cb]">
+                                <span className="material-symbols-outlined text-[13px]">drag_indicator</span>
+                                VIRTUAL MACHINES &amp; RESTIC BACKUP POLICY (Drag to reorder)
+                              </span>
+                              <div className="flex items-center gap-1">
+                                {idx > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => movePanel('vms_restic', 'up')}
+                                    className="p-0.5 hover:text-[#dfe1fa] cursor-pointer"
+                                    title="Move section up"
+                                  >
+                                    ▲
+                                  </button>
+                                )}
+                                {idx < panelOrder.length - 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => movePanel('vms_restic', 'down')}
+                                    className="p-0.5 hover:text-[#dfe1fa] cursor-pointer"
+                                    title="Move section down"
+                                  >
+                                    ▼
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 p-1">
+                              <VirtualMachinesKVM
+                                onOpenConsole={() => setTerminalOpen(true)}
+                                onNewVM={() => setAddNodeOpen(true)}
+                              />
+                              <ResticBackupPolicy
+                                onIntegrityCheck={() =>
+                                  handleRunPlaybook('security-hardening.yml', selectedNode.tailscaleHost)
+                                }
+                                onBrowseFiles={() => setLogsTarget('restic-repo-browser')}
+                                onSnapshot={handleTriggerRestic}
+                              />
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (panelId === 'identities') {
+                        return (
+                          <div
+                            key="identities"
+                            draggable
+                            onDragStart={() => handleDragStart('identities')}
+                            onDragOver={handleDragOver}
+                            onDrop={() => handleDrop('identities')}
+                            className={`rounded-lg border transition-all ${
+                              draggedPanel === 'identities' ? 'opacity-40 border-dashed border-[#b0c9ff]' : ''
+                            } ${highContrast ? 'border-[#313447]' : 'border-[#26293c]'}`}
+                          >
+                            <div className="bg-[#121528] px-2 py-1 flex items-center justify-between border-b border-[#26293c] text-[10px] font-mono text-[#8d909b]">
+                              <span className="flex items-center gap-1 cursor-grab active:cursor-grabbing font-bold text-[#ffd97d]">
+                                <span className="material-symbols-outlined text-[13px]">drag_indicator</span>
+                                SERVICE USERS &amp; SYSTEM IDENTITIES (Drag to reorder)
+                              </span>
+                              <div className="flex items-center gap-1">
+                                {idx > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => movePanel('identities', 'up')}
+                                    className="p-0.5 hover:text-[#dfe1fa] cursor-pointer"
+                                    title="Move section up"
+                                  >
+                                    ▲
+                                  </button>
+                                )}
+                                {idx < panelOrder.length - 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => movePanel('identities', 'down')}
+                                    className="p-0.5 hover:text-[#dfe1fa] cursor-pointer"
+                                    title="Move section down"
+                                  >
+                                    ▼
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            <div className="p-1">
+                              <ServiceIdentitiesTable
+                                selectedNode={selectedNode}
+                                onAudit={target => setLogsTarget(target || 'pam-audit-log')}
+                              />
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      return null;
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           </div>

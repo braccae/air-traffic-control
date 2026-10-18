@@ -13,6 +13,7 @@ import {
   runNodeCommand,
 } from './src/utils/liveCluster.ts';
 import { updateNodeSettings } from './src/utils/navigationViewModel.ts';
+import { createHostCacheStore } from './src/utils/hostCacheDb.ts';
 import type { NodeItem, TelemetryData, GlobalTaskItem, ServiceUser } from './src/types/index.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -24,19 +25,31 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 
 app.use(express.json());
 
-// Live datacenter nodes initialized from real leo-banjo.ts.net tailnet tag:host inventory
-let nodes: NodeItem[] = [...LIVE_TAILNET_NODES];
+// Serve libghostty WASM binary directly so ghostty-web can always load /ghostty-vt.wasm
+app.get('/ghostty-vt.wasm', (_req, res) => {
+  res.setHeader('Content-Type', 'application/wasm');
+  res.sendFile(path.resolve(__dirname, 'node_modules/ghostty-web/ghostty-vt.wasm'));
+});
 
-// Refresh from live `tailscale status --json` on startup and periodically
+// Initialize SQLite Host Cache DB
+const dbFilePath = process.env.HOST_CACHE_DB_PATH || path.resolve(__dirname, 'data/hosts-cache.sqlite');
+const hostCache = createHostCacheStore(dbFilePath);
+
+// Seed or load persisted hosts from SQLite
+let nodes: NodeItem[] = hostCache.seedHostsIfEmpty(LIVE_TAILNET_NODES);
+
+// Refresh from live `tailscale status --json` on startup and periodically, persisting into SQLite
 refreshTailscaleNodes(nodes).then(updated => {
   nodes = updated;
+  hostCache.upsertHosts(nodes);
 });
 setInterval(async () => {
   nodes = await refreshTailscaleNodes(nodes);
+  hostCache.upsertHosts(nodes);
 }, 30000);
 
-// Group vars store (editable and persisted in backend memory)
-let groupVarsStore: Record<string, string> = {
+// Default group vars seeded into SQLite
+const DEFAULT_GROUP_VARS: Record<string, string> = {
   'group_vars/all.yml': `---
 # Ansible Global Group Vars (leo-banjo.ts.net Tailnet)
 datacenter_name: leo-banjo.ts.net
@@ -103,8 +116,7 @@ active_containers:
 `,
 };
 
-// Custom service identities added per node
-const customIdentitiesByNode = new Map<string, ServiceUser[]>();
+let groupVarsStore: Record<string, string> = hostCache.seedGroupVarsIfEmpty(DEFAULT_GROUP_VARS);
 
 let tasks: GlobalTaskItem[] = [
   {
@@ -134,9 +146,9 @@ let tasks: GlobalTaskItem[] = [
     startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
     nodeTarget: 'dev-pc.leo-banjo.ts.net',
     user: 'pants@local',
-    description: 'tailscale status --json (leo-banjo.ts.net mesh sync)',
+    description: 'SQLite host cache initialized (data/hosts-cache.sqlite)',
     progress: 100,
-    progressEta: '8 tag:host nodes discovered',
+    progressEta: '8 tag:host nodes cached in SQLite',
     status: 'OK',
     category: 'ansible',
   },
@@ -184,6 +196,9 @@ function findNode(query?: string): NodeItem {
 app.get('/api/nodes', async (req, res) => {
   if (req.query.refresh === 'true') {
     nodes = await refreshTailscaleNodes(nodes);
+    hostCache.upsertHosts(nodes);
+  } else {
+    nodes = hostCache.getAllHosts();
   }
   res.json(nodes);
 });
@@ -227,6 +242,7 @@ app.post('/api/nodes', (req, res) => {
     },
   };
   nodes.push(newNode);
+  hostCache.upsertHost(newNode);
   broadcast({ type: 'node_added', node: newNode });
   res.json({ success: true, node: newNode });
 });
@@ -256,6 +272,7 @@ app.put('/api/nodes/:id', async (req, res) => {
   }
 
   nodes[idx] = updated;
+  hostCache.upsertHost(updated);
   broadcast({ type: 'node_updated', node: updated });
   res.json({ success: true, node: updated });
 });
@@ -267,6 +284,7 @@ app.delete('/api/nodes/:id', (req, res) => {
     return;
   }
   const [removed] = nodes.splice(idx, 1);
+  hostCache.deleteHost(removed.id);
   broadcast({ type: 'node_deleted', nodeId: removed.id });
   res.json({ success: true, removed });
 });
@@ -274,21 +292,40 @@ app.delete('/api/nodes/:id', (req, res) => {
 app.get('/api/telemetry', async (req, res) => {
   const hostQuery = typeof req.query.host === 'string' ? req.query.host : undefined;
   const targetNode = findNode(hostQuery);
+  const cached = hostCache.getHostTelemetry(targetNode.id);
+  const CACHE_TTL_MS = 15000;
+
+  if (cached && req.query.refresh !== 'true' && Date.now() - cached.updatedAt < CACHE_TTL_MS) {
+    telemetry = { ...telemetry, ...cached.telemetry };
+    res.json({
+      ...telemetry,
+      node: targetNode,
+      fromCache: true,
+      cachedAt: cached.updatedAt,
+    });
+    return;
+  }
+
   const live = await fetchLiveNodeTelemetry(targetNode);
+  hostCache.upsertHostTelemetry(targetNode.id, live);
   telemetry = {
     ...telemetry,
     ...live,
   };
-  if (live.uptime) targetNode.uptime = live.uptime;
-  if (live.osDescription) targetNode.osDescription = live.osDescription;
-  res.json({ ...telemetry, node: targetNode });
+  if (live.uptime || live.osDescription) {
+    if (live.uptime) targetNode.uptime = live.uptime;
+    if (live.osDescription) targetNode.osDescription = live.osDescription;
+    hostCache.upsertHost(targetNode);
+  }
+  res.json({ ...telemetry, node: targetNode, fromCache: false, cachedAt: Date.now() });
 });
 
-app.get('/api/tasks', (req, res) => {
+app.get('/api/tasks', (_req, res) => {
   res.json(tasks);
 });
 
-app.get('/api/group-vars', (req, res) => {
+app.get('/api/group-vars', (_req, res) => {
+  groupVarsStore = hostCache.getAllGroupVars();
   res.json(groupVarsStore);
 });
 
@@ -298,13 +335,14 @@ app.put('/api/group-vars', (req, res) => {
     res.status(400).json({ error: 'file and content required' });
     return;
   }
-  groupVarsStore[file] = content;
+  hostCache.upsertGroupVar(file, content);
+  groupVarsStore = hostCache.getAllGroupVars();
   const saveTask: GlobalTaskItem = {
     id: `task-${Date.now()}`,
     startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
     nodeTarget: file,
     user: 'core@ssh-agent',
-    description: `ansible-vault encrypt & save ${file}`,
+    description: `ansible-vault encrypt & save ${file} (SQLite cached)`,
     progress: 100,
     progressEta: 'Saved (AES256)',
     status: 'OK',
@@ -319,6 +357,12 @@ app.get('/api/podman/probe', async (req, res) => {
   const hostQuery = typeof req.query.host === 'string' ? req.query.host : undefined;
   const targetNode = findNode(hostQuery);
   const sshUser = (typeof req.query.user === 'string' ? req.query.user : targetNode.sshUser) || 'core';
+
+  const cached = hostCache.getHostContainers(targetNode.id);
+  if (cached && cached.probedUsers.length > 0 && req.query.refresh !== 'true' && Date.now() - cached.updatedAt < 30000) {
+    res.json(cached.probedUsers);
+    return;
+  }
 
   // First try Go backend with host & user parameters
   const backendUrls = [
@@ -347,9 +391,15 @@ app.get('/api/podman/probe', async (req, res) => {
     }
   }
 
-  const { probedUsers } = await probeNodePodmanAndIdentities(targetNode);
-  if (probedUsers.length > 0) {
-    res.json(probedUsers);
+  const probeResult = await probeNodePodmanAndIdentities(targetNode);
+  if (probeResult.probedUsers.length > 0) {
+    hostCache.upsertHostContainers(targetNode.id, probeResult);
+    res.json(probeResult.probedUsers);
+    return;
+  }
+
+  if (cached && cached.probedUsers.length > 0) {
+    res.json(cached.probedUsers);
     return;
   }
 
@@ -358,13 +408,32 @@ app.get('/api/podman/probe', async (req, res) => {
 
 app.get('/api/nodes/:id/containers', async (req, res) => {
   const targetNode = findNode(req.params.id);
+  const cached = hostCache.getHostContainers(targetNode.id);
+  const CACHE_TTL_MS = 20000;
+
+  if (cached && req.query.refresh !== 'true' && Date.now() - cached.updatedAt < CACHE_TTL_MS) {
+    res.json({
+      node: targetNode,
+      probedUsers: cached.probedUsers,
+      identities: [...cached.customIdentities, ...cached.identities],
+      rootContainers: cached.rootContainers,
+      fromCache: true,
+      cachedAt: cached.updatedAt,
+    });
+    return;
+  }
+
   const { probedUsers, identities, rootContainers } = await probeNodePodmanAndIdentities(targetNode);
-  const customIds = customIdentitiesByNode.get(targetNode.id) || [];
+  hostCache.upsertHostContainers(targetNode.id, { probedUsers, identities, rootContainers });
+  const updatedCache = hostCache.getHostContainers(targetNode.id);
+  const customIds = updatedCache?.customIdentities || [];
   res.json({
     node: targetNode,
     probedUsers,
     identities: [...customIds, ...identities],
     rootContainers,
+    fromCache: false,
+    cachedAt: Date.now(),
   });
 });
 
@@ -378,9 +447,7 @@ app.post('/api/nodes/:id/identities', (req, res) => {
     lingerSubUid: req.body.lingerSubUid || 'Linger: Enabled',
     icon: 'deployed_code',
   };
-  const list = customIdentitiesByNode.get(targetNode.id) || [];
-  list.unshift(newIdentity);
-  customIdentitiesByNode.set(targetNode.id, list);
+  hostCache.addCustomIdentity(targetNode.id, newIdentity);
   res.json({ success: true, identity: newIdentity });
 });
 

@@ -89,13 +89,15 @@ export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
                 onChange={e => setTarget(e.target.value)}
                 className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] outline-none"
               >
-                <option value="all (14 hosts)">all (14 hosts)</option>
-                <option value="cold-war">cold-war (5 nodes)</option>
-                <option value="noodle">noodle (2 nodes)</option>
-                <option value="150 (openmediavault)">150 (openmediavault)</option>
-                <option value="153 (llama-inference)">153 (llama-inference)</option>
-                <option value="webservers">group: webservers</option>
-                <option value="db_cluster">group: db_cluster</option>
+                <option value="tag:host (8 nodes)">tag:host (8 nodes)</option>
+                <option value="likes-it-cold.leo-banjo.ts.net">likes-it-cold.leo-banjo.ts.net</option>
+                <option value="ping.leo-banjo.ts.net">ping.leo-banjo.ts.net</option>
+                <option value="dev-pc.leo-banjo.ts.net">dev-pc.leo-banjo.ts.net</option>
+                <option value="fred.leo-banjo.ts.net">fred.leo-banjo.ts.net</option>
+                <option value="the-freezer.leo-banjo.ts.net">the-freezer.leo-banjo.ts.net</option>
+                <option value="chuck.leo-banjo.ts.net">chuck.leo-banjo.ts.net</option>
+                <option value="larry.leo-banjo.ts.net">larry.leo-banjo.ts.net</option>
+                <option value="orangepizero3.leo-banjo.ts.net">orangepizero3.leo-banjo.ts.net</option>
               </select>
             </div>
 

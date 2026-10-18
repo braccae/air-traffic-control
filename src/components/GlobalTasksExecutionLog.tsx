@@ -19,31 +19,33 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
   const ansibleLogs = [
     'PLAY [Setup Homelab Cluster Services & Podman Engine] ****************************************',
     'TASK [Gathering Facts] **********************************************************************',
-    'ok: [node-150-openmediavault]',
-    'ok: [node-153-llama-inference]',
-    'ok: [node-160-ingress-traefik]',
+    'ok: [likes-it-cold.leo-banjo.ts.net]',
+    'ok: [ping.leo-banjo.ts.net]',
+    'ok: [dev-pc.leo-banjo.ts.net]',
     'TASK [podman : Verify rootless linger configuration] ****************************************',
-    'changed: [node-150-openmediavault] => {"changed": true, "msg": "loginctl enable-linger podman"}',
+    'changed: [likes-it-cold.leo-banjo.ts.net] => {"changed": true, "msg": "loginctl enable-linger core"}',
+    'changed: [ping.leo-banjo.ts.net] => {"changed": true, "msg": "loginctl enable-linger uosserver"}',
     'TASK [restic : Ensure immutable gold retention policy] **************************************',
-    'ok: [node-150-openmediavault] => {"mode": "immutable", "retention": "7d/4w/12m"}',
+    'ok: [likes-it-cold.leo-banjo.ts.net] => {"mode": "immutable", "retention": "7d/4w/12m"}',
     'TASK [tailscale : Verify mesh routing & exit advertisement] *********************************',
-    'ok: [node-150-openmediavault] => {"advertised": "192.168.1.0/24", "status": "online"}',
+    'ok: [likes-it-cold.leo-banjo.ts.net] => {"advertised": "192.168.8.0/24", "status": "online"}',
     'PLAY RECAP **********************************************************************************',
-    'node-150-openmediavault   : ok=14   changed=2    unreachable=0    failed=0',
+    'likes-it-cold.leo-banjo.ts.net : ok=14   changed=1    unreachable=0    failed=0',
+    'ping.leo-banjo.ts.net          : ok=12   changed=1    unreachable=0    failed=0',
   ];
 
   const syslogLogs = [
-    'May 14 10:28:44 the-freezer systemd[1]: Started Cockpit Web Service Session ws-tunnel.',
-    'May 14 10:28:40 the-freezer kernel: [59218.412] nvidia-gpu: PCIe BAR0 remap OK, CUDA 12.4 init.',
-    'May 14 10:28:35 the-freezer restic[19482]: snapshot f7a91b2e saved to s3://restic-homelab-vault',
-    'May 14 10:28:30 the-freezer podman[8412]: pod media-stack health check passed for 3 containers',
-    'May 14 10:28:22 the-freezer tailscaled[1104]: mesh: peer cold-war latency 1.2ms (direct)',
+    'Oct 18 02:15:44 likes-it-cold systemd[1]: Started Cockpit Web Service Session ws-tunnel.',
+    'Oct 18 02:15:40 likes-it-cold podman[4182]: container c9603dec9010 (uosserver) health check: PASSED',
+    'Oct 18 02:15:35 likes-it-cold restic[19482]: snapshot f7a91b2e saved to s3://restic-homelab-vault/leo-banjo',
+    'Oct 18 02:15:30 ping systemd[1]: uosserver.service: Active rootless pod (UID 1001)',
+    'Oct 18 02:15:22 dev-pc tailscaled[1104]: mesh: peer likes-it-cold latency 1.8ms (direct WireGuard)',
   ];
 
   const vaultLogs = [
-    '2025-05-14 10:24:50 [AUDIT] root@pam authenticated with GSSAPI ticket',
-    '2025-05-14 10:24:50 [VAULT] Decrypted group_vars/all.yml using AES-256 cipher (Ansible Key ID: 0x8F)',
-    '2025-05-14 10:20:12 [AUDIT] Token generated for cockpit-bridge session (ttl: 3600s)',
+    '2026-10-18 02:10:50 [AUDIT] root@pam authenticated with GSSAPI ticket',
+    '2026-10-18 02:10:50 [VAULT] Decrypted group_vars/all.yml using AES-256 cipher (SQLite cache sync)',
+    '2026-10-18 02:05:12 [AUDIT] Token generated for cockpit-bridge session (ttl: 3600s)',
   ];
 
   return (
@@ -126,6 +128,19 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             <span className="w-1.5 h-1.5 rounded-full bg-[#8cd6cb] animate-ping"></span>
             Autorefresh 3s
           </span>
+
+          {/* Quick Playbook Launch Button */}
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('ansible');
+              setIsCollapsed(false);
+            }}
+            className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded font-mono text-[10px] cursor-pointer border border-[#434750]/30 hidden sm:inline-flex items-center gap-1"
+          >
+            <span className="material-symbols-outlined text-[13px]">play_arrow</span>
+            <span>Ansible Stream</span>
+          </button>
 
           {/* Expand / Minimize buttons */}
           <button

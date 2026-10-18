@@ -14,13 +14,12 @@ export const TopSubNav: React.FC<TopSubNavProps> = ({
   clusterRam = '42.1 / 128 GB',
 }) => {
   const tabs = [
-    { id: 'summary', label: 'Summary' },
-    { id: 'playbooks', label: 'Playbooks' },
+    { id: 'summary', label: 'Cluster Summary' },
+    { id: 'playbooks', label: 'Ansible Playbooks' },
     { id: 'group_vars', label: 'Group Vars & Vault' },
-    { id: 'hardware_net', label: 'Hardware & Net' },
-    { id: 'storage_pools', label: 'Storage Pools' },
-    { id: 'firewall', label: 'Firewall' },
-    { id: 'xterm_console', label: 'xterm.js Console' },
+    { id: 'mesh', label: 'Tailscale Mesh Status' },
+    { id: 'task_queue', label: 'Ansible Task Queue' },
+    { id: 'xterm_console', label: 'Host Terminal (libghostty)' },
   ];
 
   return (

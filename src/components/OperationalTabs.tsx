@@ -9,17 +9,17 @@ export const OperationalTabs: React.FC<OperationalTabsProps> = ({
   activeTab,
   onSelectTab,
 }) => {
-  const tabs = [
-    { id: 'overview', label: 'Overview', icon: 'space_dashboard' },
-    { id: 'services', label: 'Services & Daemons', icon: 'mobile_arrow_right' },
-    { id: 'containers', label: 'Podman Containers & Pods (12)', icon: 'deployed_code' },
-    { id: 'vms', label: 'Virtual Machines (2 KVM)', icon: 'laptop_mac' },
-    { id: 'storage', label: 'Storage & ZFS Pools', icon: 'hard_drive' },
-    { id: 'networking', label: 'Networking & Tailscale', icon: 'hub' },
+  const tabs: Array<{ id: string; label: string; icon: string; badge?: string }> = [
+    { id: 'overview', label: 'Overview & Telemetry', icon: 'space_dashboard' },
+    { id: 'containers', label: 'Containers & Pods', icon: 'deployed_code' },
+    { id: 'vms', label: 'Virtual Machines (KVM)', icon: 'laptop_mac' },
+    { id: 'interfaces', label: 'Network Interfaces', icon: 'cable' },
+    { id: 'firewall', label: 'Firewall (nftables)', icon: 'security' },
+    { id: 'zfs', label: 'ZFS Storage & Pools', icon: 'inventory_2' },
+    { id: 'shares', label: 'NFS & Samba Shares', icon: 'share' },
     { id: 'restic', label: 'Restic Backups', icon: 'cloud_sync' },
-    { id: 'accounts', label: 'Accounts & PAM', icon: 'manage_accounts' },
-    { id: 'updates', label: 'Updates', icon: 'system_update_alt', badge: '3' },
-    { id: 'logs', label: 'Kernel Logs', icon: 'notes' },
+    { id: 'identities', label: 'Service Users & PAM', icon: 'manage_accounts' },
+    { id: 'logs', label: 'System Logs (dmesg)', icon: 'notes' },
   ];
 
   return (

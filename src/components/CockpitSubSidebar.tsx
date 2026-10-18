@@ -83,11 +83,15 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
             <button
               type="button"
               onClick={() => onSelectItem('zfs')}
-              className="w-full flex items-center justify-between px-2 py-1 rounded text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa] font-mono text-xs cursor-pointer"
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+                activeItem === 'zfs'
+                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+              }`}
             >
               <span className="flex items-center gap-1.5">
                 <span className="material-symbols-outlined text-[14px]">inventory_2</span>
-                <span>ZFS Pools (tank0)</span>
+                <span>ZFS Pools</span>
               </span>
               <span className="font-mono text-[10px] text-[#8cd6cb]">ONLINE</span>
             </button>
@@ -95,25 +99,33 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
             <button
               type="button"
               onClick={() => onSelectItem('shares')}
-              className="w-full flex items-center justify-between px-2 py-1 rounded text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa] font-mono text-xs cursor-pointer"
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+                activeItem === 'shares'
+                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+              }`}
             >
               <span className="flex items-center gap-1.5">
                 <span className="material-symbols-outlined text-[14px]">share</span>
                 <span>NFS &amp; SMB Shares</span>
               </span>
-              <span className="font-mono text-[10px] text-[#8d909b]">6 export</span>
+              <span className="font-mono text-[10px] text-[#8d909b]">Active</span>
             </button>
 
             <button
               type="button"
               onClick={() => onSelectItem('smart')}
-              className="w-full flex items-center justify-between px-2 py-1 rounded text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa] font-mono text-xs cursor-pointer"
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+                activeItem === 'smart'
+                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+              }`}
             >
               <span className="flex items-center gap-1.5">
                 <span className="material-symbols-outlined text-[14px]">disc_full</span>
                 <span>Disks &amp; SMART</span>
               </span>
-              <span className="font-mono text-[10px] text-[#8cd6cb]">8/8 PASSED</span>
+              <span className="font-mono text-[10px] text-[#8cd6cb]">PASSED</span>
             </button>
           </nav>
         </div>
@@ -127,7 +139,11 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
             <button
               type="button"
               onClick={() => onSelectItem('interfaces')}
-              className="w-full flex items-center justify-between px-2 py-1 rounded text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa] font-mono text-xs cursor-pointer"
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+                activeItem === 'interfaces'
+                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+              }`}
             >
               <span className="flex items-center gap-1.5">
                 <span className="material-symbols-outlined text-[14px]">cable</span>
@@ -139,19 +155,27 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
             <button
               type="button"
               onClick={() => onSelectItem('firewall')}
-              className="w-full flex items-center justify-between px-2 py-1 rounded text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa] font-mono text-xs cursor-pointer"
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+                activeItem === 'firewall'
+                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+              }`}
             >
               <span className="flex items-center gap-1.5">
                 <span className="material-symbols-outlined text-[14px]">security</span>
                 <span>Firewall (nftables)</span>
               </span>
-              <span className="font-mono text-[10px] text-[#8d909b]">ENFORCED</span>
+              <span className="font-mono text-[10px] text-[#8cd6cb]">ENFORCED</span>
             </button>
 
             <button
               type="button"
               onClick={() => onSelectItem('tailscale')}
-              className="w-full flex items-center justify-between px-2 py-1 rounded bg-[#313447]/40 text-[#dfe1fa] font-mono text-xs cursor-pointer"
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+                activeItem === 'tailscale'
+                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+              }`}
             >
               <span className="flex items-center gap-1.5">
                 <span className="material-symbols-outlined text-[14px] text-[#8cd6cb]">vpn_lock</span>
@@ -171,37 +195,33 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
             <button
               type="button"
               onClick={() => onSelectItem('pods')}
-              className="w-full flex items-center justify-between px-2 py-1 rounded text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa] font-mono text-xs cursor-pointer"
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+                activeItem === 'pods' || activeItem === 'containers'
+                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+              }`}
             >
               <span className="flex items-center gap-1.5">
                 <span className="material-symbols-outlined text-[14px] text-[#d9b9ff]">token</span>
-                <span>Podman Pods</span>
+                <span>Podman &amp; Pods</span>
               </span>
-              <span className="font-mono text-[10px] text-[#d9b9ff] font-bold">3 pods</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onSelectItem('containers')}
-              className="w-full flex items-center justify-between px-2 py-1 rounded text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa] font-mono text-xs cursor-pointer"
-            >
-              <span className="flex items-center gap-1.5">
-                <span className="material-symbols-outlined text-[14px] text-[#b0c9ff]">deployed_code</span>
-                <span>Containers</span>
-              </span>
-              <span className="font-mono text-[10px] text-[#8cd6cb]">11 Up / 1 Stp</span>
+              <span className="font-mono text-[10px] text-[#d9b9ff] font-bold">Containers</span>
             </button>
 
             <button
               type="button"
               onClick={() => onSelectItem('vms')}
-              className="w-full flex items-center justify-between px-2 py-1 rounded text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa] font-mono text-xs cursor-pointer"
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+                activeItem === 'vms'
+                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+              }`}
             >
               <span className="flex items-center gap-1.5">
-                <span className="material-symbols-outlined text-[14px] text-[#b0c9ff]">qr_code_2</span>
+                <span className="material-symbols-outlined text-[14px] text-[#b0c9ff]">laptop_mac</span>
                 <span>Virtual Machines</span>
               </span>
-              <span className="font-mono text-[10px] text-[#8d909b]">2 KVM</span>
+              <span className="font-mono text-[10px] text-[#8cd6cb]">KVM/QEMU</span>
             </button>
           </nav>
         </div>
@@ -215,25 +235,17 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
             <button
               type="button"
               onClick={() => onSelectItem('restic')}
-              className="w-full flex items-center justify-between px-2 py-1 rounded text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa] font-mono text-xs cursor-pointer"
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+                activeItem === 'restic'
+                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+              }`}
             >
               <span className="flex items-center gap-1.5">
                 <span className="material-symbols-outlined text-[14px] text-[#8cd6cb]">cloud_done</span>
                 <span>Restic Snapshots</span>
               </span>
               <span className="font-mono text-[10px] text-[#8cd6cb]">GOLD</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onSelectItem('policy')}
-              className="w-full flex items-center justify-between px-2 py-1 rounded text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa] font-mono text-xs cursor-pointer"
-            >
-              <span className="flex items-center gap-1.5">
-                <span className="material-symbols-outlined text-[14px]">policy</span>
-                <span>Datacenter Policy</span>
-              </span>
-              <span className="font-mono text-[10px] text-[#8d909b]">Immutable</span>
             </button>
           </nav>
         </div>
