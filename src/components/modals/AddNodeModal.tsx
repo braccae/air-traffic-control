@@ -14,14 +14,15 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
   onAddNode,
 }) => {
   const [name, setName] = useState('');
-  const [group, setGroup] = useState('cold-war');
+  const [group, setGroup] = useState('tag:host');
   const [nodeType, setNodeType] = useState<NodeType>('linux');
   const [ip, setIp] = useState('');
   const [port, setPort] = useState(22);
+  const [sshUser, setSshUser] = useState('core');
   const [tailscaleIp, setTailscaleIp] = useState('');
   const [tailscaleHost, setTailscaleHost] = useState('');
-  const [osDescription, setOsDescription] = useState('Debian GNU/Linux 12');
-  const [authMethod, setAuthMethod] = useState('ssh-ed25519');
+  const [osDescription, setOsDescription] = useState('AlmaLinux 10.2 (Lavender Lion)');
+  const [authMethod, setAuthMethod] = useState('ssh-ed25519 (ssh-agent)');
   const [vcpus, setVcpus] = useState(8);
   const [ramGiB, setRamGiB] = useState(16);
 
@@ -35,11 +36,13 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
       buildProvisionedNode({
         name,
         group,
-        datacenter: 'homelab-dc1',
+        datacenter: 'leo-banjo.ts.net',
         nodeType,
-        ip: ip || '192.168.1.180',
+        ip: ip || '192.168.8.180',
         port,
-        tailscaleIp: tailscaleIp || '100.97.159.180',
+        sshUser,
+        authMethod,
+        tailscaleIp: tailscaleIp || '100.100.100.180',
         tailscaleHost,
         osDescription,
         specs: {
@@ -143,7 +146,7 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
           </div>
 
           {/* Node Name & Group */}
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             <div>
               <label className="block text-[#8d909b] mb-1">NODE NAME / IDENTIFIER</label>
               <input
@@ -151,20 +154,30 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
                 required
                 value={name}
                 onChange={e => setName(e.target.value)}
-                placeholder="e.g. 155 (docker-prod)"
+                placeholder="e.g. likes-it-cold"
                 className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#b0c9ff] outline-none"
               />
             </div>
             <div>
-              <label className="block text-[#8d909b] mb-1">ANSIBLE INVENTORY GROUP</label>
+              <label className="block text-[#8d909b] mb-1">SSH USER</label>
+              <input
+                type="text"
+                value={sshUser}
+                onChange={e => setSshUser(e.target.value)}
+                placeholder="core"
+                className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#8cd6cb] font-bold focus:border-[#b0c9ff] outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-[#8d909b] mb-1">TAILSCALE / ANSIBLE GROUP</label>
               <select
                 value={group}
                 onChange={e => setGroup(e.target.value)}
                 className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#b0c9ff] outline-none"
               >
-                <option value="cold-war">cold-war (Datacenter Nodes)</option>
-                <option value="noodle">noodle (Secondary Cluster)</option>
-                <option value="edge">edge (Remote Gateways)</option>
+                <option value="tag:host">tag:host (Container Hosts)</option>
+                <option value="tag:pve">tag:pve (Proxmox Hypervisors)</option>
+                <option value="tag:service">tag:service (Mesh Services)</option>
               </select>
             </div>
           </div>

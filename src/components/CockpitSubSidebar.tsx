@@ -5,12 +5,14 @@ interface CockpitSubSidebarProps {
   node: NodeItem;
   activeItem: string;
   onSelectItem: (item: string) => void;
+  onEditNode?: () => void;
 }
 
 export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
   node,
   activeItem,
   onSelectItem,
+  onEditNode,
 }) => {
   return (
     <aside className="col-span-12 lg:col-span-3 xl:col-span-2 flex flex-col gap-2">
@@ -239,9 +241,20 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
 
       {/* Quick Node Spec Snapshot Card */}
       <div className="bg-[#171a2d] rounded p-2.5 flex flex-col gap-1.5 border border-[#26293c]">
-        <span className="font-mono text-[10px] uppercase tracking-wider text-[#8d909b] font-bold">
-          CHASSIS &amp; MOTHERBOARD
-        </span>
+        <div className="flex items-center justify-between">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-[#8d909b] font-bold">
+            CHASSIS &amp; MOTHERBOARD
+          </span>
+          {onEditNode && (
+            <button
+              type="button"
+              onClick={onEditNode}
+              className="text-[10px] font-mono text-[#b0c9ff] hover:underline cursor-pointer"
+            >
+              Edit Specs
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <span className="material-symbols-outlined text-[#b0c9ff] text-[20px]">developer_board</span>
           <div className="flex flex-col min-w-0">

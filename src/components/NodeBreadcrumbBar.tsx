@@ -7,6 +7,7 @@ interface NodeBreadcrumbBarProps {
   onTriggerRestic: () => void;
   onReboot: (mode: string) => void;
   onPowerOff: () => void;
+  onEditNode?: () => void;
 }
 
 export const NodeBreadcrumbBar: React.FC<NodeBreadcrumbBarProps> = ({
@@ -15,6 +16,7 @@ export const NodeBreadcrumbBar: React.FC<NodeBreadcrumbBarProps> = ({
   onTriggerRestic,
   onReboot,
   onPowerOff,
+  onEditNode,
 }) => {
   const [rebootDropdownOpen, setRebootDropdownOpen] = useState(false);
 
@@ -24,7 +26,7 @@ export const NodeBreadcrumbBar: React.FC<NodeBreadcrumbBarProps> = ({
       <div className="flex items-center gap-2 min-w-0">
         <span className="material-symbols-outlined text-[#b0c9ff] text-[18px]">dns</span>
         <div className="flex items-center gap-1 font-mono text-xs truncate">
-          <span className="text-[#8d909b]">Datacenter</span>
+          <span className="text-[#8d909b]">{node.datacenter || 'leo-banjo.ts.net'}</span>
           <span className="text-[#434750]">/</span>
           <span className="text-[#d9b9ff] font-medium">{node.group}</span>
           <span className="text-[#434750]">/</span>
@@ -37,12 +39,26 @@ export const NodeBreadcrumbBar: React.FC<NodeBreadcrumbBarProps> = ({
         {/* Tailscale Badge with pulse */}
         <div className="flex items-center gap-1 px-2 py-0.5 bg-[#313447] rounded text-[#8cd6cb] font-mono text-[11px] border border-[#434750]/50">
           <span className="w-1.5 h-1.5 rounded-full bg-[#8cd6cb] animate-pulse"></span>
-          <span>Tailscale: {node.tailscaleIp}</span>
+          <span>
+            {node.sshUser || 'core'}@{node.tailscaleIp}
+          </span>
         </div>
       </div>
 
       {/* Quick Operational Controls */}
       <div className="flex items-center gap-1.5">
+        {/* Edit Node Settings button */}
+        {onEditNode && (
+          <button
+            type="button"
+            onClick={onEditNode}
+            className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#d9b9ff] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
+          >
+            <span className="material-symbols-outlined text-[14px]">tune</span>
+            <span>Edit Settings</span>
+          </button>
+        )}
+
         {/* Reboot with dropdown */}
         <div className="relative inline-block text-left">
           <button
@@ -124,15 +140,6 @@ export const NodeBreadcrumbBar: React.FC<NodeBreadcrumbBarProps> = ({
         >
           <span className="material-symbols-outlined text-[14px]">camera</span>
           <span>Restic Snapshot Now</span>
-        </button>
-
-        {/* Lock Cockpit Session */}
-        <button
-          type="button"
-          title="Lock Cockpit Session"
-          className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#c3c6d2] px-2 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
-        >
-          <span className="material-symbols-outlined text-[14px]">lock</span>
         </button>
       </div>
     </div>

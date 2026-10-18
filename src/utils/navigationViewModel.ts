@@ -26,6 +26,61 @@ export function groupNodesByCluster(nodes: NodeItem[]): {
   return { coldWar, noodle, other };
 }
 
+export interface ClusterNodeGroup {
+  group: string;
+  nodes: NodeItem[];
+}
+
+export function groupNodesByDynamicCluster(nodes: NodeItem[]): ClusterNodeGroup[] {
+  const byGroup = new Map<string, NodeItem[]>();
+  for (const node of nodes) {
+    const grp = node.group || 'tag:host';
+    const list = byGroup.get(grp) || [];
+    list.push(node);
+    byGroup.set(grp, list);
+  }
+  return Array.from(byGroup.entries()).map(([group, groupNodes]) => ({
+    group,
+    nodes: groupNodes,
+  }));
+}
+
+export function buildHostGroupPills(nodes: NodeItem[]): Array<{ id: string; name: string }> {
+  const counts = new Map<string, number>();
+  for (const node of nodes) {
+    const grp = node.group || 'tag:host';
+    counts.set(grp, (counts.get(grp) || 0) + 1);
+  }
+
+  const pills: Array<{ id: string; name: string }> = [
+    { id: 'all', name: `all: ${nodes.length}` },
+  ];
+
+  for (const [grp, count] of counts.entries()) {
+    pills.push({ id: grp, name: `${grp}: ${count}` });
+  }
+  return pills;
+}
+
+export function updateNodeSettings(existing: NodeItem, updates: Partial<NodeItem>): NodeItem {
+  const nextName = updates.name !== undefined ? updates.name.trim() || existing.name : existing.name;
+  const nextShortName =
+    updates.shortName !== undefined
+      ? updates.shortName.trim() || nextName.split(' ')[0]
+      : nextName.split(' ')[0];
+
+  return {
+    ...existing,
+    ...updates,
+    name: nextName,
+    shortName: nextShortName,
+    specs: {
+      ...existing.specs,
+      ...(updates.specs || {}),
+    },
+  };
+}
+
 export function buildProvisionedNode(
   input: Partial<NodeItem>,
   idSuffix?: string | number
@@ -53,13 +108,18 @@ export function buildProvisionedNode(
     id,
     name,
     shortName,
-    group: input.group || 'cold-war',
-    datacenter: input.datacenter || 'homelab-dc1',
+    group: input.group || 'tag:host',
+    datacenter: input.datacenter || 'leo-banjo.ts.net',
     nodeType,
     badge: input.badge,
     badgeColor: input.badgeColor,
     ip: input.ip || '192.168.1.180',
     port: input.port || 22,
+    sshUser: input.sshUser || 'core',
+    authMethod: input.authMethod || 'ssh-ed25519',
+    tags: input.tags || [input.group || 'tag:host'],
+    sshConnected: input.sshConnected,
+    rttMs: input.rttMs,
     tailscaleIp: input.tailscaleIp || '100.97.159.180',
     tailscaleHost,
     osDescription: input.osDescription || 'Linux (SSH)',
@@ -91,6 +151,6 @@ export function resolveNodeIcon(node: NodeItem): string {
   if (node.badge === 'K3S' || node.nodeType === 'k3s') return 'lan';
   if (node.badge === 'PBS' || node.nodeType === 'pbs') return 'storage';
   if (node.name.toLowerCase().includes('postgres')) return 'database';
-  if (node.group === 'noodle') return 'router';
+  if (node.group === 'noodle' || node.group === 'tag:pve') return 'router';
   return 'dns';
 }

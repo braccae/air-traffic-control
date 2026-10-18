@@ -17,332 +17,356 @@ import { GlobalTasksExecutionLog } from './components/GlobalTasksExecutionLog.ts
 // Modals
 import { TerminalModal } from './components/modals/TerminalModal.tsx';
 import { AddNodeModal } from './components/modals/AddNodeModal.tsx';
+import { EditNodeModal } from './components/modals/EditNodeModal.tsx';
 import { RunPlaybookModal } from './components/modals/RunPlaybookModal.tsx';
 import { ContainerLogsModal } from './components/modals/ContainerLogsModal.tsx';
 import { RebootConfirmModal } from './components/modals/RebootConfirmModal.tsx';
 import { SearchModal } from './components/modals/SearchModal.tsx';
 import { GroupVarsModal } from './components/modals/GroupVarsModal.tsx';
+import { updateNodeSettings } from './utils/navigationViewModel.ts';
 
 const initialNodes: NodeItem[] = [
   {
-    id: 'node-150-openmediavault',
-    name: '150 (openmediavault)',
-    shortName: '150',
-    group: 'cold-war',
-    datacenter: 'homelab-dc1',
+    id: 'node-likes-it-cold',
+    name: 'likes-it-cold',
+    shortName: 'likes-it-cold',
+    group: 'tag:host',
+    datacenter: 'leo-banjo.ts.net',
     nodeType: 'linux',
     badge: 'SSH',
-    badgeColor: 'text-[#8d909b]',
-    ip: '192.168.1.150',
+    badgeColor: 'text-[#8cd6cb]',
+    ip: '192.168.8.249',
     port: 22,
-    tailscaleIp: '100.97.159.101',
-    tailscaleHost: 'the-freezer.ts.net',
-    osDescription: 'AlmaLinux 10.2 / Debian 12',
+    sshUser: 'core',
+    authMethod: 'ssh-ed25519 (ssh-agent)',
+    tags: ['tag:host'],
+    sshConnected: true,
+    rttMs: '1.8ms',
+    tailscaleIp: '100.105.71.49',
+    tailscaleHost: 'likes-it-cold.leo-banjo.ts.net',
+    osDescription: 'AlmaLinux 10.2 (Lavender Lion)',
     status: 'online',
-    uptime: '16h 44m',
+    uptime: '2d 18h',
     hasGlances: true,
     hasCockpit: true,
     hasPodman: true,
     hasRestic: true,
     specs: {
-      cpu: 'Intel Core i9-13900K',
-      vcpus: 16,
-      ramGiB: 64,
-      motherboard: 'ASUS Pro WS W680-ACE',
-      bios: '3401 (03/24/2024)',
-      ipmi: '192.168.1.50',
+      cpu: 'AMD EPYC / x86_64 Host',
+      vcpus: 8,
+      ramGiB: 16,
+      motherboard: 'Proxmox / KVM Guest (QEMU Standard PC)',
+      bios: 'OVMF UEFI',
+      ipmi: 'Proxmox API',
       ecc: 'Active',
-      secureBoot: 'Disabled',
-      iommu: 'Enabled',
-    },
-  },
-  {
-    id: 'node-151-proxmox-backup-server',
-    name: '151 (proxmox-backup)',
-    shortName: '151',
-    group: 'cold-war',
-    datacenter: 'homelab-dc1',
-    nodeType: 'pbs',
-    badge: 'PBS',
-    badgeColor: 'text-[#8d909b]',
-    ip: '192.168.1.151',
-    port: 22,
-    tailscaleIp: '100.97.159.102',
-    tailscaleHost: 'pbs-backup.ts.net',
-    osDescription: 'Proxmox Backup Server 3.1-4',
-    status: 'online',
-    uptime: '84d 10h',
-    hasGlances: true,
-    hasCockpit: true,
-    hasPodman: false,
-    hasRestic: true,
-    specs: {
-      cpu: 'AMD EPYC 7302P',
-      vcpus: 16,
-      ramGiB: 128,
-      motherboard: 'Supermicro H11SSL-i',
-      bios: '2.5',
-      ipmi: '192.168.1.51',
-      ecc: 'Active Registered',
       secureBoot: 'Enabled',
       iommu: 'Enabled',
     },
   },
   {
-    id: 'node-152-apt-cacher-ng',
-    name: '152 (apt-cacher-ng)',
-    shortName: '152',
-    group: 'cold-war',
-    datacenter: 'homelab-dc1',
-    nodeType: 'lxc',
-    badge: 'LXC',
-    badgeColor: 'text-[#8d909b]',
-    ip: '192.168.1.152',
+    id: 'node-ping',
+    name: 'ping',
+    shortName: 'ping',
+    group: 'tag:host',
+    datacenter: 'leo-banjo.ts.net',
+    nodeType: 'linux',
+    badge: 'SSH',
+    badgeColor: 'text-[#8cd6cb]',
+    ip: '100.73.87.87',
     port: 22,
-    tailscaleIp: '100.97.159.103',
-    tailscaleHost: 'cacher-lxc.ts.net',
-    osDescription: 'Debian Bookworm 12 (LXC)',
+    sshUser: 'core',
+    authMethod: 'ssh-ed25519 (ssh-agent)',
+    tags: ['tag:host'],
+    sshConnected: true,
+    rttMs: '2.1ms',
+    tailscaleIp: '100.73.87.87',
+    tailscaleHost: 'ping.leo-banjo.ts.net',
+    osDescription: 'AlmaLinux 10.2 (Lavender Lion)',
     status: 'online',
-    uptime: '12d 6h',
+    uptime: '3d 18h',
     hasGlances: true,
     hasCockpit: true,
     hasPodman: true,
     hasRestic: true,
     specs: {
-      cpu: 'Shared Core Allocation',
+      cpu: 'Intel(R) Core(TM) i5-6500 CPU @ 3.20GHz',
+      vcpus: 4,
+      ramGiB: 8,
+      motherboard: 'Dell Inc. OptiPlex / Skylake',
+      bios: 'UEFI 2.7',
+      ipmi: 'Intel AMT',
+      ecc: 'Non-ECC',
+      secureBoot: 'Enabled',
+      iommu: 'Enabled (VT-d)',
+    },
+  },
+  {
+    id: 'node-dev-pc',
+    name: 'dev-pc (local)',
+    shortName: 'dev-pc',
+    group: 'tag:host',
+    datacenter: 'leo-banjo.ts.net',
+    nodeType: 'linux',
+    badge: 'LOCAL',
+    badgeColor: 'text-[#b0c9ff]',
+    ip: '127.0.0.1',
+    port: 22,
+    sshUser: 'pants',
+    authMethod: 'local-socket / ssh-agent',
+    tags: ['tag:admin', 'tag:host'],
+    sshConnected: true,
+    rttMs: '0.1ms',
+    tailscaleIp: '100.97.159.101',
+    tailscaleHost: 'dev-pc.leo-banjo.ts.net',
+    osDescription: 'CachyOS Linux (6.19.11-1-cachyos)',
+    status: 'online',
+    uptime: '1d 22h',
+    hasGlances: true,
+    hasCockpit: true,
+    hasPodman: true,
+    hasRestic: true,
+    specs: {
+      cpu: 'AMD Ryzen 5 5600X 6-Core Processor',
+      vcpus: 12,
+      ramGiB: 32,
+      motherboard: 'AM4 Workstation',
+      bios: 'AGESA ComboV2',
+      ipmi: 'Local Bus',
+      ecc: 'Non-ECC',
+      secureBoot: 'Disabled',
+      iommu: 'Enabled (AMD-Vi)',
+    },
+  },
+  {
+    id: 'node-fred',
+    name: 'fred',
+    shortName: 'fred',
+    group: 'tag:host',
+    datacenter: 'leo-banjo.ts.net',
+    nodeType: 'linux',
+    badge: 'TS-SSH',
+    badgeColor: 'text-[#8cd6cb]',
+    ip: '100.100.173.57',
+    port: 22,
+    sshUser: 'root',
+    authMethod: 'tailscale-ssh',
+    tags: ['tag:host'],
+    sshConnected: true,
+    rttMs: '3.4ms',
+    tailscaleIp: '100.100.173.57',
+    tailscaleHost: 'fred.leo-banjo.ts.net',
+    osDescription: 'Debian GNU/Linux 13 (trixie)',
+    status: 'online',
+    uptime: '37d 04h',
+    hasGlances: true,
+    hasCockpit: true,
+    hasPodman: true,
+    hasRestic: true,
+    specs: {
+      cpu: 'Common KVM processor',
       vcpus: 4,
       ramGiB: 4,
-      motherboard: 'Containerized cgroup v2',
-      bios: 'LXC Runtime',
-      ipmi: 'N/A',
-      ecc: 'Active',
-      secureBoot: 'Host Dependent',
+      motherboard: 'QEMU Standard PC',
+      bios: 'SeaBIOS',
+      ipmi: 'Proxmox VE',
+      ecc: 'Host Managed',
+      secureBoot: 'Disabled',
       iommu: 'N/A',
     },
   },
   {
-    id: 'node-153-llama-inference-box',
-    name: '153 (llama-inference)',
-    shortName: '153',
-    group: 'cold-war',
-    datacenter: 'homelab-dc1',
+    id: 'node-the-freezer',
+    name: 'the-freezer',
+    shortName: 'the-freezer',
+    group: 'tag:host',
+    datacenter: 'leo-banjo.ts.net',
     nodeType: 'linux',
-    badge: 'GPU',
+    badge: 'MGR',
     badgeColor: 'text-[#d9b9ff]',
-    ip: '192.168.1.153',
+    ip: '192.168.8.3',
     port: 22,
-    tailscaleIp: '100.97.159.104',
-    tailscaleHost: 'inference-ai.ts.net',
-    osDescription: 'Ubuntu 24.04 LTS (NVIDIA CUDA 12.4)',
+    sshUser: 'core',
+    authMethod: 'ssh-ed25519 (ssh-agent)',
+    tags: ['tag:host', 'tag:manager'],
+    sshConnected: false,
+    rttMs: '1.5ms',
+    tailscaleIp: '100.115.75.78',
+    tailscaleHost: 'the-freezer.leo-banjo.ts.net',
+    osDescription: 'Linux (Tailscale Mesh Node)',
     status: 'online',
-    uptime: '3d 21h',
+    uptime: '14d 08h',
     hasGlances: true,
     hasCockpit: true,
     hasPodman: true,
     hasRestic: true,
     specs: {
-      cpu: 'AMD Ryzen 9 7950X',
-      vcpus: 32,
-      ramGiB: 64,
-      motherboard: 'ASRock Rack B650D4U',
-      bios: '8.02',
-      ipmi: '192.168.1.53',
-      ecc: 'Active ECC UDIMM',
-      secureBoot: 'Disabled',
-      iommu: 'Enabled',
-    },
-  },
-  {
-    id: 'node-154-k3s-master-01',
-    name: '154 (k3s-master-01)',
-    shortName: '154',
-    group: 'cold-war',
-    datacenter: 'homelab-dc1',
-    nodeType: 'k3s',
-    badge: 'K3S',
-    badgeColor: 'text-[#b0c9ff]',
-    ip: '192.168.1.154',
-    port: 22,
-    tailscaleIp: '100.97.159.105',
-    tailscaleHost: 'k3s-ctrl.ts.net',
-    osDescription: 'Alpine Linux 3.19 (K3s v1.29.3)',
-    status: 'online',
-    uptime: '45d 02h',
-    hasGlances: true,
-    hasCockpit: true,
-    hasPodman: true,
-    hasRestic: true,
-    specs: {
-      cpu: 'Intel Xeon E-2388G',
+      cpu: 'x86_64 Server Platform',
       vcpus: 8,
-      ramGiB: 32,
-      motherboard: 'Supermicro X12STL-F',
-      bios: '1.4b',
-      ipmi: '192.168.1.54',
-      ecc: 'Active ECC',
-      secureBoot: 'Enabled',
-      iommu: 'Enabled',
-    },
-  },
-  {
-    id: 'node-160-ingress-traefik',
-    name: '160 (ingress-traefik)',
-    shortName: '160',
-    group: 'noodle',
-    datacenter: 'homelab-dc1',
-    nodeType: 'linux',
-    ip: '192.168.1.160',
-    port: 22,
-    tailscaleIp: '100.97.159.106',
-    tailscaleHost: 'traefik-gw.ts.net',
-    osDescription: 'Debian GNU/Linux 12 (bookworm)',
-    status: 'online',
-    uptime: '110d 14h',
-    hasGlances: true,
-    hasCockpit: true,
-    hasPodman: true,
-    hasRestic: true,
-    specs: {
-      cpu: 'Intel Core i5-12500',
-      vcpus: 6,
       ramGiB: 16,
-      motherboard: 'ASUS Prime B660M',
-      bios: '2603',
-      ipmi: '192.168.1.56',
-      ecc: 'Non-ECC',
-      secureBoot: 'Enabled',
-      iommu: 'Disabled',
-    },
-  },
-  {
-    id: 'node-161-postgres-ha-primary',
-    name: '161 (postgres-ha)',
-    shortName: '161',
-    group: 'noodle',
-    datacenter: 'homelab-dc1',
-    nodeType: 'linux',
-    ip: '192.168.1.161',
-    port: 22,
-    tailscaleIp: '100.97.159.107',
-    tailscaleHost: 'pg-primary.ts.net',
-    osDescription: 'Rocky Linux 9.3 (Blue Onyx)',
-    status: 'online',
-    uptime: '62d 18h',
-    hasGlances: true,
-    hasCockpit: true,
-    hasPodman: true,
-    hasRestic: true,
-    specs: {
-      cpu: 'AMD EPYC 7282',
-      vcpus: 16,
-      ramGiB: 64,
-      motherboard: 'Supermicro H11SSL-NC',
-      bios: '2.5',
-      ipmi: '192.168.1.57',
-      ecc: 'Active ECC Reg',
+      motherboard: 'Homelab Manager Node',
+      bios: 'UEFI',
+      ipmi: '192.168.8.3',
+      ecc: 'Active',
       secureBoot: 'Enabled',
       iommu: 'Enabled',
     },
   },
   {
-    id: 'node-pong-edge',
-    name: 'pong (Edge node)',
-    shortName: 'pong',
-    group: 'noodle',
-    datacenter: 'homelab-dc1',
-    nodeType: 'router_switch',
-    badge: 'GW',
-    badgeColor: 'text-[#8cd6cb]',
-    ip: '192.168.1.254',
+    id: 'node-chuck',
+    name: 'chuck',
+    shortName: 'chuck',
+    group: 'tag:host',
+    datacenter: 'leo-banjo.ts.net',
+    nodeType: 'linux',
+    badge: 'HOST',
+    badgeColor: 'text-[#8d909b]',
+    ip: '100.114.97.98',
     port: 22,
-    tailscaleIp: '100.97.159.120',
-    tailscaleHost: 'pong-edge.ts.net',
-    osDescription: 'VyOS 1.5-rolling / Ubiquiti EdgeOS',
+    sshUser: 'core',
+    authMethod: 'ssh-ed25519 (ssh-agent)',
+    tags: ['tag:host'],
+    sshConnected: false,
+    rttMs: '2.8ms',
+    tailscaleIp: '100.114.97.98',
+    tailscaleHost: 'chuck.leo-banjo.ts.net',
+    osDescription: 'Linux (tag:host)',
     status: 'online',
-    uptime: '180d 05h',
-    hasGlances: false,
+    uptime: '9d 12h',
+    hasGlances: true,
+    hasCockpit: true,
+    hasPodman: true,
+    hasRestic: true,
+    specs: {
+      cpu: 'x86_64 Host Node',
+      vcpus: 4,
+      ramGiB: 8,
+      motherboard: 'Homelab Host',
+      bios: 'UEFI',
+      ipmi: 'N/A',
+      ecc: 'Standard',
+      secureBoot: 'Enabled',
+      iommu: 'Enabled',
+    },
+  },
+  {
+    id: 'node-larry',
+    name: 'larry',
+    shortName: 'larry',
+    group: 'tag:host',
+    datacenter: 'leo-banjo.ts.net',
+    nodeType: 'linux',
+    badge: 'HOST',
+    badgeColor: 'text-[#8d909b]',
+    ip: '192.168.8.144',
+    port: 22,
+    sshUser: 'core',
+    authMethod: 'ssh-ed25519 (ssh-agent)',
+    tags: ['tag:host'],
+    sshConnected: false,
+    rttMs: '1.9ms',
+    tailscaleIp: '100.107.167.19',
+    tailscaleHost: 'larry.leo-banjo.ts.net',
+    osDescription: 'Linux (tag:host)',
+    status: 'online',
+    uptime: '11d 03h',
+    hasGlances: true,
+    hasCockpit: true,
+    hasPodman: true,
+    hasRestic: true,
+    specs: {
+      cpu: 'x86_64 Host Node',
+      vcpus: 4,
+      ramGiB: 8,
+      motherboard: 'Homelab Host',
+      bios: 'UEFI',
+      ipmi: '192.168.8.144',
+      ecc: 'Standard',
+      secureBoot: 'Enabled',
+      iommu: 'Enabled',
+    },
+  },
+  {
+    id: 'node-orangepizero3',
+    name: 'orangepizero3',
+    shortName: 'orangepizero3',
+    group: 'tag:host',
+    datacenter: 'leo-banjo.ts.net',
+    nodeType: 'linux',
+    badge: 'ARM64',
+    badgeColor: 'text-[#ffd97d]',
+    ip: '100.65.100.14',
+    port: 22,
+    sshUser: 'core',
+    authMethod: 'ssh-ed25519 (ssh-agent)',
+    tags: ['tag:host'],
+    sshConnected: false,
+    rttMs: '4.2ms',
+    tailscaleIp: '100.65.100.14',
+    tailscaleHost: 'orangepizero3.leo-banjo.ts.net',
+    osDescription: 'Debian / Armbian (Allwinner H618 ARM64)',
+    status: 'online',
+    uptime: '21d 06h',
+    hasGlances: true,
     hasCockpit: false,
-    hasPodman: false,
+    hasPodman: true,
     hasRestic: false,
     specs: {
-      cpu: 'Octeon III Dual-Core 1.0 GHz',
-      vcpus: 2,
-      ramGiB: 2,
-      motherboard: 'Ubiquiti Networks ER-X-SFP',
-      bios: 'U-Boot 2014.10',
-      ipmi: 'N/A (Serial Console)',
-      ecc: 'Embedded',
-      secureBoot: 'Hardware Encrypted',
+      cpu: 'Allwinner H618 Quad-Core Cortex-A53',
+      vcpus: 4,
+      ramGiB: 4,
+      motherboard: 'Orange Pi Zero 3 SBC',
+      bios: 'U-Boot ARM64',
+      ipmi: 'GPIO / Serial',
+      ecc: 'Non-ECC LPDDR4',
+      secureBoot: 'Disabled',
       iommu: 'N/A',
     },
   },
 ];
 
 const initialTelemetry: TelemetryData = {
-  cpuUsage: 1.4,
-  cpuModel: 'Intel Core i9-13900K',
-  vCpus: 16,
-  memoryUsedGiB: 42.4,
-  memoryTotalGiB: 62.8,
-  arcCacheGiB: 12.3,
-  zfsTankUsedTb: 14.2,
-  zfsTankTotalTb: 48.0,
-  zfsRaidType: 'RAIDZ2',
-  zfsScrubStatus: 'Scrub 2d ago',
-  loadAvg1m: 0.42,
-  loadAvg5m: 0.58,
-  loadAvg15m: 0.61,
+  cpuUsage: 4.2,
+  cpuModel: 'AMD EPYC / x86_64 Host',
+  vCpus: 8,
+  memoryUsedGiB: 6.4,
+  memoryTotalGiB: 16.0,
+  arcCacheGiB: 2.1,
+  zfsTankUsedTb: 0.18,
+  zfsTankTotalTb: 1.0,
+  zfsRaidType: 'XFS / RootFS',
+  zfsScrubStatus: 'Host: likes-it-cold',
+  loadAvg1m: 0.34,
+  loadAvg5m: 0.28,
+  loadAvg15m: 0.22,
   ioDelayPercent: 0.02,
-  cpuTempC: 38.0,
-  fanSpeedRpm: 820,
-  packageWatts: 44.2,
-  sparkline: [20, 19, 22, 18, 14, 16, 12, 15, 10, 14, 11],
+  cpuTempC: 39.0,
+  fanSpeedRpm: 840,
+  packageWatts: 38.5,
+  sparkline: [14, 16, 15, 18, 12, 14, 11, 13, 10, 12, 11],
 };
 
 const initialTasks: GlobalTaskItem[] = [
   {
     id: 'task-1',
-    startTime: '2025-05-14 10:28:12',
-    nodeTarget: 'all (14 hosts)',
-    user: 'root@pam',
-    description: 'ansible-playbook -i production site.yml',
-    progress: 65,
-    progressEta: 'Running (00:01:45)',
-    status: 'RUNNING',
+    startTime: '2026-10-18 01:20:00',
+    nodeTarget: 'likes-it-cold.leo-banjo.ts.net',
+    user: 'core@ssh-agent',
+    description: 'ssh core@likes-it-cold.leo-banjo.ts.net podman ps --all',
+    progress: 100,
+    progressEta: 'Connected via ssh-agent (ED25519)',
+    status: 'OK',
     category: 'active',
   },
   {
     id: 'task-2',
-    startTime: '2025-05-14 10:27:44',
-    nodeTarget: '150 (openmediavault)',
-    user: 'root@pam',
-    description: 'cockpit-session ws-tunnel /dev/pts/3',
+    startTime: '2026-10-18 01:20:05',
+    nodeTarget: 'ping.leo-banjo.ts.net',
+    user: 'core@ssh-agent',
+    description: 'Probe rootless Podman user uosserver (UID 1001, SubUID 589824:65536)',
     progress: 100,
-    progressEta: 'Connected (00:04:12)',
+    progressEta: '1 running container (uosserver)',
     status: 'OK',
     category: 'active',
-  },
-  {
-    id: 'task-3',
-    startTime: '2025-05-14 10:26:01',
-    nodeTarget: 'cold-war/152',
-    user: 'system',
-    description: 'apt update && apt dist-upgrade -y',
-    progress: 100,
-    progressEta: '100% completed',
-    status: 'OK',
-    category: 'active',
-  },
-  {
-    id: 'task-4',
-    startTime: '2025-05-14 10:24:50',
-    nodeTarget: 'inventory/vault',
-    user: 'root@pam',
-    description: 'ansible-vault decrypt group_vars/all.yml',
-    progress: 100,
-    progressEta: 'Cipher: AES256',
-    status: 'OK',
-    category: 'vault',
   },
 ];
 
@@ -363,6 +387,7 @@ export default function App() {
   // Modals state
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [addNodeOpen, setAddNodeOpen] = useState(false);
+  const [editNodeTarget, setEditNodeTarget] = useState<NodeItem | null>(null);
   const [playbookOpen, setPlaybookOpen] = useState(false);
   const [logsTarget, setLogsTarget] = useState<string | null>(null);
   const [rebootModalOpen, setRebootModalOpen] = useState(false);
@@ -376,11 +401,10 @@ export default function App() {
       .then(data => {
         if (Array.isArray(data) && data.length > 0) {
           setNodesList(data);
+          setSelectedNode(data[0]);
         }
       })
-      .catch(() => {
-        // Use seed
-      });
+      .catch(() => {});
 
     fetch('/api/tasks')
       .then(res => res.json())
@@ -391,6 +415,22 @@ export default function App() {
       })
       .catch(() => {});
   }, []);
+
+  // Fetch live telemetry when selectedNode changes
+  useEffect(() => {
+    fetch(`/api/telemetry?host=${encodeURIComponent(selectedNode.id)}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data && typeof data.cpuUsage === 'number') {
+          setTelemetry(prev => ({ ...prev, ...data }));
+        }
+        if (data?.node) {
+          setSelectedNode(prev => (prev.id === data.node.id ? { ...prev, ...data.node } : prev));
+          setNodesList(prev => prev.map(n => (n.id === data.node.id ? { ...n, ...data.node } : n)));
+        }
+      })
+      .catch(() => {});
+  }, [selectedNode.id]);
 
   // WebSocket Connection for real-time telemetry ticks and task progress
   useEffect(() => {
@@ -419,7 +459,14 @@ export default function App() {
             } else if (msg.type === 'task_updated') {
               setTasks(prev => prev.map(t => (t.id === msg.task.id ? msg.task : t)));
             } else if (msg.type === 'node_added') {
-              setNodesList(prev => [...prev, msg.node]);
+              setNodesList(prev =>
+                prev.some(n => n.id === msg.node.id) ? prev : [...prev, msg.node]
+              );
+            } else if (msg.type === 'node_updated' && msg.node) {
+              setNodesList(prev => prev.map(n => (n.id === msg.node.id ? msg.node : n)));
+              setSelectedNode(prev => (prev.id === msg.node.id ? msg.node : prev));
+            } else if (msg.type === 'node_deleted' && msg.nodeId) {
+              setNodesList(prev => prev.filter(n => n.id !== msg.nodeId));
             }
           } catch {
             // ignore JSON parse
@@ -460,46 +507,61 @@ export default function App() {
   };
 
   const handleAddNode = (newNode: Partial<NodeItem>) => {
-    const fullNode: NodeItem = {
-      id: `node-${Date.now()}`,
-      name: newNode.name || 'New Node',
-      shortName: newNode.shortName || 'node',
-      group: newNode.group || 'cold-war',
-      datacenter: 'homelab-dc1',
-      nodeType: newNode.nodeType || 'linux',
-      ip: newNode.ip || '192.168.1.180',
-      port: newNode.port || 22,
-      tailscaleIp: newNode.tailscaleIp || '100.97.159.180',
-      tailscaleHost: newNode.tailscaleHost || 'node.ts.net',
-      osDescription: newNode.osDescription || 'Linux (SSH)',
-      status: 'online',
-      uptime: '1m',
-      hasGlances: true,
-      hasCockpit: true,
-      hasPodman: true,
-      hasRestic: true,
-      specs: newNode.specs || {
-        cpu: 'Intel Core / AMD EPYC',
-        vcpus: 8,
-        ramGiB: 16,
-        motherboard: 'Enterprise Platform',
-        bios: '2.8',
-        ipmi: 'DHCP',
-        ecc: 'Active',
-        secureBoot: 'Enabled',
-        iommu: 'Enabled',
-      },
-    };
-
-    setNodesList(prev => [...prev, fullNode]);
-    setSelectedNode(fullNode);
-
-    // Call backend endpoint
     fetch('/api/nodes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(fullNode),
-    }).catch(() => {});
+      body: JSON.stringify(newNode),
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data?.node) {
+          setNodesList(prev =>
+            prev.some(n => n.id === data.node.id) ? prev : [...prev, data.node]
+          );
+          setSelectedNode(data.node);
+        }
+      })
+      .catch(() => {});
+  };
+
+  const handleSaveNodeSettings = async (
+    nodeId: string,
+    updates: Partial<NodeItem> & { testSsh?: boolean }
+  ) => {
+    setNodesList(prev =>
+      prev.map(n => (n.id === nodeId ? updateNodeSettings(n, updates) : n))
+    );
+    setSelectedNode(prev =>
+      prev.id === nodeId ? updateNodeSettings(prev, updates) : prev
+    );
+
+    try {
+      const resp = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data?.node) {
+          setNodesList(prev => prev.map(n => (n.id === nodeId ? data.node : n)));
+          setSelectedNode(prev => (prev.id === nodeId ? data.node : prev));
+        }
+      }
+    } catch {
+      // Local state already updated
+    }
+  };
+
+  const handleDeleteNode = (nodeId: string) => {
+    setNodesList(prev => {
+      const remaining = prev.filter(n => n.id !== nodeId);
+      if (selectedNode.id === nodeId && remaining.length > 0) {
+        setSelectedNode(remaining[0]);
+      }
+      return remaining;
+    });
+    fetch(`/api/nodes/${encodeURIComponent(nodeId)}`, { method: 'DELETE' }).catch(() => {});
   };
 
   const handleRunPlaybook = (playbook: string, target: string) => {
@@ -507,49 +569,26 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ playbook, target }),
-    }).catch(() => {
-      // Local fallback task addition
-      const localTask: GlobalTaskItem = {
-        id: `task-${Date.now()}`,
-        startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-        nodeTarget: target,
-        user: 'root@pam',
-        description: `ansible-playbook -i production playbooks/${playbook}`,
-        progress: 10,
-        progressEta: 'Executing role tasks (10%)',
-        status: 'RUNNING',
-        category: 'ansible',
-      };
-      setTasks(prev => [localTask, ...prev]);
-    });
+    }).catch(() => {});
   };
 
   const handleTriggerRestic = () => {
-    fetch('/api/restic/snapshot', { method: 'POST' }).catch(() => {
-      const resticTask: GlobalTaskItem = {
-        id: `task-${Date.now()}`,
-        startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-        nodeTarget: selectedNode.name,
-        user: 'root@pam',
-        description: 'restic -r s3://restic-homelab-vault/the-freezer backup /tank0/appdata',
-        progress: 30,
-        progressEta: 'Deduplicating chunks (AES-256)...',
-        status: 'RUNNING',
-        category: 'active',
-      };
-      setTasks(prev => [resticTask, ...prev]);
-    });
+    fetch('/api/restic/snapshot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: selectedNode.tailscaleHost }),
+    }).catch(() => {});
   };
 
   const handleRestartPod = (podName: string) => {
     const restartTask: GlobalTaskItem = {
       id: `task-${Date.now()}`,
       startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      nodeTarget: selectedNode.name,
-      user: 'root@pam',
-      description: `podman pod restart ${podName}`,
+      nodeTarget: selectedNode.tailscaleHost,
+      user: `${selectedNode.sshUser || 'core'}@ssh-agent`,
+      description: `podman action: ${podName}`,
       progress: 100,
-      progressEta: 'Restarted in 00:00:03',
+      progressEta: 'Completed via SSH',
       status: 'OK',
       category: 'active',
     };
@@ -560,8 +599,8 @@ export default function App() {
     const rebootTask: GlobalTaskItem = {
       id: `task-${Date.now()}`,
       startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      nodeTarget: selectedNode.name,
-      user: 'root@pam',
+      nodeTarget: selectedNode.tailscaleHost,
+      user: `${selectedNode.sshUser || 'core'}@ssh-agent`,
       description: `reboot sequence initiated (mode: ${mode})`,
       progress: 50,
       progressEta: 'Broadcasting ACPI reboot signal',
@@ -589,6 +628,7 @@ export default function App() {
         nodes={nodesList}
         selectedNodeId={selectedNode.id}
         onSelectNode={handleSelectNode}
+        onEditNode={node => setEditNodeTarget(node)}
         selectedHostGroup={selectedHostGroup}
         onSelectHostGroup={setSelectedHostGroup}
         isOpenMobile={mobileSidebarOpen}
@@ -605,8 +645,8 @@ export default function App() {
             if (tabId === 'playbooks') setPlaybookOpen(true);
             if (tabId === 'group_vars') setGroupVarsOpen(true);
           }}
-          clusterCpu={`${telemetry.cpuUsage * 2 + 12}%`}
-          clusterRam="42.1 / 128 GB"
+          clusterCpu={`${telemetry.cpuUsage.toFixed(1)}%`}
+          clusterRam={`${telemetry.memoryUsedGiB} / ${telemetry.memoryTotalGiB} GiB`}
         />
 
         {/* Main Content Workspace */}
@@ -620,6 +660,7 @@ export default function App() {
                 onTriggerRestic={handleTriggerRestic}
                 onReboot={() => setRebootModalOpen(true)}
                 onPowerOff={() => setRebootModalOpen(true)}
+                onEditNode={() => setEditNodeTarget(selectedNode)}
               />
 
               <OperationalTabs
@@ -641,6 +682,7 @@ export default function App() {
                   setActiveCockpitItem(item);
                   if (item === 'logs') setLogsTarget('dmesg / journald');
                 }}
+                onEditNode={() => setEditNodeTarget(selectedNode)}
               />
 
               {/* Main Operational Workspace Grid */}
@@ -650,20 +692,21 @@ export default function App() {
                   <SystemHealthTelemetry telemetry={telemetry} />
                   <TailscaleMeshCard
                     node={selectedNode}
+                    peers={nodesList}
                     onReauth={() => setTerminalOpen(true)}
+                    onEditNode={() => setEditNodeTarget(selectedNode)}
                   />
                 </div>
 
                 {/* MIDDLE ROW: Panel 3 (Podman Containers & Pods) */}
                 <PodmanManager
+                  selectedNode={selectedNode}
                   onOpenLogs={name => setLogsTarget(name)}
-                  onOpenExec={name => {
+                  onOpenExec={() => {
                     setLogsTarget(null);
                     setTerminalOpen(true);
                   }}
                   onRestartPod={handleRestartPod}
-                  onCreatePod={() => setAddNodeOpen(true)}
-                  onRunContainer={() => setAddNodeOpen(true)}
                 />
 
                 {/* BOTTOM ROW 1: Panel 4 (KVM VMs) & Panel 5 (Restic Backups) */}
@@ -673,7 +716,9 @@ export default function App() {
                     onNewVM={() => setAddNodeOpen(true)}
                   />
                   <ResticBackupPolicy
-                    onIntegrityCheck={() => handleRunPlaybook('security-hardening.yml', selectedNode.name)}
+                    onIntegrityCheck={() =>
+                      handleRunPlaybook('security-hardening.yml', selectedNode.tailscaleHost)
+                    }
                     onBrowseFiles={() => setLogsTarget('restic-repo-browser')}
                     onSnapshot={handleTriggerRestic}
                   />
@@ -681,8 +726,8 @@ export default function App() {
 
                 {/* BOTTOM ROW 2: Panel 6 (Service Users & System Identities) */}
                 <ServiceIdentitiesTable
-                  onAddIdentity={() => setAddNodeOpen(true)}
-                  onAudit={() => setLogsTarget('pam-audit-log')}
+                  selectedNode={selectedNode}
+                  onAudit={target => setLogsTarget(target || 'pam-audit-log')}
                 />
               </div>
             </div>
@@ -706,6 +751,14 @@ export default function App() {
         onAddNode={handleAddNode}
       />
 
+      <EditNodeModal
+        node={editNodeTarget}
+        isOpen={Boolean(editNodeTarget)}
+        onClose={() => setEditNodeTarget(null)}
+        onSaveNode={handleSaveNodeSettings}
+        onDeleteNode={handleDeleteNode}
+      />
+
       <RunPlaybookModal
         isOpen={playbookOpen}
         onClose={() => setPlaybookOpen(false)}
@@ -714,6 +767,7 @@ export default function App() {
 
       <ContainerLogsModal
         targetName={logsTarget}
+        node={selectedNode}
         isOpen={Boolean(logsTarget)}
         onClose={() => setLogsTarget(null)}
       />

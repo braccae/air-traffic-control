@@ -33,9 +33,14 @@ function extractContainersFromConmonProcesses(
 ): ContainerItem[] {
   const containers: ContainerItem[] = [];
   const seen = new Set<string>();
+  let hasCatatonit = false;
 
   for (const proc of processes) {
-    if (!proc.toLowerCase().includes('conmon')) continue;
+    const lower = proc.toLowerCase();
+    if (lower.includes('catatonit')) {
+      hasCatatonit = true;
+    }
+    if (!lower.includes('conmon')) continue;
     const tokens = proc.trim().split(/\s+/);
     let cid = '';
     let cname = '';
@@ -69,6 +74,20 @@ function extractContainersFromConmonProcesses(
       status: 'Running',
       cpu: '0.0%',
       memory: '0 MiB',
+      user,
+      uid,
+      rootless: uid !== 0,
+    });
+  }
+
+  if (containers.length === 0 && hasCatatonit) {
+    containers.push({
+      id: `podman-pause-${user}-${uid}`,
+      name: `podman-pause (${user})`,
+      image: 'podman/catatonit-pause',
+      status: 'Running (Namespace Active)',
+      cpu: '0.0%',
+      memory: '4 MiB',
       user,
       uid,
       rootless: uid !== 0,

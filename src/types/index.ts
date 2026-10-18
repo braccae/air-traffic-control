@@ -11,6 +11,11 @@ export interface NodeItem {
   badgeColor?: string;
   ip: string;
   port: number;
+  sshUser?: string;
+  authMethod?: string;
+  tags?: string[];
+  sshConnected?: boolean;
+  rttMs?: string;
   tailscaleIp: string;
   tailscaleHost: string;
   osDescription: string;

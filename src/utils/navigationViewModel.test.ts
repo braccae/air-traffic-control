@@ -233,3 +233,39 @@ test('resolveNodeIcon returns accurate Material Symbol icon names', () => {
   assert.equal(resolveNodeIcon({ ...base, badge: undefined, name: '160 (ingress-traefik)', group: 'noodle' }), 'router');
   assert.equal(resolveNodeIcon({ ...base, badge: 'SSH', name: '150 (openmediavault)', group: 'cold-war' }), 'dns');
 });
+
+test('groupNodesByDynamicCluster groups arbitrary Tailscale tag groups (e.g. tag:host, tag:pve, tag:service)', async () => {
+  const { groupNodesByDynamicCluster, buildHostGroupPills, updateNodeSettings } = await import('./navigationViewModel.ts');
+
+  const tailscaleNodes: NodeItem[] = [
+    { ...sampleNodes[0], id: 'node-likes-it-cold', name: 'likes-it-cold', group: 'tag:host', sshUser: 'core' },
+    { ...sampleNodes[1], id: 'node-ping', name: 'ping', group: 'tag:host', sshUser: 'core' },
+    { ...sampleNodes[2], id: 'node-noodle', name: 'noodle', group: 'tag:pve', sshUser: 'root' },
+  ];
+
+  const clusters = groupNodesByDynamicCluster(tailscaleNodes);
+  assert.equal(clusters.length, 2);
+  assert.equal(clusters[0].group, 'tag:host');
+  assert.equal(clusters[0].nodes.length, 2);
+  assert.equal(clusters[1].group, 'tag:pve');
+  assert.equal(clusters[1].nodes.length, 1);
+
+  const pills = buildHostGroupPills(tailscaleNodes);
+  assert.equal(pills[0].id, 'all');
+  assert.equal(pills[0].name, 'all: 3');
+  assert.ok(pills.some(p => p.id === 'tag:host' && p.name === 'tag:host: 2'));
+  assert.ok(pills.some(p => p.id === 'tag:pve' && p.name === 'tag:pve: 1'));
+
+  const updated = updateNodeSettings(tailscaleNodes[0], {
+    name: 'likes-it-cold (Primary)',
+    sshUser: 'ansible',
+    port: 2222,
+    specs: { ...tailscaleNodes[0].specs, vcpus: 12, ramGiB: 32 },
+  });
+  assert.equal(updated.name, 'likes-it-cold (Primary)');
+  assert.equal(updated.sshUser, 'ansible');
+  assert.equal(updated.port, 2222);
+  assert.equal(updated.specs.vcpus, 12);
+  assert.equal(updated.specs.ramGiB, 32);
+});
+

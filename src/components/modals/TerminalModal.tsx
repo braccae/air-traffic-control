@@ -13,20 +13,26 @@ export const TerminalModal: React.FC<TerminalModalProps> = ({
   isOpen,
   onClose,
 }) => {
-  const [history, setHistory] = useState<Array<{ command: string; output: string }>>([
-    {
-      command: '',
-      output: [
-        'PROX-ORCH v8.2-ansible | Cockpit Bridge & SSH PTY Gateway',
-        `Connected to: ${node.name} (${node.ip} / ${node.tailscaleIp})`,
-        `Kernel: Linux 6.8.4-pve | SSH Session established via ed25519`,
-        'Type "help" for a list of diagnostics or "podman ps", "glances", "tailscale status", "restic snapshots".',
-      ].join('\n'),
-    },
-  ]);
+  const sshUser = node.sshUser || 'core';
+  const [history, setHistory] = useState<Array<{ command: string; output: string }>>([]);
   const [currentInput, setCurrentInput] = useState('');
+  const [running, setRunning] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setHistory([
+      {
+        command: '',
+        output: [
+          'PROX-ORCH v8.2-ansible | Live SSH-Agent & Cockpit Gateway',
+          `Connected to: ${sshUser}@${node.tailscaleHost} (${node.ip} / ${node.tailscaleIp})`,
+          `OS: ${node.osDescription} | SSH Auth: ${node.authMethod || 'ssh-ed25519 (/run/user/1000/ssh-agent.socket)'}`,
+          'Type any shell command (e.g. "uname -a", "uptime", "free -h", "podman ps --all", "id").',
+        ].join('\n'),
+      },
+    ]);
+  }, [node.id, node.tailscaleHost, sshUser]);
 
   useEffect(() => {
     if (isOpen) {
@@ -39,23 +45,43 @@ export const TerminalModal: React.FC<TerminalModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cmd = currentInput.trim();
+  const executeRemoteCommand = async (cmd: string) => {
+    if (!cmd) return;
     if (cmd.toLowerCase() === 'clear') {
       setHistory([]);
-      setCurrentInput('');
       return;
     }
 
+    setRunning(true);
+    try {
+      const resp = await fetch('/api/terminal/exec', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd, host: node.id }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        setHistory(prev => [...prev, { command: cmd, output: data.output || '' }]);
+        setRunning(false);
+        return;
+      }
+    } catch {
+      // Fallback
+    }
     const { output } = parseTerminalCommand(cmd, node);
     setHistory(prev => [...prev, { command: cmd, output }]);
+    setRunning(false);
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cmd = currentInput.trim();
     setCurrentInput('');
+    executeRemoteCommand(cmd);
   };
 
   const runQuickCommand = (cmd: string) => {
-    const { output } = parseTerminalCommand(cmd, node);
-    setHistory(prev => [...prev, { command: cmd, output }]);
+    executeRemoteCommand(cmd);
   };
 
   return (
@@ -69,7 +95,7 @@ export const TerminalModal: React.FC<TerminalModalProps> = ({
             <span className="w-3 h-3 rounded-full bg-[#8cd6cb]/80 inline-block"></span>
             <span className="font-mono text-xs text-[#dfe1fa] font-bold ml-2 flex items-center gap-1.5">
               <span className="material-symbols-outlined text-[15px] text-[#b0c9ff]">terminal</span>
-              root@{node.tailscaleHost}:~ (SSH / cockpit-bridge ws-tunnel)
+              {sshUser}@{node.tailscaleHost}:~ (SSH via ssh-agent)
             </span>
           </div>
 
@@ -88,18 +114,25 @@ export const TerminalModal: React.FC<TerminalModalProps> = ({
         {/* Quick action command pills */}
         <div className="bg-[#1b1e31] px-3 py-1.5 flex items-center gap-1.5 border-b border-[#26293c] overflow-x-auto">
           <span className="text-[10px] font-mono text-[#8d909b]">Quick:</span>
-          {['podman ps', 'podman pod ps', 'podman probe', 'glances', 'tailscale status', 'restic snapshots', 'uptime', 'uname -a'].map(
-            cmd => (
-              <button
-                key={cmd}
-                type="button"
-                onClick={() => runQuickCommand(cmd)}
-                className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#8cd6cb] font-mono text-[10px] rounded cursor-pointer transition-colors border border-[#434750]/30 whitespace-nowrap"
-              >
-                {cmd}
-              </button>
-            )
-          )}
+          {[
+            'uname -a',
+            'uptime',
+            'free -h',
+            'df -h /',
+            'podman ps --all',
+            'cat /etc/subuid',
+            'ls -l /var/lib/systemd/linger',
+            'id',
+          ].map(cmd => (
+            <button
+              key={cmd}
+              type="button"
+              onClick={() => runQuickCommand(cmd)}
+              className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#8cd6cb] font-mono text-[10px] rounded cursor-pointer transition-colors border border-[#434750]/30 whitespace-nowrap"
+            >
+              {cmd}
+            </button>
+          ))}
         </div>
 
         {/* Terminal Screen Body */}
@@ -111,7 +144,9 @@ export const TerminalModal: React.FC<TerminalModalProps> = ({
             <div key={idx} className="space-y-0.5">
               {item.command && (
                 <div className="flex items-center gap-1.5 text-[#b0c9ff]">
-                  <span className="text-[#8cd6cb] font-bold">[root@{node.shortName} ~]#</span>
+                  <span className="text-[#8cd6cb] font-bold">
+                    [{sshUser}@{node.shortName} ~]$
+                  </span>
                   <span>{item.command}</span>
                 </div>
               )}
@@ -125,15 +160,18 @@ export const TerminalModal: React.FC<TerminalModalProps> = ({
 
           {/* Prompt line */}
           <form onSubmit={handleSubmit} className="flex items-center gap-1.5 text-[#dfe1fa] pt-1">
-            <span className="text-[#8cd6cb] font-bold">[root@{node.shortName} ~]#</span>
+            <span className="text-[#8cd6cb] font-bold">
+              [{sshUser}@{node.shortName} ~]$
+            </span>
             <input
               ref={inputRef}
               type="text"
+              disabled={running}
               value={currentInput}
               onChange={e => setCurrentInput(e.target.value)}
               className="flex-1 bg-transparent border-none outline-none font-mono text-xs text-[#dfe1fa] focus:ring-0"
               autoFocus
-              placeholder="type command..."
+              placeholder={running ? 'executing over SSH...' : 'type command...'}
             />
           </form>
           <div ref={bottomRef} />
@@ -141,8 +179,10 @@ export const TerminalModal: React.FC<TerminalModalProps> = ({
 
         {/* Terminal status bar */}
         <div className="h-6 bg-[#171a2d] px-3 flex items-center justify-between font-mono text-[10px] text-[#8d909b] border-t border-[#26293c]">
-          <span>Protocol: SSH-2.0-OpenSSH_9.5p1 / PTY allocated (80x24)</span>
-          <span className="text-[#8cd6cb]">Encrypted TLS 1.3 / Tailscale WireGuard</span>
+          <span>
+            Agent: /run/user/1000/ssh-agent.socket | Target: {sshUser}@{node.tailscaleHost}:{node.port || 22}
+          </span>
+          <span className="text-[#8cd6cb]">Encrypted Tailscale WireGuard + OpenSSH</span>
         </div>
       </div>
     </div>
