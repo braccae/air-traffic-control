@@ -502,7 +502,7 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<{
       'echo "===ROOTPODMAN==="',
       'sudo -n podman ps --all --format json 2>/dev/null || true',
       'echo "===DOCKER==="',
-      'sudo -n docker ps --format \'{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}\' 2>/dev/null || true',
+      'sudo -n docker ps --format "{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}" 2>/dev/null || true',
     ].join('; ');
 
     const raw = await runNodeCommand(node, script, 6000);
@@ -573,8 +573,9 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<{
 
       for (const rawLine of (dockerPart || '').split('\n')) {
         const line = rawLine.trim();
-        if (!line.includes('|')) continue;
-        const [id, name, image, status] = line.split('|');
+        if (!line.includes(':::')) continue;
+        const [id, name, image, status] = line.split(':::');
+        if (!id || id.includes('{{')) continue;
         rootContainers.push({
           id,
           name,
