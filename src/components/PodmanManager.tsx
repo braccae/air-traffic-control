@@ -1,5 +1,10 @@
 import React, { useState } from 'react';
 import type { PodItem, StandaloneDaemon } from '../types/index.ts';
+import {
+  countPodmanStatuses,
+  filterPodsByStatus,
+  filterStandaloneDaemons,
+} from '../utils/podmanViewModel.ts';
 
 interface PodmanManagerProps {
   onOpenLogs: (target: string) => void;
@@ -146,6 +151,10 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
     },
   ];
 
+  const statusCounts = countPodmanStatuses(pods, standaloneState);
+  const filteredPods = filterPodsByStatus(pods, filter);
+  const filteredDaemons = filterStandaloneDaemons(standaloneState, filter);
+
   return (
     <section className="bg-[#171a2d] rounded p-3 flex flex-col border border-[#26293c]">
       {/* Header bar */}
@@ -164,7 +173,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                 filter === 'all' ? 'text-[#b0c9ff] font-bold' : 'text-[#c3c6d2] hover:text-[#dfe1fa]'
               }`}
             >
-              All (12)
+              All ({statusCounts.all})
             </button>
             <span className="text-[#434750]">|</span>
             <button
@@ -174,7 +183,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                 filter === 'running' ? 'text-[#8cd6cb] font-bold' : 'text-[#8cd6cb]/70 hover:text-[#8cd6cb]'
               }`}
             >
-              Running (11)
+              Running ({statusCounts.running})
             </button>
             <span className="text-[#434750]">|</span>
             <button
@@ -184,7 +193,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                 filter === 'stopped' ? 'text-[#ffb4ab] font-bold' : 'text-[#ffb4ab]/70 hover:text-[#ffb4ab]'
               }`}
             >
-              Stopped (1)
+              Stopped ({statusCounts.stopped})
             </button>
           </div>
         </div>
@@ -211,7 +220,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
 
       {/* Pods list */}
       <div className="space-y-2 mt-1 font-mono text-xs">
-        {pods.map(pod => (
+        {filteredPods.map(pod => (
           <div key={pod.id} className="bg-[#1b1e31] rounded p-2 border border-[#26293c]">
             {/* Pod header */}
             <div className="flex items-center justify-between pb-1.5">
@@ -333,7 +342,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
             STANDALONE DAEMONS &amp; EXPORTERS
           </span>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-            {standaloneState.map(item => (
+            {filteredDaemons.map(item => (
               <div
                 key={item.name}
                 className="bg-[#0a0d1f] p-2 rounded flex items-center justify-between border border-[#26293c]/50"

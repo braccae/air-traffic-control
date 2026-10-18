@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { NodeItem, NodeType } from '../../types/index.ts';
+import { buildProvisionedNode } from '../../utils/navigationViewModel.ts';
 
 interface AddNodeModalProps {
   isOpen: boolean;
@@ -30,35 +31,30 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
     e.preventDefault();
     if (!name.trim()) return;
 
-    onAddNode({
-      name,
-      shortName: name.split(' ')[0],
-      group,
-      datacenter: 'homelab-dc1',
-      nodeType,
-      ip: ip || '192.168.1.180',
-      port,
-      tailscaleIp: tailscaleIp || '100.97.159.180',
-      tailscaleHost: tailscaleHost || `${name.toLowerCase().replace(/[^a-z0-9]/g, '-')}.ts.net`,
-      osDescription,
-      status: 'online',
-      uptime: '1m',
-      hasGlances: nodeType === 'linux',
-      hasCockpit: nodeType === 'linux',
-      hasPodman: nodeType === 'linux',
-      hasRestic: true,
-      specs: {
-        cpu: 'AMD EPYC / Intel Core vCPU',
-        vcpus,
-        ramGiB,
-        motherboard: 'Virtualization / Server Chassis',
-        bios: 'UEFI 2.8',
-        ipmi: 'DHCP',
-        ecc: 'Active',
-        secureBoot: 'Enabled',
-        iommu: 'Enabled',
-      },
-    });
+    onAddNode(
+      buildProvisionedNode({
+        name,
+        group,
+        datacenter: 'homelab-dc1',
+        nodeType,
+        ip: ip || '192.168.1.180',
+        port,
+        tailscaleIp: tailscaleIp || '100.97.159.180',
+        tailscaleHost,
+        osDescription,
+        specs: {
+          cpu: 'AMD EPYC / Intel Core vCPU',
+          vcpus,
+          ramGiB,
+          motherboard: 'Virtualization / Server Chassis',
+          bios: 'UEFI 2.8',
+          ipmi: 'DHCP',
+          ecc: 'Active',
+          secureBoot: 'Enabled',
+          iommu: 'Enabled',
+        },
+      })
+    );
 
     onClose();
   };

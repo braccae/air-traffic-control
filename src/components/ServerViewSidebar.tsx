@@ -1,5 +1,6 @@
 import React from 'react';
 import type { NodeItem } from '../types/index.ts';
+import { groupNodesByCluster, resolveNodeIcon } from '../utils/navigationViewModel.ts';
 
 interface ServerViewSidebarProps {
   nodes: NodeItem[];
@@ -21,9 +22,8 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   onCloseMobile,
 }) => {
   // Group nodes by group key
-  const coldWarNodes = nodes.filter(n => n.group === 'cold-war');
-  const noodleNodes = nodes.filter(n => n.group === 'noodle');
-  const otherNodes = nodes.filter(n => n.group !== 'cold-war' && n.group !== 'noodle');
+  const { coldWar: coldWarNodes, noodle: noodleNodes, other: otherNodes } =
+    groupNodesByCluster(nodes);
 
   const hostGroups = [
     { name: 'all: 14', id: 'all' },
@@ -102,17 +102,7 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                     }`}
                   ></span>
                   <span className="material-symbols-outlined text-[14px]">
-                    {node.nodeType === 'windows'
-                      ? 'desktop_windows'
-                      : node.badge === 'GPU'
-                      ? 'memory'
-                      : node.badge === 'LXC'
-                      ? 'deployed_code'
-                      : node.badge === 'K3S'
-                      ? 'lan'
-                      : node.badge === 'PBS'
-                      ? 'storage'
-                      : 'dns'}
+                    {resolveNodeIcon(node)}
                   </span>
                   <span className="truncate flex-1">{node.name}</span>
                   {node.badge && (
@@ -153,11 +143,7 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                     }`}
                   ></span>
                   <span className="material-symbols-outlined text-[14px]">
-                    {node.nodeType === 'router_switch'
-                      ? 'settings_ethernet'
-                      : node.name.includes('postgres')
-                      ? 'database'
-                      : 'router'}
+                    {resolveNodeIcon(node)}
                   </span>
                   <span className="truncate flex-1">{node.name}</span>
                   {node.badge && (

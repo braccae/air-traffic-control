@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { NodeItem } from '../../types/index.ts';
+import { filterNodesBySearchQuery } from '../../utils/navigationViewModel.ts';
 
 interface SearchModalProps {
   isOpen: boolean;
@@ -29,13 +30,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
 
   if (!isOpen) return null;
 
-  const filteredNodes = nodes.filter(
-    n =>
-      n.name.toLowerCase().includes(query.toLowerCase()) ||
-      n.ip.includes(query) ||
-      n.tailscaleIp.includes(query) ||
-      n.group.toLowerCase().includes(query.toLowerCase())
-  );
+  const filteredNodes = filterNodesBySearchQuery(nodes, query);
 
   const actions = [
     { title: 'Run Playbook (site.yml)', action: onOpenPlaybook, icon: 'play_arrow' },
