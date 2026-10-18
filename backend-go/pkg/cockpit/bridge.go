@@ -10,10 +10,15 @@ import (
 	"prox-orch/backend/pkg/ssh"
 )
 
+// CommandRunner abstracts remote command execution
+type CommandRunner interface {
+	RunCommand(cfg ssh.Config, command string) (string, error)
+}
+
 // BridgeSession wraps an interactive cockpit-bridge process over SSH
 type BridgeSession struct {
 	mu     sync.Mutex
-	sshMgr *ssh.ClientManager
+	sshMgr CommandRunner
 	cfg    ssh.Config
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
@@ -37,7 +42,7 @@ type ServiceStatus struct {
 }
 
 // NewBridgeSession initializes connection to remote cockpit-bridge
-func NewBridgeSession(sshMgr *ssh.ClientManager, cfg ssh.Config) *BridgeSession {
+func NewBridgeSession(sshMgr CommandRunner, cfg ssh.Config) *BridgeSession {
 	return &BridgeSession{
 		sshMgr: sshMgr,
 		cfg:    cfg,

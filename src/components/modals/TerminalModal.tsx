@@ -88,7 +88,7 @@ export const TerminalModal: React.FC<TerminalModalProps> = ({
         {/* Quick action command pills */}
         <div className="bg-[#1b1e31] px-3 py-1.5 flex items-center gap-1.5 border-b border-[#26293c] overflow-x-auto">
           <span className="text-[10px] font-mono text-[#8d909b]">Quick:</span>
-          {['podman ps', 'podman pod ps', 'glances', 'tailscale status', 'restic snapshots', 'uptime', 'uname -a'].map(
+          {['podman ps', 'podman pod ps', 'podman probe', 'glances', 'tailscale status', 'restic snapshots', 'uptime', 'uname -a'].map(
             cmd => (
               <button
                 key={cmd}

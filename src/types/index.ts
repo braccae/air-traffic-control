@@ -64,6 +64,9 @@ export interface ContainerItem {
   memory: string;
   gpuAcc?: string;
   ports?: string;
+  user?: string;
+  uid?: number;
+  rootless?: boolean;
 }
 
 export interface PodItem {
@@ -76,6 +79,20 @@ export interface PodItem {
   gpuTag?: string;
   vram?: string;
   gpuUtil?: number;
+  user?: string;
+  uid?: number;
+  rootless?: boolean;
+  containers: ContainerItem[];
+}
+
+export interface UnprivilegedPodmanUser {
+  user: string;
+  uid: number;
+  gid?: number;
+  homeDir?: string;
+  subUidRange?: string;
+  linger: boolean;
+  activeProcesses: string[];
   containers: ContainerItem[];
 }
 
@@ -84,6 +101,9 @@ export interface StandaloneDaemon {
   subtext: string;
   status: 'running' | 'exited';
   memory: string;
+  user?: string;
+  uid?: number;
+  rootless?: boolean;
 }
 
 export interface VMItem {

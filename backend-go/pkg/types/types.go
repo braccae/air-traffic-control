@@ -69,16 +69,19 @@ type Telemetry struct {
 
 // PodmanContainer represents an individual container
 type PodmanContainer struct {
-	ID        string  `json:"id"`
-	PodID     string  `json:"podId,omitempty"`
-	Name      string  `json:"name"`
-	Image     string  `json:"image"`
-	Status    string  `json:"status"` // Running, Exited, Paused
-	CPU       string  `json:"cpu"`
-	Memory    string  `json:"memory"`
-	Ports     string  `json:"ports,omitempty"`
-	GPUAcc    string  `json:"gpuAcc,omitempty"`
-	StartedAt string  `json:"startedAt"`
+	ID        string `json:"id"`
+	PodID     string `json:"podId,omitempty"`
+	Name      string `json:"name"`
+	Image     string `json:"image"`
+	Status    string `json:"status"` // Running, Exited, Paused
+	CPU       string `json:"cpu"`
+	Memory    string `json:"memory"`
+	Ports     string `json:"ports,omitempty"`
+	GPUAcc    string `json:"gpuAcc,omitempty"`
+	StartedAt string `json:"startedAt"`
+	User      string `json:"user,omitempty"`
+	UID       int    `json:"uid,omitempty"`
+	Rootless  bool   `json:"rootless"`
 }
 
 // PodmanPod represents a group of containers sharing IPC and network
@@ -93,6 +96,22 @@ type PodmanPod struct {
 	GPUInfo     string            `json:"gpuInfo,omitempty"`
 	VRAMUsage   string            `json:"vramUsage,omitempty"`
 	GPUUtil     int               `json:"gpuUtil,omitempty"`
+	User        string            `json:"user,omitempty"`
+	UID         int               `json:"uid,omitempty"`
+	Rootless    bool              `json:"rootless"`
+}
+
+// UnprivilegedPodmanUser represents an unprivileged (rootless) user running Podman containers
+type UnprivilegedPodmanUser struct {
+	User            string            `json:"user"`
+	UID             int               `json:"uid"`
+	GID             int               `json:"gid,omitempty"`
+	HomeDir         string            `json:"homeDir,omitempty"`
+	SubUIDRange     string            `json:"subUidRange,omitempty"`
+	Linger          bool              `json:"linger"`
+	ActiveProcesses []string          `json:"activeProcesses,omitempty"`
+	Containers      []PodmanContainer `json:"containers,omitempty"`
+	Pods            []PodmanPod       `json:"pods,omitempty"`
 }
 
 // KVMVirtualMachine represents a local QEMU/KVM virtual machine

@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
+import { getDefaultHostPodmanProbe, probeUnprivilegedPodmanUsers } from './src/utils/orchestrator.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -450,6 +451,15 @@ app.get('/api/telemetry', (req, res) => {
 
 app.get('/api/tasks', (req, res) => {
   res.json(tasks);
+});
+
+app.get('/api/podman/probe', (req, res) => {
+  res.json(getDefaultHostPodmanProbe());
+});
+
+app.post('/api/podman/probe', (req, res) => {
+  const probed = probeUnprivilegedPodmanUsers(req.body);
+  res.json(probed);
 });
 
 app.post('/api/playbook/run', (req, res) => {

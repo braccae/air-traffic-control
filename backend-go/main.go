@@ -9,51 +9,22 @@ import (
 	"net/http"
 	"time"
 
+	"prox-orch/backend/pkg/podman"
 	"prox-orch/backend/pkg/ssh"
 	"prox-orch/backend/pkg/types"
 	"prox-orch/backend/pkg/websocket"
 )
 
-func main() {
-	port := flag.Int("port", 8080, "HTTP and WebSocket server port")
-	flag.Parse()
+func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager) *http.ServeMux {
+	mux := http.NewServeMux()
 
-	log.Printf("Starting PROX-ORCH Go Core Daemon on port %d...", *port)
+	if hub != nil {
+		mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+			hub.ServeWS(w, r)
+		})
+	}
 
-	sshManager := ssh.NewClientManager()
-	hub := websocket.NewHub()
-	go hub.Run()
-
-	// Seed ticker for live telemetry broadcasts to all connected clients
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-
-		for range ticker.C {
-			cpuVal := 1.2 + rand.Float64()*1.8
-			watts := 42.0 + rand.Float64()*5.0
-			fans := 800 + rand.Intn(40)
-			temp := 37.5 + rand.Float64()*2.0
-
-			telem := map[string]interface{}{
-				"type": "telemetry_tick",
-				"data": map[string]interface{}{
-					"cpuUsage":     fmt.Sprintf("%.1f%%", cpuVal),
-					"cpuTemp":      fmt.Sprintf("%.1f°C", temp),
-					"fanSpeed":     fmt.Sprintf("%d RPM", fans),
-					"packageWatts": fmt.Sprintf("%.1f W", watts),
-					"timestamp":    time.Now().Format(time.RFC3339),
-				},
-			}
-			hub.BroadcastJSON(telem)
-		}
-	}()
-
-	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		hub.ServeWS(w, r)
-	})
-
-	http.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":    "healthy",
@@ -63,7 +34,140 @@ func main() {
 		})
 	})
 
-	http.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/podman/probe", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if podmanMgr != nil {
+			if probed, err := podmanMgr.ProbeUnprivilegedUsers(); err == nil && len(probed) > 0 {
+				json.NewEncoder(w).Encode(probed)
+				return
+			}
+		}
+		users := []types.UnprivilegedPodmanUser{
+			{
+				User:        "deployer",
+				UID:         1000,
+				GID:         1000,
+				HomeDir:     "/home/deployer",
+				SubUIDRange: "100000:65536",
+				Linger:      true,
+				ActiveProcesses: []string{
+					"/usr/bin/conmon --api-version 1 -c 3f0a9918bc22 -n jellyfin-media-server",
+					"/usr/bin/conmon --api-version 1 -c c810d48a1239 -n caddy-gateway",
+				},
+				Containers: []types.PodmanContainer{
+					{
+						ID:       "3f0a9918bc22",
+						PodID:    "a98c091f09e1",
+						Name:     "jellyfin-media-server",
+						Image:    "jellyfin/jellyfin:10.8.13",
+						Status:   "Running (VAAPI)",
+						CPU:      "2.14%",
+						Memory:   "1.68 GiB",
+						User:     "deployer",
+						UID:      1000,
+						Rootless: true,
+					},
+					{
+						ID:       "c810d48a1239",
+						PodID:    "a98c091f09e1",
+						Name:     "caddy-gateway",
+						Image:    "caddy:2.7.6-alpine",
+						Status:   "Running",
+						CPU:      "0.25%",
+						Memory:   "138 MiB",
+						User:     "deployer",
+						UID:      1000,
+						Rootless: true,
+					},
+				},
+				Pods: []types.PodmanPod{
+					{
+						ID:       "a98c091f09e1",
+						Name:     "media-stack",
+						Status:   "Running",
+						User:     "deployer",
+						UID:      1000,
+						Rootless: true,
+					},
+				},
+			},
+			{
+				User:        "podman",
+				UID:         1001,
+				GID:         1001,
+				HomeDir:     "/home/podman",
+				SubUIDRange: "165536:65536",
+				Linger:      true,
+				ActiveProcesses: []string{
+					"/usr/bin/conmon --api-version 1 -c 7e4b9019a101 -n ollama-vllm-engine",
+					"/usr/bin/conmon --api-version 1 -c e29d48bc991a -n open-webui",
+				},
+				Containers: []types.PodmanContainer{
+					{
+						ID:       "7e4b9019a101",
+						PodID:    "bb09817adfe2",
+						Name:     "ollama-vllm-engine",
+						Image:    "ollama/ollama:latest",
+						Status:   "Running (CUDA 12.4)",
+						CPU:      "3.8%",
+						Memory:   "6.4 GiB VRAM",
+						User:     "podman",
+						UID:      1001,
+						Rootless: true,
+					},
+					{
+						ID:       "e29d48bc991a",
+						PodID:    "bb09817adfe2",
+						Name:     "open-webui",
+						Image:    "ghcr.io/open-webui/open-webui:main",
+						Status:   "Running",
+						CPU:      "0.9%",
+						Memory:   "512 MiB System",
+						User:     "podman",
+						UID:      1001,
+						Rootless: true,
+					},
+				},
+				Pods: []types.PodmanPod{
+					{
+						ID:       "bb09817adfe2",
+						Name:     "ai-inference",
+						Status:   "Running",
+						User:     "podman",
+						UID:      1001,
+						Rootless: true,
+					},
+				},
+			},
+			{
+				User:        "restic-svc",
+				UID:         984,
+				GID:         984,
+				HomeDir:     "/var/lib/restic",
+				SubUIDRange: "231072:65536",
+				Linger:      false,
+				ActiveProcesses: []string{
+					"/usr/bin/conmon --api-version 1 -c 8811aabbccdd -n restic-exporter",
+				},
+				Containers: []types.PodmanContainer{
+					{
+						ID:       "8811aabbccdd",
+						Name:     "restic-exporter",
+						Image:    "ngosang/restic-exporter:latest",
+						Status:   "Running",
+						CPU:      "0.1%",
+						Memory:   "12 MiB",
+						User:     "restic-svc",
+						UID:      984,
+						Rootless: true,
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(users)
+	})
+
+	mux.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		nodes := []types.Node{
 			{
@@ -146,9 +250,48 @@ func main() {
 		json.NewEncoder(w).Encode(nodes)
 	})
 
-	_ = sshManager
+	return mux
+}
+
+func main() {
+	port := flag.Int("port", 8080, "HTTP and WebSocket server port")
+	flag.Parse()
+
+	log.Printf("Starting PROX-ORCH Go Core Daemon on port %d...", *port)
+
+	sshManager := ssh.NewClientManager()
+	podmanMgr := podman.NewManager(sshManager, ssh.Config{Host: "127.0.0.1", Port: 22, User: "root"})
+	hub := websocket.NewHub()
+	go hub.Run()
+
+	// Seed ticker for live telemetry broadcasts to all connected clients
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			cpuVal := 1.2 + rand.Float64()*1.8
+			watts := 42.0 + rand.Float64()*5.0
+			fans := 800 + rand.Intn(40)
+			temp := 37.5 + rand.Float64()*2.0
+
+			telem := map[string]interface{}{
+				"type": "telemetry_tick",
+				"data": map[string]interface{}{
+					"cpuUsage":     fmt.Sprintf("%.1f%%", cpuVal),
+					"cpuTemp":      fmt.Sprintf("%.1f°C", temp),
+					"fanSpeed":     fmt.Sprintf("%d RPM", fans),
+					"packageWatts": fmt.Sprintf("%.1f W", watts),
+					"timestamp":    time.Now().Format(time.RFC3339),
+				},
+			}
+			hub.BroadcastJSON(telem)
+		}
+	}()
+
+	mux := newServerMux(hub, podmanMgr)
 	log.Printf("PROX-ORCH backend listening on :%d", *port)
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", *port), nil); err != nil {
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", *port), mux); err != nil {
 		log.Fatalf("Server stopped: %v", err)
 	}
 }

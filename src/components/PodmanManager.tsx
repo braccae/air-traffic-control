@@ -20,21 +20,30 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
   const [standaloneState, setStandaloneState] = useState<StandaloneDaemon[]>([
     {
       name: 'restic-exporter',
-      subtext: 'prom-metrics:9150',
+      subtext: 'prom-metrics:9150 (restic-svc:984)',
       status: 'running',
       memory: '12 MiB',
+      user: 'restic-svc',
+      uid: 984,
+      rootless: true,
     },
     {
       name: 'tailscale-sidecar',
-      subtext: 'tun:tailscale0',
+      subtext: 'tun:tailscale0 (deployer:1000)',
       status: 'running',
       memory: '28 MiB',
+      user: 'deployer',
+      uid: 1000,
+      rootless: true,
     },
     {
       name: 'node-exporter-old',
       subtext: 'Exited (code 0)',
       status: 'exited',
       memory: '0 B',
+      user: 'podman',
+      uid: 1001,
+      rootless: true,
     },
   ]);
 
@@ -56,6 +65,9 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
       ports: 'Ports: 8096:8096, 443:443',
       totalCpu: '2.4%',
       totalRam: '1.82 GiB',
+      user: 'deployer',
+      uid: 1000,
+      rootless: true,
       containers: [
         {
           id: 'infra-con-media',
@@ -64,6 +76,9 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
           status: 'Running',
           cpu: '0.01%',
           memory: '4.2 MiB',
+          user: 'deployer',
+          uid: 1000,
+          rootless: true,
         },
         {
           id: 'jellyfin-media-server',
@@ -72,6 +87,9 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
           status: 'Running (VAAPI)',
           cpu: '2.14%',
           memory: '1.68 GiB',
+          user: 'deployer',
+          uid: 1000,
+          rootless: true,
         },
         {
           id: 'caddy-gateway',
@@ -80,6 +98,9 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
           status: 'Running',
           cpu: '0.25%',
           memory: '138 MiB',
+          user: 'deployer',
+          uid: 1000,
+          rootless: true,
         },
       ],
     },
@@ -93,6 +114,9 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
       gpuTag: 'NVIDIA RTX 4090 Passthrough',
       vram: 'VRAM: 8.2 / 24.0 GiB',
       gpuUtil: 32,
+      user: 'podman',
+      uid: 1001,
+      rootless: true,
       containers: [
         {
           id: 'ollama-vllm-engine',
@@ -102,6 +126,9 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
           cpu: '3.8%',
           memory: '6.4 GiB VRAM',
           gpuAcc: 'RTX 4090 [0000:01:00.0]',
+          user: 'podman',
+          uid: 1001,
+          rootless: true,
         },
         {
           id: 'open-webui',
@@ -111,6 +138,9 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
           cpu: '0.9%',
           memory: '512 MiB System',
           gpuAcc: 'Shared IPC',
+          user: 'podman',
+          uid: 1001,
+          rootless: true,
         },
       ],
     },
@@ -193,6 +223,11 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                 <span className="px-1.5 py-0.2 bg-[#8cd6cb]/20 text-[#8cd6cb] rounded text-[10px] border border-[#8cd6cb]/30">
                   {pod.containersRunningCount} Containers Running
                 </span>
+                {pod.user && (
+                  <span className="px-1.5 py-0.2 bg-[#b0c9ff]/15 text-[#b0c9ff] rounded text-[10px] border border-[#b0c9ff]/30">
+                    rootless: {pod.user} ({pod.uid})
+                  </span>
+                )}
                 {pod.gpuTag && (
                   <span className="px-1.5 py-0.2 bg-[#573583]/40 text-[#d9b9ff] rounded text-[10px] border border-[#573583]">
                     {pod.gpuTag}
@@ -244,6 +279,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                 <thead className="bg-[#0a0d1f]/70 text-[#8d909b] text-[10px]">
                   <tr className="h-6">
                     <th className="px-2">Container Name</th>
+                    <th className="px-2">User (UID)</th>
                     <th className="px-2">Image</th>
                     <th className="px-2">Status</th>
                     {pod.gpuTag ? <th className="px-2">GPU Acceleration</th> : <th className="px-2">CPU</th>}
@@ -257,6 +293,9 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                       <td className="px-2 text-[#dfe1fa] font-medium flex items-center gap-1.5">
                         <span className="w-1.5 h-1.5 rounded-full bg-[#8cd6cb]"></span>
                         <span>{c.name}</span>
+                      </td>
+                      <td className="px-2 text-[#b0c9ff]">
+                        {c.user ? `${c.user}:${c.uid}` : 'root:0'}
                       </td>
                       <td className="px-2 text-[#8d909b] truncate max-w-xs">{c.image}</td>
                       <td className="px-2">

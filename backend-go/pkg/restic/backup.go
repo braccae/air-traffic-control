@@ -9,13 +9,18 @@ import (
 	"prox-orch/backend/pkg/types"
 )
 
+// CommandRunner abstracts remote command execution
+type CommandRunner interface {
+	RunCommand(cfg ssh.Config, command string) (string, error)
+}
+
 type Manager struct {
-	sshMgr *ssh.ClientManager
+	sshMgr CommandRunner
 	cfg    ssh.Config
 	repo   string
 }
 
-func NewManager(sshMgr *ssh.ClientManager, cfg ssh.Config, repo string) *Manager {
+func NewManager(sshMgr CommandRunner, cfg ssh.Config, repo string) *Manager {
 	return &Manager{
 		sshMgr: sshMgr,
 		cfg:    cfg,
