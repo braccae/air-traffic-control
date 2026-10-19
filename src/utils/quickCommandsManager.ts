@@ -179,7 +179,9 @@ export function addQuickCommand(
   eventTarget?: EventTargetLike
 ): QuickCommandItem[] {
   const current = loadQuickCommands(storage);
-  const newId = `qc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const newId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? `qc-${crypto.randomUUID().slice(0, 8)}`
+    : `qc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const newItem: QuickCommandItem = {
     id: newId,
     label: cmd.label.trim(),

@@ -149,9 +149,10 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
         });
       }
 
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({ success: false, error: `Invalid response (HTTP ${resp.status})` }));
       if (!resp.ok || !data.success) {
-        throw new Error(data.error || 'Hardware probe failed on remote host');
+        const detail = data?.error ? `: ${data.error}` : ` (HTTP ${resp.status} ${resp.statusText || 'Error'})`;
+        throw new Error(`Hardware probe failed${detail}`);
       }
 
       if (data.hardware) {
