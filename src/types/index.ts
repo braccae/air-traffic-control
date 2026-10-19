@@ -218,3 +218,38 @@ export interface ParsedLogEntry {
   message: string;
   level: 'error' | 'warning' | 'info' | 'debug';
 }
+
+export type AnsibleModuleCategory =
+  | 'system'
+  | 'container'
+  | 'storage'
+  | 'network'
+  | 'package'
+  | 'database'
+  | 'k8s'
+  | 'custom';
+
+export interface AnsibleTaskStep {
+  name: string;
+  module: string;
+  parameters: Record<string, any>;
+}
+
+export interface QueuedAnsibleTask {
+  id: string;
+  title: string;
+  targetNodeId: string;
+  targetNodeName: string;
+  targetHostRoute: string;
+  targetSshUser: string;
+  targetSshPort: number;
+  category: AnsibleModuleCategory;
+  primaryModule: string;
+  steps: AnsibleTaskStep[];
+  secretsMasked?: Record<string, string>;
+  become: boolean;
+  becomeMethod: 'run0' | 'sudo' | 'doas';
+  status: 'staged' | 'running' | 'completed' | 'failed' | 'cancelled';
+  createdAt: number;
+}
+
