@@ -173,60 +173,73 @@ export async function encryptVaultString(
 
   const executionEnv = getAnsibleExecutionEnv(options?.env || process.env);
   const targetVarName = varName || 'secret';
+  const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
+  const tempPassFile = path.resolve(os.tmpdir(), `.vault-pass-${id}`);
 
-  return new Promise<string>((resolve, reject) => {
-    // Pipe through bash cat to avoid Node socketpair 0o140777 permission check in ansible-vault
-    const proc = spawn(
-      'bash',
-      [
-        '-c',
-        'cat | ansible-vault encrypt_string --vault-password-file /dev/stdin --name "$2" -- "$1"',
-        '_',
-        plaintext,
-        targetVarName,
-      ],
-      {
-        env: executionEnv,
-        stdio: ['pipe', 'pipe', 'pipe'],
+  try {
+    fs.writeFileSync(tempPassFile, password, { mode: 0o600 });
+
+    return await new Promise<string>((resolve, reject) => {
+      const proc = spawn(
+        'ansible-vault',
+        [
+          'encrypt_string',
+          '--vault-password-file',
+          tempPassFile,
+          '--stdin-name',
+          targetVarName,
+        ],
+        {
+          env: executionEnv,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }
+      );
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+
+      proc.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+
+      proc.on('error', (err) => {
+        reject(err);
+      });
+
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          reject(new Error(`ansible-vault encrypt_string failed with exit code ${code}: ${stderr.trim()}`));
+          return;
+        }
+
+        const vaultIdx = stdout.indexOf('!vault |');
+        if (vaultIdx === -1) {
+          reject(new Error(`Failed to parse encrypted vault block: ${stdout}`));
+          return;
+        }
+
+        const before = stdout.substring(0, vaultIdx);
+        const lastNewline = before.lastIndexOf('\n');
+        const start = lastNewline === -1 ? 0 : lastNewline + 1;
+        resolve(stdout.substring(start).trim());
+      });
+
+      proc.stdin.write(plaintext);
+      proc.stdin.end();
+    });
+  } finally {
+    try {
+      if (fs.existsSync(tempPassFile)) {
+        fs.unlinkSync(tempPassFile);
       }
-    );
-
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
-    });
-
-    proc.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on('error', (err) => {
-      reject(err);
-    });
-
-    proc.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`ansible-vault encrypt_string failed with exit code ${code}: ${stderr.trim()}`));
-        return;
-      }
-
-      const vaultIdx = stdout.indexOf('!vault |');
-      if (vaultIdx === -1) {
-        reject(new Error(`Failed to parse encrypted vault block: ${stdout}`));
-        return;
-      }
-
-      const before = stdout.substring(0, vaultIdx);
-      const lastNewline = before.lastIndexOf('\n');
-      const start = lastNewline === -1 ? 0 : lastNewline + 1;
-      resolve(stdout.substring(start).trim());
-    });
-
-    proc.stdin.write(password + '\n');
-    proc.stdin.end();
-  });
+    } catch {
+      // ignore cleanup errors
+    }
+  }
 }
 
 /**

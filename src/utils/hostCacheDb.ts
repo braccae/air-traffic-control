@@ -703,6 +703,7 @@ export function registerInventoryRoutes(
     const folders = hostCache.getAllCustomFolders();
     if (broadcast) {
       broadcast({ type: 'folders_updated', folders });
+      broadcast({ type: 'nodes_updated', nodes: hostCache.getAllHosts() });
     }
     res.json({ success: true, deleted });
   });
