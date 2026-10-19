@@ -57,6 +57,7 @@ import {
 import {
   loadAnsibleConfig,
   saveAnsibleConfig,
+  validateVaultPasswordFile,
   type AnsibleConfigSettings,
 } from './src/utils/ansibleConfigManager.ts';
 
@@ -1788,6 +1789,19 @@ app.put('/api/ansible/config', async (req, res) => {
     if (rawSettings.timeout !== undefined && (typeof rawSettings.timeout !== 'number' || rawSettings.timeout < 1 || rawSettings.timeout > 600)) {
       res.status(400).json({ success: false, error: 'Timeout must be a number between 1 and 600' });
       return;
+    }
+
+    if (rawSettings.vaultPasswordFile !== undefined && rawSettings.vaultPasswordFile !== null) {
+      if (
+        typeof rawSettings.vaultPasswordFile !== 'string' ||
+        !validateVaultPasswordFile(rawSettings.vaultPasswordFile)
+      ) {
+        res.status(400).json({
+          success: false,
+          error: 'Invalid vaultPasswordFile: newlines and control characters are prohibited to prevent INI injection',
+        });
+        return;
+      }
     }
 
     const updatedSettings: AnsibleConfigSettings = {

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 export interface AnsibleConfigSettings {
@@ -19,6 +20,17 @@ export const DEFAULT_ANSIBLE_CONFIG: AnsibleConfigSettings = {
   pipelining: true,
   becomeMethod: 'run0',
 };
+
+/**
+ * Validates that vaultPasswordFile does not contain newlines or control characters
+ * that could be used for INI injection attacks.
+ */
+export function validateVaultPasswordFile(pathStr?: string): boolean {
+  if (pathStr === undefined || pathStr === null || pathStr === '') return true;
+  if (typeof pathStr !== 'string') return false;
+  if (/[\r\n\x00-\x1F\x7F]/.test(pathStr)) return false;
+  return true;
+}
 
 function parseBoolean(val: string, fallback: boolean): boolean {
   const norm = val.trim().toLowerCase();
@@ -51,6 +63,7 @@ function parseBecomeMethod(val: string): 'run0' | 'sudo' | 'doas' {
 
 /**
  * Parses INI formatted ansible.cfg string into typed AnsibleConfigSettings.
+ * Automatically strips inline comments (# or ;) from values.
  */
 export function parseAnsibleCfg(iniContent: string): AnsibleConfigSettings {
   const settings: AnsibleConfigSettings = { ...DEFAULT_ANSIBLE_CONFIG };
@@ -77,12 +90,13 @@ export function parseAnsibleCfg(iniContent: string): AnsibleConfigSettings {
     if (eqIdx === -1) continue;
 
     const key = line.slice(0, eqIdx).trim().toLowerCase();
-    const value = line.slice(eqIdx + 1).trim();
+    const rawValue = line.slice(eqIdx + 1);
+    const value = rawValue.split(/[#;]/)[0].trim();
 
     if (key === 'stdout_callback') {
       settings.stdoutCallback = parseStdoutCallback(value);
     } else if (key === 'forks') {
-      settings.forks = parseInteger(value, 10, 1, 100);
+      settings.forks = parseInteger(value, 10, 1, 500);
     } else if (key === 'timeout') {
       settings.timeout = parseInteger(value, 30, 5, 600);
     } else if (key === 'host_key_checking') {
@@ -92,7 +106,9 @@ export function parseAnsibleCfg(iniContent: string): AnsibleConfigSettings {
     } else if (key === 'become_method') {
       settings.becomeMethod = parseBecomeMethod(value);
     } else if (key === 'vault_password_file') {
-      settings.vaultPasswordFile = value;
+      if (validateVaultPasswordFile(value)) {
+        settings.vaultPasswordFile = value;
+      }
     }
   }
 
@@ -102,11 +118,16 @@ export function parseAnsibleCfg(iniContent: string): AnsibleConfigSettings {
 /**
  * Serializes typed AnsibleConfigSettings into compliant ansible.cfg INI format.
  * Preserves comments and existing structure when baseContent is provided.
+ * Throws an error if vaultPasswordFile fails sanitization (INI injection prevention).
  */
 export function serializeAnsibleCfg(
   settings: AnsibleConfigSettings,
   baseContent?: string
 ): string {
+  if (settings.vaultPasswordFile && !validateVaultPasswordFile(settings.vaultPasswordFile)) {
+    throw new Error('Invalid vaultPasswordFile: newlines and control characters are prohibited to prevent INI injection');
+  }
+
   if (!baseContent || typeof baseContent !== 'string' || !baseContent.trim()) {
     const lines = [
       '[defaults]',
@@ -138,7 +159,6 @@ export function serializeAnsibleCfg(
 
     const sectionMatch = trimmed.match(/^\[(.*?)\]$/);
     if (sectionMatch) {
-      // Before switching away from defaults or privilege_escalation, check if we need to append missing keys
       if (currentSection === 'defaults') {
         appendMissingDefaults(updatedLines, handledKeys, settings);
       } else if (currentSection === 'privilege_escalation') {
@@ -268,23 +288,26 @@ function appendMissingPrivilegeEscalation(
 }
 
 /**
- * Loads ansible.cfg from filesystem. If the file does not exist,
- * creates a default ansible.cfg and returns DEFAULT_ANSIBLE_CONFIG.
+ * Loads ansible.cfg from filesystem asynchronously using fs.promises.
+ * If the file does not exist, creates a default ansible.cfg and returns DEFAULT_ANSIBLE_CONFIG.
  */
 export async function loadAnsibleConfig(cfgPath?: string): Promise<AnsibleConfigSettings> {
   const targetPath = cfgPath || path.resolve(process.cwd(), 'ansible/ansible.cfg');
   try {
-    if (!fs.existsSync(targetPath)) {
-      const defaultSettings = { ...DEFAULT_ANSIBLE_CONFIG };
-      const dir = path.dirname(targetPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+    let content: string;
+    try {
+      content = await fsp.readFile(targetPath, 'utf-8');
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') {
+        const defaultSettings = { ...DEFAULT_ANSIBLE_CONFIG };
+        const dir = path.dirname(targetPath);
+        await fsp.mkdir(dir, { recursive: true });
+        const serialized = serializeAnsibleCfg(defaultSettings);
+        await fsp.writeFile(targetPath, serialized, 'utf-8');
+        return defaultSettings;
       }
-      const serialized = serializeAnsibleCfg(defaultSettings);
-      fs.writeFileSync(targetPath, serialized, 'utf-8');
-      return defaultSettings;
+      throw err;
     }
-    const content = fs.readFileSync(targetPath, 'utf-8');
     return parseAnsibleCfg(content);
   } catch (_err) {
     return { ...DEFAULT_ANSIBLE_CONFIG };
@@ -292,7 +315,8 @@ export async function loadAnsibleConfig(cfgPath?: string): Promise<AnsibleConfig
 }
 
 /**
- * Safely saves updated Ansible settings to ansible.cfg, merging with existing INI content if present.
+ * Safely saves updated Ansible settings to ansible.cfg asynchronously using fs.promises,
+ * merging with existing INI content if present.
  */
 export async function saveAnsibleConfig(
   settings: AnsibleConfigSettings,
@@ -301,15 +325,15 @@ export async function saveAnsibleConfig(
   const targetPath = cfgPath || path.resolve(process.cwd(), 'ansible/ansible.cfg');
   try {
     const dir = path.dirname(targetPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    await fsp.mkdir(dir, { recursive: true });
     let baseContent: string | undefined = undefined;
-    if (fs.existsSync(targetPath)) {
-      baseContent = fs.readFileSync(targetPath, 'utf-8');
+    try {
+      baseContent = await fsp.readFile(targetPath, 'utf-8');
+    } catch (err: any) {
+      if (err?.code !== 'ENOENT') throw err;
     }
     const serialized = serializeAnsibleCfg(settings, baseContent);
-    fs.writeFileSync(targetPath, serialized, 'utf-8');
+    await fsp.writeFile(targetPath, serialized, 'utf-8');
     return true;
   } catch (_err) {
     return false;

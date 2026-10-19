@@ -8,6 +8,7 @@ import {
   serializeAnsibleCfg,
   loadAnsibleConfig,
   saveAnsibleConfig,
+  validateVaultPasswordFile,
   type AnsibleConfigSettings,
   DEFAULT_ANSIBLE_CONFIG,
 } from './ansibleConfigManager.ts';
@@ -49,6 +50,46 @@ become_method = run0
     expect(emptySettings.hostKeyChecking).toBe(false);
     expect(emptySettings.pipelining).toBe(true);
     expect(emptySettings.becomeMethod).toBe('run0');
+  });
+
+  it('strips inline comments from INI values', () => {
+    const iniWithComments = `
+[defaults]
+stdout_callback = json # structured output for frontend
+forks = 25 ; parallel workers
+timeout = 90 # ssh timeout seconds
+host_key_checking = False # do not prompt
+pipelining = True ; fast ssh
+[privilege_escalation]
+become_method = run0 # systemd polkit
+`;
+    const settings = parseAnsibleCfg(iniWithComments);
+    expect(settings.stdoutCallback).toBe('json');
+    expect(settings.forks).toBe(25);
+    expect(settings.timeout).toBe(90);
+    expect(settings.hostKeyChecking).toBe(false);
+    expect(settings.pipelining).toBe(true);
+    expect(settings.becomeMethod).toBe('run0');
+  });
+
+  describe('vaultPasswordFile sanitization', () => {
+    it('validates safe paths and rejects injection attempts', () => {
+      expect(validateVaultPasswordFile('/home/user/.vault_pass')).toBe(true);
+      expect(validateVaultPasswordFile(undefined)).toBe(true);
+      expect(validateVaultPasswordFile('/path\ninjected = true')).toBe(false);
+      expect(validateVaultPasswordFile('/path\rinjected = true')).toBe(false);
+      expect(validateVaultPasswordFile('/path\x00evil')).toBe(false);
+    });
+
+    it('throws error when serializing with newline in vaultPasswordFile', () => {
+      const malicious: AnsibleConfigSettings = {
+        ...DEFAULT_ANSIBLE_CONFIG,
+        vaultPasswordFile: '/path/to/pass\n[injected]\nevil = true',
+      };
+      assert.throws(() => {
+        serializeAnsibleCfg(malicious);
+      }, /INI injection/);
+    });
   });
 
   it('serializes updated settings back into compliant ansible.cfg INI format', () => {
