@@ -61,6 +61,23 @@ describe('Tiered Ansible Vault Credential Engine', () => {
       assert.equal(source.filePath, passInCfg);
     });
 
+    it('Tier 1: resolves relative vault_password_file against ansible/ directory when relative to cfg', () => {
+      const ansibleDir = path.resolve(process.cwd(), 'ansible');
+      const testRelFile = path.join(ansibleDir, '.tmp-rel-vault-pass.txt');
+      fs.writeFileSync(testRelFile, 'rel-ansible-pass\n', 'utf8');
+
+      try {
+        const source = resolveVaultPasswordSource({
+          vaultPasswordFile: '.tmp-rel-vault-pass.txt',
+        });
+        assert.equal(source.source, 'file');
+        assert.equal(source.hasPassword, true);
+        assert.equal(source.password, 'rel-ansible-pass');
+      } finally {
+        if (fs.existsSync(testRelFile)) fs.unlinkSync(testRelFile);
+      }
+    });
+
     it('Tier 1 fallback: falls through to Tier 2 when vaultPasswordFile does not exist on disk', () => {
       const nonExistent = path.join(tmpDir, 'missing-file.txt');
       process.env.ANSIBLE_VAULT_PASSWORD = 'env-fallback-pass';

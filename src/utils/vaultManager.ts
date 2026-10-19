@@ -46,9 +46,16 @@ export function resolveVaultPasswordSource(options?: ResolveVaultPasswordOptions
   }
 
   if (candidatePassFile) {
-    const resolvedPath = path.isAbsolute(candidatePassFile)
+    let resolvedPath = path.isAbsolute(candidatePassFile)
       ? candidatePassFile
       : path.resolve(process.cwd(), candidatePassFile);
+
+    if (!fs.existsSync(resolvedPath) && !path.isAbsolute(candidatePassFile)) {
+      const ansibleDirFallback = path.resolve(process.cwd(), 'ansible', candidatePassFile);
+      if (fs.existsSync(ansibleDirFallback)) {
+        resolvedPath = ansibleDirFallback;
+      }
+    }
 
     if (fs.existsSync(resolvedPath)) {
       try {
@@ -173,7 +180,7 @@ export async function encryptVaultString(
       'bash',
       [
         '-c',
-        'cat | ansible-vault encrypt_string --vault-password-file /dev/stdin --name "$2" "$1"',
+        'cat | ansible-vault encrypt_string --vault-password-file /dev/stdin --name "$2" -- "$1"',
         '_',
         plaintext,
         targetVarName,

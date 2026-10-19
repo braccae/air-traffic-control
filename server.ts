@@ -75,12 +75,7 @@ import {
   ensureAnsibleVenv,
   REQUIRED_VENV_PACKAGES,
 } from './src/utils/ansibleVenvManager.ts';
-import {
-  registerVaultRoutes,
-  resolveVaultPasswordSource,
-  encryptVaultString,
-  decryptVaultString,
-} from './src/utils/vaultManager.ts';
+import { registerVaultRoutes } from './src/utils/vaultManager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
