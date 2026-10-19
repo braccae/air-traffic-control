@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import type { NodeItem, TelemetryData, GlobalTaskItem } from './types/index.ts';
+import type { NodeItem, TelemetryData, GlobalTaskItem, QueuedAnsibleTask } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ServerViewSidebar } from './components/ServerViewSidebar.tsx';
 import { TopSubNav } from './components/TopSubNav.tsx';
@@ -42,6 +42,7 @@ import {
   getWorkspaceWrapperClasses,
   type SidebarViewMode,
   type DatacenterSection,
+  type ConsoleDrawerTab,
 } from './utils/navigationViewModel.ts';
 import {
   createTerminalSession,
@@ -423,6 +424,9 @@ export default function App() {
 
   const [telemetry, setTelemetry] = useState<TelemetryData>(initialTelemetry);
   const [tasks, setTasks] = useState<GlobalTaskItem[]>(initialTasks);
+  const [queue, setQueue] = useState<QueuedAnsibleTask[]>([]);
+  const [isQueueRunning, setIsQueueRunning] = useState<boolean>(false);
+  const [activeConsoleTab, setActiveConsoleTab] = useState<ConsoleDrawerTab>('active');
   const [nodeStorageEngines, setNodeStorageEngines] = useState<Record<string, StorageEngineType>>({});
 
   // Theme state: system | macchiato | latte with OS auto-preference (Task 8)
@@ -812,6 +816,16 @@ export default function App() {
         }
       })
       .catch(() => {});
+
+    fetch('/api/queue')
+      .then(res => res.json())
+      .then(data => {
+        if (data?.tasks && Array.isArray(data.tasks)) {
+          setQueue(data.tasks);
+          setIsQueueRunning(Boolean(data.isRunning));
+        }
+      })
+      .catch(() => {});
   }, []);
 
   // Fetch live telemetry when selectedNode changes
@@ -898,6 +912,40 @@ export default function App() {
             } else if (msg.type === 'node_deleted' && msg.nodeId) {
               setNodesList(prev => prev.filter(n => n.id !== msg.nodeId));
               addToast({ type: 'warning', title: 'Node Removed', message: `Deleted node ${msg.nodeId}` });
+            } else if (msg.type === 'init' && msg.queue) {
+              if (Array.isArray(msg.queue.tasks)) setQueue(msg.queue.tasks);
+              setIsQueueRunning(Boolean(msg.queue.isRunning));
+            } else if (msg.type === 'queue_updated' && msg.queue) {
+              if (Array.isArray(msg.queue.tasks)) setQueue(msg.queue.tasks);
+              setIsQueueRunning(Boolean(msg.queue.isRunning));
+            } else if (msg.type === 'queue_execution_started') {
+              setIsQueueRunning(true);
+              if (msg.queue?.tasks && Array.isArray(msg.queue.tasks)) {
+                setQueue(msg.queue.tasks);
+              }
+              addToast({
+                type: 'info',
+                title: 'Queue Execution Started',
+                message: msg.taskId ? `Executing task ${msg.taskId}` : 'Executing next queued Ansible mutation task',
+              });
+            } else if (msg.type === 'queue_execution_finished') {
+              setIsQueueRunning(false);
+              if (msg.queue?.tasks && Array.isArray(msg.queue.tasks)) {
+                setQueue(msg.queue.tasks);
+              }
+              if (msg.haltedOnError) {
+                addToast({
+                  type: 'error',
+                  title: 'Queue Execution Halted',
+                  message: msg.result?.error || 'Queue checkpoint failure: execution stopped to prevent damage',
+                });
+              } else if (msg.result?.success) {
+                addToast({
+                  type: 'success',
+                  title: 'Queue Task Completed',
+                  message: msg.result.taskId ? `Finished task ${msg.result.taskId}` : 'Task executed successfully',
+                });
+              }
             }
           } catch {
             // ignore JSON parse
@@ -1168,12 +1216,14 @@ export default function App() {
             if (tabId === 'playbooks') setPlaybookOpen(true);
             if (tabId === 'group_vars') setGroupVarsOpen(true);
             if (tabId === 'task_queue') {
+              setActiveConsoleTab('task_queue');
               const el = document.getElementById('global-tasks-drawer');
               el?.scrollIntoView({ behavior: 'smooth' });
             }
           }}
           clusterCpu={`${telemetry.cpuUsage.toFixed(1)}%`}
           clusterRam={`${telemetry.memoryUsedGiB} / ${telemetry.memoryTotalGiB} GiB`}
+          queuedTasksCount={queue.filter(t => t.status === 'staged').length}
         />
 
         {/* Main Content Workspace */}
@@ -1591,6 +1641,10 @@ export default function App() {
       {/* Fixed Bottom Console with Unified Window Dock */}
       <GlobalTasksExecutionLog
         tasks={tasks}
+        queue={queue}
+        isRunning={isQueueRunning}
+        activeDrawerTab={activeConsoleTab}
+        onDrawerTabChange={setActiveConsoleTab}
         onOpenPlaybookEditor={() => handleOpenPlaybookEditor()}
         windows={managedWindows}
         activeWindowId={activeWindowId}

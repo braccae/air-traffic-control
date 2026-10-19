@@ -8,6 +8,8 @@ interface GlobalTasksExecutionLogProps {
   tasks: GlobalTaskItem[];
   queue?: QueuedAnsibleTask[];
   isRunning?: boolean;
+  activeDrawerTab?: ConsoleDrawerTab;
+  onDrawerTabChange?: (tab: ConsoleDrawerTab) => void;
   onOpenTaskDetails?: (taskId: string) => void;
   onOpenPlaybookEditor?: () => void;
   windows?: ManagedWindow[];
@@ -22,6 +24,8 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
   tasks,
   queue: initialQueue,
   isRunning: initialIsRunning,
+  activeDrawerTab,
+  onDrawerTabChange,
   onOpenTaskDetails,
   onOpenPlaybookEditor,
   windows = [],
@@ -31,9 +35,22 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
   onMinimizeWindow,
   onCloseWindow,
 }) => {
-  const [activeTab, setActiveTab] = useState<ConsoleDrawerTab>('active');
+  const [activeTab, setActiveTab] = useState<ConsoleDrawerTab>(activeDrawerTab || 'active');
   const [isExpanded, setIsExpanded] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
+
+  useEffect(() => {
+    if (activeDrawerTab && activeDrawerTab !== activeTab) {
+      setActiveTab(activeDrawerTab);
+      setIsCollapsed(false);
+    }
+  }, [activeDrawerTab]);
+
+  const handleSelectTab = (tab: ConsoleDrawerTab) => {
+    setActiveTab(tab);
+    setIsCollapsed(false);
+    onDrawerTabChange?.(tab);
+  };
 
   // Task Queue state
   const [queue, setQueue] = useState<QueuedAnsibleTask[]>(initialQueue || []);
@@ -254,10 +271,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
           <div className="flex items-center h-full shrink-0">
             <button
               type="button"
-              onClick={() => {
-                setActiveTab('active');
-                setIsCollapsed(false);
-              }}
+              onClick={() => handleSelectTab('active')}
               className={`px-2 h-full font-bold font-mono text-xs transition-colors cursor-pointer shrink-0 ${
                 activeTab === 'active'
                   ? 'text-[#b0c9ff] bg-[#313447]'
@@ -268,10 +282,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             </button>
             <button
               type="button"
-              onClick={() => {
-                setActiveTab('task_queue');
-                setIsCollapsed(false);
-              }}
+              onClick={() => handleSelectTab('task_queue')}
               className={`px-2 h-full font-mono text-xs transition-colors cursor-pointer shrink-0 ${
                 activeTab === 'task_queue'
                   ? 'text-[#b0c9ff] bg-[#313447] font-bold'
@@ -282,10 +293,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             </button>
             <button
               type="button"
-              onClick={() => {
-                setActiveTab('ansible');
-                setIsCollapsed(false);
-              }}
+              onClick={() => handleSelectTab('ansible')}
               className={`px-2 h-full font-mono text-xs transition-colors cursor-pointer shrink-0 ${
                 activeTab === 'ansible'
                   ? 'text-[#b0c9ff] bg-[#313447]'
@@ -296,10 +304,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             </button>
             <button
               type="button"
-              onClick={() => {
-                setActiveTab('syslog');
-                setIsCollapsed(false);
-              }}
+              onClick={() => handleSelectTab('syslog')}
               className={`px-2 h-full font-mono text-xs transition-colors cursor-pointer shrink-0 ${
                 activeTab === 'syslog'
                   ? 'text-[#b0c9ff] bg-[#313447]'
@@ -310,10 +315,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             </button>
             <button
               type="button"
-              onClick={() => {
-                setActiveTab('vault');
-                setIsCollapsed(false);
-              }}
+              onClick={() => handleSelectTab('vault')}
               className={`px-2 h-full font-mono text-xs transition-colors cursor-pointer shrink-0 ${
                 activeTab === 'vault'
                   ? 'text-[#b0c9ff] bg-[#313447]'

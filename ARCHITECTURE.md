@@ -130,3 +130,113 @@ As codified in `AGENTS.md`:
 - Every button, action, and metric must represent real host execution.
 - No `setTimeout` or local React state mutations simulating host responses.
 - If a node is unreachable or elevation fails, the error must be reported accurately without synthetic masking.
+
+---
+
+## 6. On-the-Fly Playbook Queue & One-by-One Checkpoint Runner
+
+All system mutations (network, firewall, container, storage, package, and service operations) are staged and executed through declarative Ansible tasks rather than ephemeral CLI strings.
+
+```mermaid
+sequenceDiagram
+    participant UI as Cockpit Frontend
+    participant Driver as Pluggable Driver
+    participant Queue as SQLite Queue (ansible_queue_tasks)
+    participant Runner as Execution Runner
+    participant Ansible as Ansible Playbook Engine
+
+    UI->>Driver: Trigger Mutation (e.g. Restart Service)
+    Driver->>Driver: Build QueuedAnsibleTask (Declarative Steps)
+    Driver->>Queue: Staged in SQLite (ansible_queue_tasks)
+    Queue-->>UI: WebSocket broadcast (queue_updated)
+    UI->>Runner: POST /api/queue/execute
+    Runner->>Queue: Acquire Next Pending Task (status = running)
+    Runner->>Ansible: Compile On-the-Fly Playbook YAML
+    Runner->>Ansible: Execute with ANSIBLE_STDOUT_CALLBACK=json
+    alt Playbook Succeeded
+        Ansible-->>Runner: Task JSON Result (ok=1, failed=0)
+        Runner->>Queue: Update status = completed
+        Runner-->>UI: WebSocket broadcast (queue_execution_finished, success)
+    else Playbook Failed (Checkpoint Halt)
+        Ansible-->>Runner: Task JSON Result (failed=1)
+        Runner->>Queue: Update status = failed, record error
+        Runner-->>UI: WebSocket broadcast (queue_execution_finished, haltedOnError)
+        Note over Runner,Queue: Execution halted immediately. Subsequent tasks remain untouched.
+    end
+```
+
+### 6.1 Checkpoint Halting Invariant
+- Tasks run strictly one-by-one.
+- If a task or step fails, the queue **halts immediately**.
+- Subsequent tasks remain safely staged in SQLite without execution. This prevents compounding misconfigurations (e.g., attempting to restart dependent services after a configuration file syntax check failed).
+
+---
+
+## 7. Pluggable Driver Architecture & Extensibility
+
+Cockpit abstracts host management through pluggable, strongly-typed driver interfaces. Each driver compiles high-level UI intents into structured `AnsibleTaskStep` definitions:
+
+```mermaid
+flowchart TD
+    Modals[Cockpit UI Modals & Views] --> Drivers[Pluggable Driver Layer]
+    Drivers --> SysDrv[SystemDriver: Services, Power, Systemd]
+    Drivers --> StorDrv[StorageDriver: ZFS, Btrfs, LVM Mounts]
+    Drivers --> NetDrv[NetworkDriver: Interfaces, Bonds, Tailscale]
+    Drivers --> ContDrv[ContainerDriver: Podman Rootless/Rootful, Docker]
+    Drivers --> PkgDrv[PackageDriver: bootc, rpm-ostree, dnf, apt, apk]
+
+    Drivers -.-> DbDrv[DatabaseDriver Slot: MongoDB, PostgreSQL, MySQL]
+    Drivers -.-> K8sDrv[KubernetesDriver Slot: k8s, k3s Workloads]
+    Drivers -.-> SwitchDrv[NetworkSwitchDriver Slot: Cisco cisco.ios, VyOS]
+
+    SysDrv --> Queue[Ansible Mutation Queue]
+    StorDrv --> Queue
+    NetDrv --> Queue
+    ContDrv --> Queue
+    PkgDrv --> Queue
+```
+
+### 7.1 Implemented Drivers
+- **`SystemDriver`:** Manages systemd unit lifecycles (`ansible.builtin.systemd_service`), privilege elevation, and node reboot/power commands.
+- **`StorageDriver`:** Manages OpenZFS datasets and snapshots, Btrfs subvolumes, and filesystem mount configurations (`ansible.posix.mount`).
+- **`NetworkDriver`:** Manages network interfaces, static IP/DHCP bindings, and firewall tables (`ansible.posix.firewalld`).
+- **`ContainerDriver`:** Manages rootless and rootful Podman containers, Quadlets, pods, and Docker fallback.
+- **`PackageDriver`:** Orchestrates atomic immutable OS updates (`bootc`, `rpm-ostree`) and traditional package transactions (`ansible.builtin.package`).
+
+### 7.2 Future Expansion Driver Slots
+The architecture includes dedicated modular slots for homelab expansions:
+- **`DatabaseDriver`:** Extends task generation to database maintenance operations (MongoDB replica sets, PostgreSQL backups/WAL archiving, MySQL migrations).
+- **`KubernetesDriver`:** Extends cluster operations to Kubernetes/k3s manifests, cordon/drain nodes, and deployment rollouts.
+- **`NetworkSwitchDriver`:** Extends infrastructure orchestration to managed top-of-rack switches via collections like Cisco `cisco.ios.*` or Arista EOS.
+
+---
+
+## 8. Ansible Engine Standards & Secret Protection
+
+### 8.1 Structured JSON Callback
+To provide live accordion drill-down and structured step status in the frontend Console drawer:
+- All playbook executions MUST export `ANSIBLE_STDOUT_CALLBACK=json` (configured via `ansible.cfg` `[defaults] stdout_callback = json`).
+- Output is parsed into per-task status objects (`ok`, `changed`, `failed`, `skipped`) and streamed to the UI.
+
+### 8.2 Native Module Prioritization
+1. **Core Built-ins First:** All drivers must prioritize native modules (`ansible.builtin.*`, `ansible.posix.*`).
+2. **Galaxy Collection Guard:** External collections (e.g. `community.general.*`, `cisco.ios.*`) are guarded. If a collection is missing from the environment, the backend alerts the user and prompts for installation via `POST /api/ansible/collections/install`.
+3. **Shell/Command Last Resort:** Raw `ansible.builtin.shell` or `ansible.builtin.command` is strictly restricted to cases where no declarative module exists, and must include documented rationale.
+
+### 8.3 Secret Protection Invariant
+- Sensitive attributes (passwords, auth tokens, private keys) are never exposed in plaintext in task summaries, YAML payloads, or execution logs.
+- Secrets are masked with `•••••••• (vault: <var_name>)` and injected via Ansible Vault or secure extra variables.
+
+---
+
+## 9. Conservative Multi-Tier Telemetry Engine
+
+To prevent polling storms and CPU spikes across 47+ homelab nodes, telemetry collection operates under a conservative polling architecture:
+
+- **Cadence:** Polling runs at 30–60 second intervals (default 45s).
+- **4-Tier Degradation Hierarchy:**
+  1. **Tier 1 (Direct Glances HTTP REST):** Fast REST API query (`http://<host>:61208/api/4/...`) with 2.5s timeout.
+  2. **Tier 2 (SSH Localhost Curl):** Fallback querying Glances via SSH loopback when the HTTP port is bound to localhost.
+  3. **Tier 3 (Glances CLI):** Fallback executing `glances --stdout-json cpu,mem,load,sensors` over SSH when the daemon is not running.
+  4. **Tier 4 (proc/sysfs Direct Extraction):** Fallback reading `/proc/stat`, `/proc/meminfo`, and `/sys/class/thermal` directly over SSH.
+- **Strict Zero-Mock Invariant:** If all 4 tiers fail, the node displays an unmonitored / offline status. No synthetic numbers or fluctuating mock telemetry is ever generated.

@@ -6,6 +6,7 @@ interface TopSubNavProps {
   onSelectTopTab: (tabId: string) => void;
   clusterCpu?: string;
   clusterRam?: string;
+  queuedTasksCount?: number;
 }
 
 export const TopSubNav: React.FC<TopSubNavProps> = ({
@@ -13,6 +14,7 @@ export const TopSubNav: React.FC<TopSubNavProps> = ({
   onSelectTopTab,
   clusterCpu = '14.8%',
   clusterRam = '42.1 / 128 GB',
+  queuedTasksCount,
 }) => {
   const tabs = TOP_SUB_NAV_TABS;
 
@@ -21,18 +23,26 @@ export const TopSubNav: React.FC<TopSubNavProps> = ({
       <nav className="flex items-center h-full overflow-x-auto min-w-0">
         {tabs.map(tab => {
           const isActive = activeTopTab === tab.id;
+          const isQueueTab = tab.id === 'task_queue';
+          const hasQueued = typeof queuedTasksCount === 'number' && queuedTasksCount > 0;
+
           return (
             <button
               key={tab.id}
               type="button"
               onClick={() => onSelectTopTab(tab.id)}
-              className={`px-3 h-full flex items-center font-mono text-xs transition-colors cursor-pointer shrink-0 ${
+              className={`px-3 h-full flex items-center gap-1.5 font-mono text-xs transition-colors cursor-pointer shrink-0 ${
                 isActive
                   ? 'text-[#b0c9ff] font-bold bg-[#26293c] border-b-2 border-[#b0c9ff]'
                   : 'text-[#c3c6d2] hover:text-[#dfe1fa] hover:bg-[#26293c]/50'
               }`}
             >
-              {tab.label}
+              <span>{tab.label}</span>
+              {isQueueTab && hasQueued && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-[#b0c9ff]/20 text-[#b0c9ff] border border-[#b0c9ff]/30">
+                  {queuedTasksCount}
+                </span>
+              )}
             </button>
           );
         })}

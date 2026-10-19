@@ -67,7 +67,61 @@ The system runs a **dual-stack architecture**:
 
 ---
 
-## 5. Verification Commands
+---
+
+## 5. Ansible Mutation Queue & Execution Invariants
+
+All host state mutations (network interface changes, firewall rules, package upgrades, container lifecycle events, storage volumes, and system settings) are orchestrated through declarative Ansible tasks via the **On-the-Fly Playbook Queue**.
+
+- **Queue Staging & Persistence:**
+  - Mutation actions stage declarative steps into SQLite (`ansible_queue_tasks` in `data/hosts-cache.sqlite`).
+  - Tasks carry target node ID, target host route, execution priority, and structured Ansible steps.
+  - The UI dynamically displays the staged count in the Console `Task Queue (N)` tab and top-level navigation badges.
+- **One-by-One Execution with Checkpoint Halting:**
+  - Queue execution runs strictly sequentially (`POST /api/queue/execute`).
+  - **Checkpoint Halting:** If any task or step fails during playbook execution, the runner immediately halts queue processing, marks the task as `failed`, records the error payload, and stops subsequent queued tasks from running to prevent compounding host misconfigurations.
+- **Structured JSON Callback Requirement (`ANSIBLE_STDOUT_CALLBACK=json`):**
+  - All automated runner invocations MUST export `ANSIBLE_STDOUT_CALLBACK=json` (or set `stdout_callback = json` in `ansible.cfg`).
+  - This guarantees parseable JSON task results for real-time frontend streaming and accordion task drill-down.
+- **Native Module Prioritization & Galaxy Collection Guard:**
+  - **Native Builtins First:** Always prioritize standard Ansible core modules (`ansible.builtin.service`, `ansible.builtin.systemd`, `ansible.builtin.package`, `ansible.builtin.copy`, `ansible.posix.firewalld`, etc.) for idempotency and rollback safety.
+  - **Galaxy Collection Prompt Guard:** When a community or external collection is required (e.g., `community.general.*`, `cisco.ios.*`), probe collection availability. If missing, prompt the operator with an installation guard via `POST /api/ansible/collections/install` before running.
+  - **Shell / Command Last Resort:** `ansible.builtin.shell` or `ansible.builtin.command` must strictly remain an explicitly documented last resort when no declarative Ansible module exists.
+- **Secret Protection Invariant:**
+  - Sensitive values (passwords, auth tokens, private keys) MUST never be shown or logged in plain text.
+  - Secret fields must always be masked in UI summaries, logs, and task payloads as `•••••••• (vault: <var_name>)` and referenced via Ansible Vault or secure extra vars.
+
+---
+
+## 6. Pluggable Driver Architecture & Extensibility
+
+Host actions are encapsulated behind typed driver interfaces:
+- **`SystemDriver`:** Service lifecycle, elevation, reboot/power actions, host discovery.
+- **`StorageDriver`:** ZFS pools/datasets, Btrfs filesystems, LVM and mount points.
+- **`NetworkDriver`:** Interfaces, routing, IP assignments, Tailscale mesh peering.
+- **`ContainerDriver`:** Podman (rootful and rootless user sessions), Docker daemon fallback.
+- **`PackageDriver`:** Image/immutable systems (`bootc`, `rpm-ostree`) and traditional package managers (`dnf`, `apt`, `apk`).
+- **Extensible Expansion Slots:** Architecture includes dedicated driver slots for:
+  - Databases (`DatabaseDriver`: MongoDB, PostgreSQL, MySQL)
+  - Kubernetes (`KubernetesDriver`: k8s, k3s cluster orchestration)
+  - Network switches (`NetworkSwitchDriver`: Cisco `cisco.ios.*`, Arista EOS, VyOS)
+
+---
+
+## 7. Conservative Telemetry Engine (30–60s Cadence)
+
+To maintain minimal footprint on managed nodes and homelab network links, telemetry polling follows a conservative strategy:
+- **Conservative Polling Interval:** Polling cadence is set to 30–60 seconds (default 45s), minimizing CPU wakeups and SSH session overhead.
+- **Multi-Tier Degradation Hierarchy:**
+  1. **Tier 1 (Direct Glances HTTP REST):** Fast REST API query (`http://<host>:61208/api/4/...`) with 2.5s timeout.
+  2. **Tier 2 (SSH Localhost Curl):** Queries Glances via SSH loopback when the HTTP port is not exposed on external interfaces.
+  3. **Tier 3 (Glances CLI):** Executes `glances --stdout-json cpu,mem,load,sensors` over SSH when the Glances daemon is not running.
+  4. **Tier 4 (proc/sysfs Fallback):** Reads `/proc/stat`, `/proc/meminfo`, and `/sys/class/thermal` directly via lightweight SSH command.
+- **Strict Zero-Mock Invariant:** If all 4 tiers fail, the node must be flagged as offline or unmonitored; under no circumstances should synthetic metrics or randomized jitter be returned.
+
+---
+
+## 8. Verification Commands
 
 Before concluding any work, contributors and agents must run:
 ```bash
