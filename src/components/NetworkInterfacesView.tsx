@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../types/index.ts';
+import { ConnectNetworkModal } from './modals/ConnectNetworkModal.tsx';
 
 interface NetworkInterfacesViewProps {
   node: NodeItem;
@@ -21,6 +22,10 @@ export const NetworkInterfacesView: React.FC<NetworkInterfacesViewProps> = ({ no
   const [loading, setLoading] = useState(false);
   const [toggling, setToggling] = useState<string | null>(null);
 
+  // Connect network modal state
+  const [showConnectModal, setShowConnectModal] = useState(false);
+  const [isModalMinimized, setIsModalMinimized] = useState(false);
+
   const fetchInterfaces = (refresh = false) => {
     setLoading(true);
     fetch(`/api/nodes/${encodeURIComponent(node.id)}/interfaces${refresh ? '?refresh=true' : ''}`)
@@ -38,21 +43,24 @@ export const NetworkInterfacesView: React.FC<NetworkInterfacesViewProps> = ({ no
     fetchInterfaces(false);
   }, [node.id, node.shortName]);
 
-  const toggleInterface = (name: string) => {
+  const toggleInterface = async (name: string) => {
+    const iface = interfaces.find(i => i.name === name);
+    const nextState = iface?.status.includes('UP') ? 'down' : 'up';
     setToggling(name);
-    setTimeout(() => {
-      setInterfaces(prev =>
-        prev.map(i =>
-          i.name === name
-            ? {
-                ...i,
-                status: i.status.includes('UP') ? 'DOWN' : 'UP / CARRIER',
-              }
-            : i
-        )
-      );
+    try {
+      const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/interfaces/${encodeURIComponent(name)}/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: nextState }),
+      });
+      if (res.ok) {
+        fetchInterfaces(true);
+      }
+    } catch {
+      // Revert if error
+    } finally {
       setToggling(null);
-    }, 400);
+    }
   };
 
   return (
@@ -79,6 +87,17 @@ export const NetworkInterfacesView: React.FC<NetworkInterfacesViewProps> = ({ no
             <span className={`material-symbols-outlined text-[14px] ${loading ? 'animate-spin' : ''}`}>sync</span>
             <span>Refresh Interfaces</span>
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              setIsModalMinimized(false);
+              setShowConnectModal(true);
+            }}
+            className="flex items-center gap-1 bg-[#8cd6cb] hover:bg-[#a0ebe0] text-[#002e68] font-bold px-2.5 py-1 rounded transition-colors cursor-pointer"
+          >
+            <span className="material-symbols-outlined text-[14px]">add</span>
+            <span>+ Connect Network</span>
+          </button>
         </div>
       </div>
 
@@ -91,6 +110,7 @@ export const NetworkInterfacesView: React.FC<NetworkInterfacesViewProps> = ({ no
               <th className="px-3">IPv4 / Subnet</th>
               <th className="px-3">Hardware MAC</th>
               <th className="px-3">Speed / Duplex</th>
+              <th className="px-3">MTU</th>
               <th className="px-3">RX / TX</th>
               <th className="px-3">Status</th>
               <th className="px-3 text-right">Action</th>
@@ -113,6 +133,7 @@ export const NetworkInterfacesView: React.FC<NetworkInterfacesViewProps> = ({ no
                   <td className="px-3 font-semibold text-[#dfe1fa]">{iface.ip}</td>
                   <td className="px-3 text-[#8d909b]">{iface.mac}</td>
                   <td className="px-3 text-[#d9b9ff]">{iface.speed}</td>
+                  <td className="px-3 text-[#c3c6d2]">{iface.mtu || 1500}</td>
                   <td className="px-3 text-[#c3c6d2]">
                     ↓ {iface.rx} | ↑ {iface.tx}
                   </td>
@@ -147,6 +168,49 @@ export const NetworkInterfacesView: React.FC<NetworkInterfacesViewProps> = ({ no
           </tbody>
         </table>
       </div>
+
+      {/* Connect Network Modal */}
+      <ConnectNetworkModal
+        node={node}
+        isOpen={showConnectModal}
+        isMinimized={isModalMinimized}
+        onMinimize={() => setIsModalMinimized(prev => !prev)}
+        onClose={() => {
+          setShowConnectModal(false);
+          setIsModalMinimized(false);
+        }}
+        onConnected={() => fetchInterfaces(true)}
+        existingInterfaces={interfaces.map(i => i.name)}
+      />
+
+      {/* Minimized Modal Floating Bar */}
+      {isModalMinimized && showConnectModal && (
+        <div className="fixed bottom-4 right-4 z-50 bg-[#171a2d] border border-[#8cd6cb] rounded-lg px-3 py-2 flex items-center gap-3 shadow-2xl font-mono text-xs">
+          <div className="flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-[#8cd6cb] text-[18px]">settings_ethernet</span>
+            <span className="text-[#dfe1fa] font-bold">Connect Network</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setIsModalMinimized(false)}
+              className="text-[#8cd6cb] hover:bg-[#8cd6cb]/20 px-2 py-0.5 rounded cursor-pointer transition-colors"
+            >
+              Restore
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowConnectModal(false);
+                setIsModalMinimized(false);
+              }}
+              className="text-[#8d909b] hover:text-[#dfe1fa] p-1 cursor-pointer transition-colors"
+            >
+              <span className="material-symbols-outlined text-[14px]">close</span>
+            </button>
+          </div>
+        </div>
+      )}
     </section>
   );
 };

@@ -39,6 +39,12 @@ import {
   buildSmbPasswdCommand,
   sanitizeUsername,
 } from './src/utils/sharesManager.ts';
+import {
+  buildFirewallAddCommand,
+  buildFirewallDeleteCommand,
+  buildConnectNetworkCommand,
+  parseFirewallListAll,
+} from './src/utils/firewallRules.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -838,86 +844,16 @@ app.get('/api/nodes/:id/firewall', async (req, res) => {
     const isRunning = stateRaw.trim().includes('running');
     const hasNft = !nftRaw.includes('NO_NFT') && nftRaw.includes('table');
 
-    const zones: Record<string, { interfaces: string[]; sources: string[] }> = {};
-    const zoneLines = zonesRaw.trim().split('\n');
-    let currentZone = '';
-    for (const line of zoneLines) {
-      const matchZone = line.match(/^([a-zA-Z0-9_\-]+)/);
-      if (matchZone && !line.startsWith(' ') && !line.startsWith('\t')) {
-        currentZone = matchZone[1];
-        zones[currentZone] = { interfaces: [], sources: [] };
-      } else if (currentZone && line.includes('interfaces:')) {
-        zones[currentZone].interfaces = line.replace('interfaces:', '').trim().split(/\s+/).filter(Boolean);
-      } else if (currentZone && line.includes('sources:')) {
-        zones[currentZone].sources = line.replace('sources:', '').trim().split(/\s+/).filter(Boolean);
-      }
-    }
-
-    let services: string[] = [];
-    let ports: string[] = [];
-    for (const line of listAllRaw.split('\n')) {
-      if (line.trim().startsWith('services:')) {
-        services = line.replace(/services:/, '').trim().split(/\s+/).filter(Boolean);
-      } else if (line.trim().startsWith('ports:')) {
-        ports = line.replace(/ports:/, '').trim().split(/\s+/).filter(Boolean);
-      }
-    }
-
-    const rules: any[] = [];
-    if (isRunning) {
-      if (zones['trusted']?.interfaces?.includes('tailscale0') || zones['internal']?.interfaces?.includes('tailscale0')) {
-        rules.push({
-          id: 'fw-ts',
-          chain: 'INPUT',
-          policy: 'ACCEPT',
-          proto: 'all',
-          port: 'all',
-          source: 'tailscale0 (100.64.0.0/10)',
-          comment: 'Tailscale Encrypted Mesh Interface (Trusted/Internal Zone)',
-          enabled: true,
-        });
-      }
-
-      if (ports.length > 0) {
-        ports.forEach((p, idx) => {
-          const [portNum, proto = 'tcp'] = p.split('/');
-          rules.push({
-            id: `fw-port-${idx}`,
-            chain: 'INPUT',
-            policy: 'ACCEPT',
-            proto,
-            port: portNum,
-            source: 'any',
-            comment: `Open Port (${p})`,
-            enabled: true,
-          });
-        });
-      }
-
-      if (services.length > 0) {
-        services.forEach((s, idx) => {
-          rules.push({
-            id: `fw-svc-${idx}`,
-            chain: 'INPUT',
-            policy: 'ACCEPT',
-            proto: 'tcp/udp',
-            port: s,
-            source: 'public / lan',
-            comment: `firewalld service: ${s}`,
-            enabled: true,
-          });
-        });
-      }
-    }
+    const parsed = parseFirewallListAll(listAllRaw, zonesRaw);
 
     const result = {
       status: isRunning ? 'running' : 'inactive',
       nftablesActive: hasNft,
       backend: 'nftables (firewalld)',
-      zones,
-      services,
-      ports,
-      rules,
+      zones: parsed.zones,
+      services: parsed.services,
+      ports: parsed.ports,
+      rules: isRunning ? parsed.rules : [],
     };
 
     hostCache.upsertHostSection(targetNode.id, 'firewall', result);
@@ -1402,6 +1338,18 @@ app.post('/api/nodes/:id/interfaces/:name/toggle', async (req, res) => {
   }
 });
 
+app.post('/api/nodes/:id/interfaces/connect', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  try {
+    const cmd = buildConnectNetworkCommand(req.body);
+    const out = await runNodeCommand(targetNode, cmd, 10000);
+    hostCache.invalidateHostSections(targetNode.id);
+    res.json({ success: true, output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to connect network interface' });
+  }
+});
+
 app.post('/api/nodes/:id/vms/:name/action', async (req, res) => {
   const targetNode = findNode(req.params.id);
   const vmName = req.params.name;
@@ -1487,14 +1435,8 @@ app.post('/api/nodes/:id/vms/create', async (req, res) => {
 
 app.post('/api/nodes/:id/firewall/rules', async (req, res) => {
   const targetNode = findNode(req.params.id);
-  const { port, protocol, zone, service } = req.body;
   try {
-    let cmd = '';
-    if (service) {
-      cmd = `sudo firewall-cmd --permanent --zone=${zone || 'public'} --add-service=${service} && sudo firewall-cmd --reload`;
-    } else {
-      cmd = `sudo firewall-cmd --permanent --zone=${zone || 'public'} --add-port=${port}/${protocol || 'tcp'} && sudo firewall-cmd --reload`;
-    }
+    const cmd = buildFirewallAddCommand(req.body);
     const out = await runNodeCommand(targetNode, cmd, 8000);
     hostCache.invalidateHostSections(targetNode.id);
     res.json({ success: true, output: out.trim() });
@@ -1506,14 +1448,14 @@ app.post('/api/nodes/:id/firewall/rules', async (req, res) => {
 app.delete('/api/nodes/:id/firewall/rules/:ruleId', async (req, res) => {
   const targetNode = findNode(req.params.id);
   const ruleId = req.params.ruleId;
+  const zone = (req.query.zone as string) || (req.body?.zone as string) || 'public';
+  const rawRule = (req.query.rawRule as string) || (req.body?.rawRule as string);
   try {
-    // If ruleId contains port/proto e.g. "8080/tcp"
-    let cmd = '';
-    if (ruleId.includes('/')) {
-      cmd = `sudo firewall-cmd --permanent --remove-port=${ruleId} && sudo firewall-cmd --reload`;
-    } else {
-      cmd = `sudo firewall-cmd --permanent --remove-service=${ruleId} && sudo firewall-cmd --reload`;
-    }
+    const cmd = buildFirewallDeleteCommand({
+      zone,
+      ruleId,
+      rawRule,
+    });
     const out = await runNodeCommand(targetNode, cmd, 8000);
     hostCache.invalidateHostSections(targetNode.id);
     res.json({ success: true, output: out.trim() });
