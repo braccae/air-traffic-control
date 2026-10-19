@@ -69,6 +69,12 @@ import {
   clearQueue,
   executeNextQueueTask,
 } from './src/utils/ansibleQueueRunner.ts';
+import {
+  getAnsibleVenvPath,
+  findOrBootstrapUv,
+  ensureAnsibleVenv,
+  REQUIRED_VENV_PACKAGES,
+} from './src/utils/ansibleVenvManager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1855,6 +1861,30 @@ app.put('/api/ansible/config', async (req, res) => {
   }
 });
 
+app.get('/api/ansible/environment', async (_req, res) => {
+  try {
+    const venvPath = getAnsibleVenvPath();
+    const ansibleBinary = path.join(venvPath, 'bin', 'ansible');
+    const installed = fs.existsSync(ansibleBinary);
+    let uvPath = '';
+    try {
+      uvPath = await findOrBootstrapUv({ downloadIfMissing: false });
+    } catch {
+      // uv not found without download
+    }
+
+    res.json({
+      success: true,
+      venvPath,
+      uvPath,
+      installed,
+      packages: REQUIRED_VENV_PACKAGES,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to check ansible environment' });
+  }
+});
+
 app.get('/api/ansible/inventory', (_req, res) => {
   const inventoryScript = path.resolve(__dirname, 'inventory/tailscale_inventory.py');
   try {
@@ -2339,6 +2369,8 @@ async function startServer() {
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Air Traffic Control Fullstack server running on http://0.0.0.0:${PORT}`);
+    // Non-blocking background initialization of persistent Ansible virtual environment
+    ensureAnsibleVenv().catch(err => console.warn('Background venv init error:', err));
   });
 }
 
