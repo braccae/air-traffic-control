@@ -226,7 +226,7 @@ func TestRegistry_FilterCompatible(t *testing.T) {
 
 func TestGlobalRegistry(t *testing.T) {
 	p := &fakePlugin{
-		meta: plugin.Meta{ID: "connection/ssh", Kind: plugin.KindConnection, Name: "ssh"},
+		meta: plugin.Meta{ID: "connection/test-global-conn", Kind: plugin.KindConnection, Name: "test-global-conn"},
 	}
 
 	err := plugin.Register(p)
@@ -234,8 +234,8 @@ func TestGlobalRegistry(t *testing.T) {
 		t.Fatalf("failed to register to global registry: %v", err)
 	}
 
-	got, ok := plugin.Get("connection/ssh")
-	if !ok || got.Meta().ID != "connection/ssh" {
+	got, ok := plugin.Get("connection/test-global-conn")
+	if !ok || got.Meta().ID != "connection/test-global-conn" {
 		t.Fatalf("failed to get from global registry: %v", got)
 	}
 

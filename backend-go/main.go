@@ -12,6 +12,7 @@ import (
 
 	"air-traffic-control/backend/cmd/proxy"
 	"air-traffic-control/backend/pkg/glances"
+	"air-traffic-control/backend/pkg/plugin"
 	"air-traffic-control/backend/pkg/podman"
 	"air-traffic-control/backend/pkg/restic"
 	"air-traffic-control/backend/pkg/ssh"
@@ -261,6 +262,10 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager) *http.ServeMux 
 		}
 		json.NewEncoder(w).Encode(telem)
 	})
+
+	// Mount plugin framework REST API routes
+	pluginAPI := plugin.NewAPI(plugin.APIOptions{})
+	pluginAPI.RegisterRoutes(mux)
 
 	return mux
 }
