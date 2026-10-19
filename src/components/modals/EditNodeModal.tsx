@@ -4,6 +4,8 @@ import type { NodeItem, NodeType } from '../../types/index.ts';
 interface EditNodeModalProps {
   node: NodeItem | null;
   isOpen: boolean;
+  isMinimized?: boolean;
+  onMinimize?: () => void;
   onClose: () => void;
   onSaveNode: (nodeId: string, updates: Partial<NodeItem> & { testSsh?: boolean }) => Promise<void> | void;
   onDeleteNode?: (nodeId: string) => void;
@@ -12,6 +14,8 @@ interface EditNodeModalProps {
 export const EditNodeModal: React.FC<EditNodeModalProps> = ({
   node,
   isOpen,
+  isMinimized = false,
+  onMinimize,
   onClose,
   onSaveNode,
   onDeleteNode,
@@ -100,7 +104,10 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
+    <div
+      style={{ display: isMinimized ? 'none' : 'flex' }}
+      className="fixed inset-0 z-50 items-center justify-center bg-black/70 backdrop-blur-xs p-4"
+    >
       <div className="w-full max-w-2xl bg-[#0a0d1f] rounded-lg shadow-2xl border border-[#313447] overflow-hidden max-h-[90vh] flex flex-col">
         <div className="h-9 bg-[#171a2d] px-3 flex items-center justify-between border-b border-[#26293c]">
           <div className="flex items-center gap-2">
@@ -109,13 +116,26 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
               Edit Node &amp; SSH Settings: {node.name}
             </span>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-[#8d909b] hover:text-[#dfe1fa] p-1 cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[16px]">close</span>
-          </button>
+          <div className="flex items-center gap-1">
+            {onMinimize && (
+              <button
+                type="button"
+                onClick={onMinimize}
+                className="text-[#8d909b] hover:text-[#dfe1fa] p-1 cursor-pointer transition-colors"
+                title="Minimize to bottom panel"
+              >
+                <span className="material-symbols-outlined text-[16px]">remove</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-[#8d909b] hover:text-[#dfe1fa] p-1 cursor-pointer transition-colors"
+              title="Close"
+            >
+              <span className="material-symbols-outlined text-[16px]">close</span>
+            </button>
+          </div>
         </div>
 
         <form onSubmit={handleSubmit} className="p-4 space-y-3 font-mono text-xs overflow-y-auto">

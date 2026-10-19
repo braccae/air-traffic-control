@@ -1,16 +1,31 @@
 import React, { useState } from 'react';
 import type { GlobalTaskItem } from '../types/index.ts';
+import type { ManagedWindow } from '../utils/windowManager.ts';
 
 interface GlobalTasksExecutionLogProps {
   tasks: GlobalTaskItem[];
   onOpenTaskDetails?: (taskId: string) => void;
   onOpenPlaybookEditor?: () => void;
+  windows?: ManagedWindow[];
+  activeWindowId?: string | null;
+  onSelectWindow?: (id: string) => void;
+  onRestoreWindow?: (id: string) => void;
+  onMinimizeWindow?: (id: string) => void;
+  onCloseWindow?: (id: string) => void;
+  onNewTerminal?: () => void;
 }
 
 export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = ({
   tasks,
   onOpenTaskDetails,
   onOpenPlaybookEditor,
+  windows = [],
+  activeWindowId,
+  onSelectWindow,
+  onRestoreWindow,
+  onMinimizeWindow,
+  onCloseWindow,
+  onNewTerminal,
 }) => {
   const [activeTab, setActiveTab] = useState<'active' | 'ansible' | 'syslog' | 'vault'>('active');
   const [isExpanded, setIsExpanded] = useState(false);
@@ -129,6 +144,94 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
               Vault Audit
             </button>
           </div>
+
+          {/* Unified Minimized Window / Modal Dock Bar */}
+          {windows.length > 0 && (
+            <div className="flex items-center gap-1.5 h-full pl-2 border-l border-[#26293c]">
+              <span className="font-mono text-[10px] text-[#8d909b] uppercase tracking-wider flex items-center gap-1 shrink-0">
+                <span className="material-symbols-outlined text-[13px] text-[#8cd6cb]">dock_to_bottom</span>
+                <span className="hidden xl:inline">Windows ({windows.length})</span>
+              </span>
+
+              <div className="flex items-center gap-1 overflow-x-auto max-w-[32vw] sm:max-w-[42vw] md:max-w-[48vw]">
+                {windows.map((win) => {
+                  const isActive = win.id === activeWindowId && !win.isMinimized;
+                  const isMin = win.isMinimized;
+
+                  return (
+                    <div
+                      key={win.id}
+                      onClick={() => {
+                        if (isMin) {
+                          onRestoreWindow?.(win.id);
+                        } else if (win.id === activeWindowId) {
+                          onMinimizeWindow?.(win.id);
+                        } else {
+                          onSelectWindow?.(win.id);
+                        }
+                      }}
+                      className={`group flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-mono transition-all cursor-pointer border ${
+                        isActive
+                          ? 'bg-[#1f6feb]/20 border-[#58a6ff] text-white shadow-xs'
+                          : isMin
+                          ? 'bg-[#161b22] border-[#30363d] text-gray-400 hover:text-gray-200 hover:border-gray-500'
+                          : 'bg-[#161b22]/70 border-[#30363d]/60 text-gray-300 hover:border-gray-500'
+                      }`}
+                      title={`${win.title} (${win.type}) - ${
+                        isMin ? 'Click to restore' : isActive ? 'Click to minimize' : 'Click to focus'
+                      }`}
+                    >
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                          isActive
+                            ? 'bg-[#3fb950] animate-pulse'
+                            : isMin
+                            ? 'bg-amber-400'
+                            : 'bg-gray-500'
+                        }`}
+                      />
+                      {win.icon && (
+                        <span className="material-symbols-outlined text-[13px] text-[#b0c9ff] shrink-0">
+                          {win.icon}
+                        </span>
+                      )}
+                      <span className="font-medium max-w-[130px] truncate">{win.title}</span>
+
+                      <span className="material-symbols-outlined text-[12px] text-gray-400 group-hover:text-white shrink-0">
+                        {isMin ? 'expand_less' : 'expand_more'}
+                      </span>
+
+                      {onCloseWindow && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onCloseWindow(win.id);
+                          }}
+                          className="p-0.5 rounded hover:bg-red-500/20 text-gray-400 hover:text-red-400 transition-colors ml-0.5 cursor-pointer"
+                          title="Close window"
+                        >
+                          <span className="material-symbols-outlined text-[12px] leading-none">close</span>
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {onNewTerminal && (
+                <button
+                  type="button"
+                  onClick={onNewTerminal}
+                  className="flex items-center gap-1 px-1.5 py-0.5 bg-[#238636]/20 border border-[#238636]/50 hover:bg-[#238636]/40 text-[#3fb950] rounded text-[10px] font-mono transition-colors shrink-0 cursor-pointer"
+                  title="Open new terminal session"
+                >
+                  <span className="material-symbols-outlined text-[12px]">add</span>
+                  <span>Term</span>
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-2 text-[#c3c6d2]">

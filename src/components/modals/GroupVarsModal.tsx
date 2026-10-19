@@ -3,6 +3,8 @@ import { VarsSecretsEditor } from '../VarsSecretsEditor';
 
 interface GroupVarsModalProps {
   isOpen: boolean;
+  isMinimized?: boolean;
+  onMinimize?: () => void;
   onClose: () => void;
 }
 
@@ -53,6 +55,8 @@ os_distribution: "AlmaLinux 10.2 (Lavender Lion)"
 
 export const GroupVarsModal: React.FC<GroupVarsModalProps> = ({
   isOpen,
+  isMinimized = false,
+  onMinimize,
   onClose,
 }) => {
   const [filesMap, setFilesMap] = useState<Record<string, string>>(DEFAULT_GROUP_VARS);
@@ -100,8 +104,13 @@ export const GroupVarsModal: React.FC<GroupVarsModalProps> = ({
 
   const fileKeys = Object.keys(filesMap);
 
+  if (!isOpen) return null;
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
+    <div
+      style={{ display: isMinimized ? 'none' : 'flex' }}
+      className="fixed inset-0 z-50 items-center justify-center bg-black/70 backdrop-blur-xs p-4"
+    >
       <div className="w-full max-w-4xl bg-[#0a0d1f] rounded-lg shadow-2xl border border-[#313447] flex flex-col h-[620px] overflow-hidden">
         <div className="h-9 bg-[#171a2d] px-3 flex items-center justify-between border-b border-[#26293c]">
           <div className="flex items-center gap-2">
@@ -110,13 +119,26 @@ export const GroupVarsModal: React.FC<GroupVarsModalProps> = ({
               Ansible Group Vars &amp; Vault Editor
             </span>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-[#8d909b] hover:text-[#dfe1fa] p-1 cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[16px]">close</span>
-          </button>
+          <div className="flex items-center gap-1">
+            {onMinimize && (
+              <button
+                type="button"
+                onClick={onMinimize}
+                className="text-[#8d909b] hover:text-[#dfe1fa] p-1 cursor-pointer transition-colors"
+                title="Minimize to bottom panel"
+              >
+                <span className="material-symbols-outlined text-[16px]">remove</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-[#8d909b] hover:text-[#dfe1fa] p-1 cursor-pointer transition-colors"
+              title="Close"
+            >
+              <span className="material-symbols-outlined text-[16px]">close</span>
+            </button>
+          </div>
         </div>
 
         {/* Tab files */}

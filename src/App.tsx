@@ -22,7 +22,7 @@ import { ToastNotification, type ToastItem } from './components/ToastNotificatio
 
 // Modals
 import { TerminalModal } from './components/modals/TerminalModal.tsx';
-import { TerminalDockBar } from './components/TerminalDockBar.tsx';
+import type { ManagedWindow } from './utils/windowManager.ts';
 import { TailscaleExplorerView } from './components/TailscaleExplorerView.tsx';
 import { AddNodeModal } from './components/modals/AddNodeModal.tsx';
 import { EditNodeModal } from './components/modals/EditNodeModal.tsx';
@@ -542,6 +542,162 @@ export default function App() {
   const handleUpdateSessionSize = (id: string, size: WindowSize) => {
     setSessions(prev => updateSessionSize(prev, id, size));
   };
+
+  // Unified Window Manager State for Minimizable Modals
+  const [minimizedModals, setMinimizedModals] = useState<Record<string, boolean>>({});
+
+  const handleSelectWindow = (id: string) => {
+    if (id.startsWith('term-') || sessions.some(s => s.id === id)) {
+      setActiveSessionId(id);
+      setTerminalOpen(true);
+      setSessions(prev => setSessionMinimized(prev, id, false));
+    } else {
+      setMinimizedModals(prev => ({ ...prev, [id]: false }));
+    }
+  };
+
+  const handleRestoreWindow = (id: string) => {
+    if (id.startsWith('term-') || sessions.some(s => s.id === id)) {
+      setSessions(prev => setSessionMinimized(prev, id, false));
+      setActiveSessionId(id);
+      setTerminalOpen(true);
+    } else {
+      setMinimizedModals(prev => ({ ...prev, [id]: false }));
+    }
+  };
+
+  const handleMinimizeWindow = (id: string) => {
+    if (id.startsWith('term-') || sessions.some(s => s.id === id)) {
+      handleMinimizeTerminalSession(id);
+    } else {
+      setMinimizedModals(prev => ({ ...prev, [id]: true }));
+    }
+  };
+
+  const handleCloseWindow = (id: string) => {
+    if (id.startsWith('term-') || sessions.some(s => s.id === id)) {
+      handleCloseTerminalSession(id);
+    } else if (id === 'modal-add-node') {
+      setAddNodeOpen(false);
+      setMinimizedModals(prev => ({ ...prev, [id]: false }));
+    } else if (id === 'modal-edit-node') {
+      setEditNodeTarget(null);
+      setMinimizedModals(prev => ({ ...prev, [id]: false }));
+    } else if (id === 'modal-run-playbook') {
+      setPlaybookOpen(false);
+      setMinimizedModals(prev => ({ ...prev, [id]: false }));
+    } else if (id === 'modal-playbook-editor') {
+      setPlaybookEditorOpen(false);
+      setMinimizedModals(prev => ({ ...prev, [id]: false }));
+    } else if (id === 'modal-group-vars') {
+      setGroupVarsOpen(false);
+      setMinimizedModals(prev => ({ ...prev, [id]: false }));
+    } else if (id === 'modal-container-logs') {
+      setLogsTarget(null);
+      setMinimizedModals(prev => ({ ...prev, [id]: false }));
+    }
+  };
+
+  const managedWindows: ManagedWindow[] = [
+    ...sessions.map((s) => ({
+      id: s.id,
+      title: s.nodeName || s.title,
+      icon: 'terminal',
+      type: 'terminal' as const,
+      isMinimized: s.isMinimized,
+      isOpen: terminalOpen,
+      meta: { sessionId: s.id },
+    })),
+    ...(addNodeOpen
+      ? [
+          {
+            id: 'modal-add-node',
+            title: 'Add Node',
+            icon: 'add_circle',
+            type: 'modal' as const,
+            isMinimized: Boolean(minimizedModals['modal-add-node']),
+            isOpen: addNodeOpen,
+          },
+        ]
+      : []),
+    ...(editNodeTarget
+      ? [
+          {
+            id: 'modal-edit-node',
+            title: `Edit: ${editNodeTarget.name}`,
+            icon: 'settings',
+            type: 'modal' as const,
+            isMinimized: Boolean(minimizedModals['modal-edit-node']),
+            isOpen: true,
+          },
+        ]
+      : []),
+    ...(playbookOpen
+      ? [
+          {
+            id: 'modal-run-playbook',
+            title: 'Ansible: Run Playbook',
+            icon: 'play_arrow',
+            type: 'modal' as const,
+            isMinimized: Boolean(minimizedModals['modal-run-playbook']),
+            isOpen: playbookOpen,
+          },
+        ]
+      : []),
+    ...(playbookEditorOpen
+      ? [
+          {
+            id: 'modal-playbook-editor',
+            title: selectedPlaybookForEdit ? `Editor: ${selectedPlaybookForEdit}` : 'Playbook Editor',
+            icon: 'menu_book',
+            type: 'modal' as const,
+            isMinimized: Boolean(minimizedModals['modal-playbook-editor']),
+            isOpen: playbookEditorOpen,
+          },
+        ]
+      : []),
+    ...(groupVarsOpen
+      ? [
+          {
+            id: 'modal-group-vars',
+            title: 'Ansible Group Vars',
+            icon: 'lock_reset',
+            type: 'modal' as const,
+            isMinimized: Boolean(minimizedModals['modal-group-vars']),
+            isOpen: groupVarsOpen,
+          },
+        ]
+      : []),
+    ...(logsTarget
+      ? [
+          {
+            id: 'modal-container-logs',
+            title: `Logs: ${logsTarget}`,
+            icon: 'receipt_long',
+            type: 'modal' as const,
+            isMinimized: Boolean(minimizedModals['modal-container-logs']),
+            isOpen: true,
+          },
+        ]
+      : []),
+  ];
+
+  const activeWindowId =
+    terminalOpen && activeSessionId && !sessions.find((s) => s.id === activeSessionId)?.isMinimized
+      ? activeSessionId
+      : addNodeOpen && !minimizedModals['modal-add-node']
+      ? 'modal-add-node'
+      : editNodeTarget && !minimizedModals['modal-edit-node']
+      ? 'modal-edit-node'
+      : playbookOpen && !minimizedModals['modal-run-playbook']
+      ? 'modal-run-playbook'
+      : playbookEditorOpen && !minimizedModals['modal-playbook-editor']
+      ? 'modal-playbook-editor'
+      : groupVarsOpen && !minimizedModals['modal-group-vars']
+      ? 'modal-group-vars'
+      : logsTarget && !minimizedModals['modal-container-logs']
+      ? 'modal-container-logs'
+      : null;
 
   // Global Keyboard Shortcuts (Task 25 & Task 95)
   useEffect(() => {
@@ -1321,10 +1477,17 @@ export default function App() {
         </main>
       </div>
 
-      {/* Fixed Bottom Global Tasks & Execution Log */}
+      {/* Fixed Bottom Global Tasks & Execution Log with Unified Window Dock */}
       <GlobalTasksExecutionLog
         tasks={tasks}
         onOpenPlaybookEditor={() => handleOpenPlaybookEditor()}
+        windows={managedWindows}
+        activeWindowId={activeWindowId}
+        onSelectWindow={handleSelectWindow}
+        onRestoreWindow={handleRestoreWindow}
+        onMinimizeWindow={handleMinimizeWindow}
+        onCloseWindow={handleCloseWindow}
+        onNewTerminal={() => handleNewTerminalSession()}
       />
 
       {/* Interactive Modals */}
@@ -1332,7 +1495,7 @@ export default function App() {
         sessions={sessions}
         activeSessionId={activeSessionId}
         nodes={nodesList}
-        isOpen={terminalOpen && !!activeSessionId && !sessions.find(s => s.id === activeSessionId)?.isMinimized}
+        isOpen={terminalOpen && !!activeSessionId}
         onClose={() => setTerminalOpen(false)}
         onSelectSession={setActiveSessionId}
         onCloseSession={handleCloseTerminalSession}
@@ -1343,34 +1506,26 @@ export default function App() {
         onUpdateSessionSize={handleUpdateSessionSize}
       />
 
-      {/* Floating Bottom Minimized Terminal Dock Bar */}
-      <TerminalDockBar
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        onSelectSession={(id) => {
-          setActiveSessionId(id);
-          setTerminalOpen(true);
-        }}
-        onRestoreSession={(id) => {
-          setSessions(prev => setSessionMinimized(prev, id, false));
-          setActiveSessionId(id);
-          setTerminalOpen(true);
-        }}
-        onMinimizeSession={handleMinimizeTerminalSession}
-        onCloseSession={handleCloseTerminalSession}
-        onNewSession={() => handleNewTerminalSession()}
-      />
-
       <AddNodeModal
         isOpen={addNodeOpen}
-        onClose={() => setAddNodeOpen(false)}
+        isMinimized={Boolean(minimizedModals['modal-add-node'])}
+        onMinimize={() => setMinimizedModals(prev => ({ ...prev, 'modal-add-node': true }))}
+        onClose={() => {
+          setAddNodeOpen(false);
+          setMinimizedModals(prev => ({ ...prev, 'modal-add-node': false }));
+        }}
         onAddNode={handleAddNode}
       />
 
       <EditNodeModal
         node={editNodeTarget}
         isOpen={Boolean(editNodeTarget)}
-        onClose={() => setEditNodeTarget(null)}
+        isMinimized={Boolean(minimizedModals['modal-edit-node'])}
+        onMinimize={() => setMinimizedModals(prev => ({ ...prev, 'modal-edit-node': true }))}
+        onClose={() => {
+          setEditNodeTarget(null);
+          setMinimizedModals(prev => ({ ...prev, 'modal-edit-node': false }));
+        }}
         onSaveNode={handleSaveNodeSettings}
         onDeleteNode={handleDeleteNode}
       />
@@ -1378,7 +1533,12 @@ export default function App() {
       <RunPlaybookModal
         isOpen={playbookOpen}
         initialPlaybook={selectedPlaybookForEdit}
-        onClose={() => setPlaybookOpen(false)}
+        isMinimized={Boolean(minimizedModals['modal-run-playbook'])}
+        onMinimize={() => setMinimizedModals(prev => ({ ...prev, 'modal-run-playbook': true }))}
+        onClose={() => {
+          setPlaybookOpen(false);
+          setMinimizedModals(prev => ({ ...prev, 'modal-run-playbook': false }));
+        }}
         onRunPlaybook={handleRunPlaybook}
         onOpenEditor={(playbook) => {
           setPlaybookOpen(false);
@@ -1389,7 +1549,12 @@ export default function App() {
       <PlaybookEditorModal
         isOpen={playbookEditorOpen}
         initialPlaybook={selectedPlaybookForEdit}
-        onClose={() => setPlaybookEditorOpen(false)}
+        isMinimized={Boolean(minimizedModals['modal-playbook-editor'])}
+        onMinimize={() => setMinimizedModals(prev => ({ ...prev, 'modal-playbook-editor': true }))}
+        onClose={() => {
+          setPlaybookEditorOpen(false);
+          setMinimizedModals(prev => ({ ...prev, 'modal-playbook-editor': false }));
+        }}
         onRunPlaybook={(playbook) => {
           setPlaybookEditorOpen(false);
           setSelectedPlaybookForEdit(playbook);
@@ -1401,7 +1566,12 @@ export default function App() {
         targetName={logsTarget}
         node={selectedNode}
         isOpen={Boolean(logsTarget)}
-        onClose={() => setLogsTarget(null)}
+        isMinimized={Boolean(minimizedModals['modal-container-logs'])}
+        onMinimize={() => setMinimizedModals(prev => ({ ...prev, 'modal-container-logs': true }))}
+        onClose={() => {
+          setLogsTarget(null);
+          setMinimizedModals(prev => ({ ...prev, 'modal-container-logs': false }));
+        }}
       />
 
       <RebootConfirmModal
@@ -1423,7 +1593,12 @@ export default function App() {
 
       <GroupVarsModal
         isOpen={groupVarsOpen}
-        onClose={() => setGroupVarsOpen(false)}
+        isMinimized={Boolean(minimizedModals['modal-group-vars'])}
+        onMinimize={() => setMinimizedModals(prev => ({ ...prev, 'modal-group-vars': true }))}
+        onClose={() => {
+          setGroupVarsOpen(false);
+          setMinimizedModals(prev => ({ ...prev, 'modal-group-vars': false }));
+        }}
       />
 
       <ToastNotification

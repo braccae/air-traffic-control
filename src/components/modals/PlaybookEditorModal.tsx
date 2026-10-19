@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 
 interface PlaybookEditorModalProps {
   isOpen: boolean;
+  isMinimized?: boolean;
+  onMinimize?: () => void;
   onClose: () => void;
   initialPlaybook?: string;
   onRunPlaybook?: (playbook: string) => void;
@@ -9,6 +11,8 @@ interface PlaybookEditorModalProps {
 
 export const PlaybookEditorModal: React.FC<PlaybookEditorModalProps> = ({
   isOpen,
+  isMinimized = false,
+  onMinimize,
   onClose,
   initialPlaybook,
   onRunPlaybook,
@@ -250,7 +254,10 @@ export const PlaybookEditorModal: React.FC<PlaybookEditorModalProps> = ({
   const lineNumbers = Array.from({ length: Math.max(lineCount, 1) }, (_, i) => i + 1);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4">
+    <div
+      style={{ display: isMinimized ? 'none' : 'flex' }}
+      className="fixed inset-0 z-50 items-center justify-center bg-black/75 backdrop-blur-xs p-4"
+    >
       <div className="w-full max-w-5xl h-[85vh] min-h-[550px] max-h-[850px] bg-[#0a0d1f] rounded-lg shadow-2xl border border-[#313447] flex flex-col overflow-hidden">
         {/* Header Bar */}
         <div className="h-10 bg-[#171a2d] px-4 flex items-center justify-between border-b border-[#26293c]">
@@ -267,14 +274,26 @@ export const PlaybookEditorModal: React.FC<PlaybookEditorModalProps> = ({
               </span>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-[#8d909b] hover:text-[#dfe1fa] p-1 cursor-pointer transition-colors"
-            title="Close Editor"
-          >
-            <span className="material-symbols-outlined text-[18px]">close</span>
-          </button>
+          <div className="flex items-center gap-1">
+            {onMinimize && (
+              <button
+                type="button"
+                onClick={onMinimize}
+                className="text-[#8d909b] hover:text-[#dfe1fa] p-1 cursor-pointer transition-colors"
+                title="Minimize to bottom panel"
+              >
+                <span className="material-symbols-outlined text-[18px]">remove</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-[#8d909b] hover:text-[#dfe1fa] p-1 cursor-pointer transition-colors"
+              title="Close Editor"
+            >
+              <span className="material-symbols-outlined text-[18px]">close</span>
+            </button>
+          </div>
         </div>
 
         {/* Main Body */}
