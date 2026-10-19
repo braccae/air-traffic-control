@@ -160,7 +160,7 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
 
         {/* Navigation Body */}
         {viewMode === 'datacenter' ? (
-          <nav className="flex-1 overflow-y-auto p-2 font-mono text-xs space-y-2">
+          <nav className="flex-1 overflow-y-auto overflow-x-hidden p-2 font-mono text-xs space-y-2">
             {/* Datacenter Root / Tailnet Summary */}
             <div className="p-2 bg-[#121528] rounded border border-[#26293c] flex items-center justify-between">
               <div className="flex items-center gap-1.5 min-w-0">
@@ -240,7 +240,7 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
             </div>
           </nav>
         ) : (
-          <nav className="flex-1 overflow-y-auto p-1.5 font-mono text-xs space-y-0.5">
+          <nav className="flex-1 overflow-y-auto overflow-x-hidden p-1.5 font-mono text-xs space-y-0.5">
             {/* Datacenter / Tailnet Root */}
             <div className="flex items-center gap-1 px-2 py-1 text-[#c3c6d2]">
               <span className="material-symbols-outlined text-[14px]">arrow_drop_down</span>

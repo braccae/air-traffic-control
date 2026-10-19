@@ -1577,7 +1577,7 @@ export default function App() {
       </main>
       </div>
 
-      {/* Fixed Bottom Global Tasks & Execution Log with Unified Window Dock */}
+      {/* Fixed Bottom Console with Unified Window Dock */}
       <GlobalTasksExecutionLog
         tasks={tasks}
         onOpenPlaybookEditor={() => handleOpenPlaybookEditor()}

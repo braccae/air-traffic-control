@@ -351,7 +351,7 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
             </span>
           </button>
 
-          {/* Action 4: Global Tasks Execution */}
+          {/* Action 4: Console & Tasks Execution */}
           <button
             type="button"
             onClick={() => {
@@ -363,17 +363,18 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
               }
             }}
             className="group flex flex-col p-3 rounded-lg bg-[#171a2d] hover:bg-[#1f2338] border border-[#26293c] hover:border-[#ffd580]/50 transition-all text-left cursor-pointer shadow-xs"
+            title="Open Console"
           >
             <div className="flex items-center justify-between w-full mb-1">
               <span className="material-symbols-outlined text-[20px] text-[#ffd580] group-hover:scale-110 transition-transform">
-                task_alt
+                terminal
               </span>
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#2d281b] text-[#ffd580] border border-[#ffd580]/30">
                 {tasks.length} Jobs
               </span>
             </div>
             <span className="font-mono text-xs font-bold text-[#f0f2ff] group-hover:text-[#ffd580]">
-              Global Tasks Execution
+              Console &amp; Tasks
             </span>
             <span className="text-[11px] text-[#8d909b] mt-1 leading-tight">
               View live execution logs, ACPI signals, and SSH outputs
@@ -711,16 +712,16 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
         </div>
       </div>
 
-      {/* Section 5: Global Tasks & Executions */}
+      {/* Section 5: Console & Executions */}
       <div
         id="datacenter-tasks"
         className="rounded-lg bg-[#121528] border border-[#26293c] p-4 shadow-md flex flex-col gap-3"
       >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="material-symbols-outlined text-[18px] text-[#b0c9ff]">history</span>
+            <span className="material-symbols-outlined text-[18px] text-[#b0c9ff]">terminal</span>
             <h2 className="text-xs font-mono font-bold text-[#dfe1fa] uppercase tracking-wider">
-              Recent Global Tasks &amp; Executions
+              Recent Console Tasks &amp; Executions
             </h2>
             <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-[#21263d] text-[#b0c9ff] border border-[#b0c9ff]/30">
               {tasks.length} Recorded
@@ -730,8 +731,9 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
             type="button"
             onClick={onToggleTasksDrawer}
             className="text-[11px] font-mono text-[#8cd6cb] hover:underline cursor-pointer flex items-center gap-0.5"
+            title="Open Console"
           >
-            <span>Open Tasks Drawer</span>
+            <span>Open Console</span>
             <span className="material-symbols-outlined text-[13px]">open_in_new</span>
           </button>
         </div>

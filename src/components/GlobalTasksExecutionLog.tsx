@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import type { GlobalTaskItem } from '../types/index.ts';
 import type { ManagedWindow } from '../utils/windowManager.ts';
+import { getConsoleWindowPillClasses } from '../utils/navigationViewModel.ts';
 
 interface GlobalTasksExecutionLogProps {
   tasks: GlobalTaskItem[];
@@ -71,27 +72,28 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
   return (
     <section
       id="global-tasks-drawer"
+      aria-label="Console"
       className={`fixed bottom-0 left-0 right-0 bg-[#0a0d1f] z-50 flex flex-col shadow-[0_-2px_10px_rgba(0,0,0,0.6)] border-t border-[#26293c] transition-all duration-300 ${
         isCollapsed ? 'h-7' : isExpanded ? 'h-96' : 'h-44'
       }`}
     >
       {/* Top drawer control bar */}
-      <div className="h-7 bg-[#171a2d] px-3 flex items-center justify-between border-b border-[#26293c]">
-        <div className="flex items-center gap-2 h-full overflow-x-auto">
+      <div className="h-7 bg-[#171a2d] px-2 sm:px-3 flex items-center justify-between border-b border-[#26293c] gap-2">
+        {/* Pinned Left Section: Title and Category Tabs */}
+        <div className="shrink-0 flex items-center gap-2 h-full">
           <span className="font-mono text-xs text-[#dfe1fa] font-bold uppercase tracking-wider flex items-center gap-1 shrink-0">
             <span className="material-symbols-outlined text-[14px] text-[#b0c9ff]">terminal</span>
-            <span className="hidden md:inline">Global Tasks &amp; Execution Log</span>
-            <span className="md:hidden">Tasks</span>
+            <span>Console</span>
           </span>
 
-          <div className="flex items-center h-full">
+          <div className="flex items-center h-full shrink-0">
             <button
               type="button"
               onClick={() => {
                 setActiveTab('active');
                 setIsCollapsed(false);
               }}
-              className={`px-2 h-full font-bold font-mono text-xs transition-colors cursor-pointer ${
+              className={`px-2 h-full font-bold font-mono text-xs transition-colors cursor-pointer shrink-0 ${
                 activeTab === 'active'
                   ? 'text-[#b0c9ff] bg-[#313447]'
                   : 'text-[#c3c6d2] hover:text-[#dfe1fa]'
@@ -105,7 +107,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
                 setActiveTab('ansible');
                 setIsCollapsed(false);
               }}
-              className={`px-2 h-full font-mono text-xs transition-colors cursor-pointer ${
+              className={`px-2 h-full font-mono text-xs transition-colors cursor-pointer shrink-0 ${
                 activeTab === 'ansible'
                   ? 'text-[#b0c9ff] bg-[#313447]'
                   : 'text-[#c3c6d2] hover:text-[#dfe1fa]'
@@ -119,7 +121,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
                 setActiveTab('syslog');
                 setIsCollapsed(false);
               }}
-              className={`px-2 h-full font-mono text-xs transition-colors cursor-pointer ${
+              className={`px-2 h-full font-mono text-xs transition-colors cursor-pointer shrink-0 ${
                 activeTab === 'syslog'
                   ? 'text-[#b0c9ff] bg-[#313447]'
                   : 'text-[#c3c6d2] hover:text-[#dfe1fa]'
@@ -133,7 +135,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
                 setActiveTab('vault');
                 setIsCollapsed(false);
               }}
-              className={`px-2 h-full font-mono text-xs transition-colors cursor-pointer ${
+              className={`px-2 h-full font-mono text-xs transition-colors cursor-pointer shrink-0 ${
                 activeTab === 'vault'
                   ? 'text-[#b0c9ff] bg-[#313447]'
                   : 'text-[#c3c6d2] hover:text-[#dfe1fa]'
@@ -142,86 +144,74 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
               Vault Audit
             </button>
           </div>
-
-          {/* Unified Minimized Window / Modal Dock Bar */}
-          {windows.length > 0 && (
-            <div className="flex items-center gap-1.5 h-full pl-2 border-l border-[#26293c]">
-              <span className="font-mono text-[10px] text-[#8d909b] uppercase tracking-wider flex items-center gap-1 shrink-0">
-                <span className="material-symbols-outlined text-[13px] text-[#8cd6cb]">dock_to_bottom</span>
-                <span className="hidden xl:inline">Windows ({windows.length})</span>
-              </span>
-
-              <div className="flex items-center gap-1 overflow-x-auto max-w-[32vw] sm:max-w-[42vw] md:max-w-[48vw]">
-                {windows.map((win) => {
-                  const isActive = win.id === activeWindowId && !win.isMinimized;
-                  const isMin = win.isMinimized;
-
-                  return (
-                    <div
-                      key={win.id}
-                      onClick={() => {
-                        if (isMin) {
-                          onRestoreWindow?.(win.id);
-                        } else if (win.id === activeWindowId) {
-                          onMinimizeWindow?.(win.id);
-                        } else {
-                          onSelectWindow?.(win.id);
-                        }
-                      }}
-                      className={`group flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-mono transition-all cursor-pointer border ${
-                        isActive
-                          ? 'bg-[#1f6feb]/20 border-[#58a6ff] text-white shadow-xs'
-                          : isMin
-                          ? 'bg-[#161b22] border-[#30363d] text-gray-400 hover:text-gray-200 hover:border-gray-500'
-                          : 'bg-[#161b22]/70 border-[#30363d]/60 text-gray-300 hover:border-gray-500'
-                      }`}
-                      title={`${win.title} (${win.type}) - ${
-                        isMin ? 'Click to restore' : isActive ? 'Click to minimize' : 'Click to focus'
-                      }`}
-                    >
-                      <span
-                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                          isActive
-                            ? 'bg-[#3fb950] animate-pulse'
-                            : isMin
-                            ? 'bg-amber-400'
-                            : 'bg-gray-500'
-                        }`}
-                      />
-                      {win.icon && (
-                        <span className="material-symbols-outlined text-[13px] text-[#b0c9ff] shrink-0">
-                          {win.icon}
-                        </span>
-                      )}
-                      <span className="font-medium max-w-[130px] truncate">{win.title}</span>
-
-                      <span className="material-symbols-outlined text-[12px] text-gray-400 group-hover:text-white shrink-0">
-                        {isMin ? 'expand_less' : 'expand_more'}
-                      </span>
-
-                      {onCloseWindow && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onCloseWindow(win.id);
-                          }}
-                          className="p-0.5 rounded hover:bg-red-500/20 text-gray-400 hover:text-red-400 transition-colors ml-0.5 cursor-pointer"
-                          title="Close window"
-                        >
-                          <span className="material-symbols-outlined text-[12px] leading-none">close</span>
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </div>
 
-        <div className="flex items-center gap-2 text-[#c3c6d2]">
-          <span className="font-mono text-xs text-[#8cd6cb] flex items-center gap-1">
+        {/* Middle Isolated Dock Section: Minimized Window Pills */}
+        {windows.length > 0 && (
+          <div className="flex-1 min-w-0 flex items-center gap-1.5 h-full px-2 border-l border-r border-[#26293c]">
+            <span className="font-mono text-[10px] text-[#8d909b] uppercase tracking-wider flex items-center gap-1 shrink-0">
+              <span className="material-symbols-outlined text-[13px] text-[#8cd6cb]">dock_to_bottom</span>
+              <span className="hidden sm:inline">Windows ({windows.length})</span>
+            </span>
+
+            <div className="flex items-center gap-1 overflow-x-auto scrollbar-none flex-1 py-0.5">
+              {windows.map((win) => {
+                const isActive = win.id === activeWindowId && !win.isMinimized;
+                const isMin = win.isMinimized;
+                const pillStyles = getConsoleWindowPillClasses(isActive, isMin);
+
+                return (
+                  <div
+                    key={win.id}
+                    onClick={() => {
+                      if (isMin) {
+                        onRestoreWindow?.(win.id);
+                      } else if (win.id === activeWindowId) {
+                        onMinimizeWindow?.(win.id);
+                      } else {
+                        onSelectWindow?.(win.id);
+                      }
+                    }}
+                    className={pillStyles.pill}
+                    title={`${win.title} (${win.type}) - ${
+                      isMin ? 'Click to restore' : isActive ? 'Click to minimize' : 'Click to focus'
+                    }`}
+                  >
+                    <span className={pillStyles.dot} />
+                    {win.icon && (
+                      <span className="material-symbols-outlined text-[13px] text-[#b0c9ff] shrink-0">
+                        {win.icon}
+                      </span>
+                    )}
+                    <span className="font-medium max-w-[130px] truncate">{win.title}</span>
+
+                    <span className="material-symbols-outlined text-[12px] text-gray-400 group-hover:text-white shrink-0">
+                      {isMin ? 'expand_less' : 'expand_more'}
+                    </span>
+
+                    {onCloseWindow && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onCloseWindow(win.id);
+                        }}
+                        className="p-0.5 rounded hover:bg-red-500/20 text-gray-400 hover:text-red-400 transition-colors ml-0.5 cursor-pointer shrink-0"
+                        title="Close window"
+                      >
+                        <span className="material-symbols-outlined text-[12px] leading-none">close</span>
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Pinned Right Section: Live Indicator and Controls */}
+        <div className="shrink-0 flex items-center gap-2 text-[#c3c6d2]">
+          <span className="font-mono text-xs text-[#8cd6cb] flex items-center gap-1 shrink-0">
             <span className="w-1.5 h-1.5 rounded-full bg-[#8cd6cb] animate-ping"></span>
             Autorefresh 3s
           </span>
@@ -233,7 +223,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
               setActiveTab('ansible');
               setIsCollapsed(false);
             }}
-            className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded font-mono text-[10px] cursor-pointer border border-[#434750]/30 hidden sm:inline-flex items-center gap-1"
+            className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded font-mono text-[10px] cursor-pointer border border-[#434750]/30 hidden sm:inline-flex items-center gap-1 shrink-0"
           >
             <span className="material-symbols-outlined text-[13px]">play_arrow</span>
             <span>Ansible Stream</span>
@@ -243,7 +233,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             <button
               type="button"
               onClick={onOpenPlaybookEditor}
-              className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] rounded font-mono text-[10px] cursor-pointer border border-[#434750]/30 hidden md:inline-flex items-center gap-1"
+              className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] rounded font-mono text-[10px] cursor-pointer border border-[#434750]/30 hidden md:inline-flex items-center gap-1 shrink-0"
               title="Open Ansible Playbook Editor"
             >
               <span className="material-symbols-outlined text-[13px] text-[#b0c9ff]">menu_book</span>
@@ -256,7 +246,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             type="button"
             onClick={() => setIsExpanded(!isExpanded)}
             title={isExpanded ? 'Restore size' : 'Expand log view'}
-            className="material-symbols-outlined text-[16px] text-[#8d909b] hover:text-[#dfe1fa] p-0.5 cursor-pointer"
+            className="material-symbols-outlined text-[16px] text-[#8d909b] hover:text-[#dfe1fa] p-0.5 cursor-pointer shrink-0"
           >
             {isExpanded ? 'close_fullscreen' : 'open_in_full'}
           </button>
@@ -264,7 +254,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             type="button"
             onClick={() => setIsCollapsed(!isCollapsed)}
             title={isCollapsed ? 'Open log panel' : 'Collapse log panel'}
-            className="material-symbols-outlined text-[16px] text-[#8d909b] hover:text-[#dfe1fa] p-0.5 cursor-pointer"
+            className="material-symbols-outlined text-[16px] text-[#8d909b] hover:text-[#dfe1fa] p-0.5 cursor-pointer shrink-0"
           >
             {isCollapsed ? 'keyboard_arrow_up' : 'keyboard_arrow_down'}
           </button>

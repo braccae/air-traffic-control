@@ -481,6 +481,8 @@ test('getDatacenterNavSections returns all 5 navigation sections with accurate m
 
   const tasksSec = sections.find(s => s.id === 'tasks');
   assert.equal(tasksSec?.badge, '2 active');
+  assert.equal(tasksSec?.title, 'Console & Tasks');
+  assert.equal(tasksSec?.icon, 'terminal');
 });
 
 test('calculateClusterHealthScore accurately computes score, online counts, and status labels', async () => {
@@ -522,5 +524,64 @@ test('TOP_SUB_NAV_TABS excludes duplicate xterm_console and contains expected cl
   assert.deepEqual(tabIds, ['summary', 'playbooks', 'group_vars', 'mesh', 'task_queue']);
 });
 
+test('getConsoleHeaderLayoutClasses provides pinned left/right sections and isolated middle dock with horizontal scroll only on pills', async () => {
+  const { getConsoleHeaderLayoutClasses } = await import('./navigationViewModel.ts');
+  const layout = getConsoleHeaderLayoutClasses();
 
+  // Header bar has proper height, spacing and layout
+  assert.ok(layout.headerBar.includes('h-7'), 'headerBar must be h-7');
+  assert.ok(layout.headerBar.includes('justify-between'), 'headerBar must use justify-between');
+  assert.ok(layout.headerBar.includes('gap-2'), 'headerBar must have gap-2');
 
+  // Pinned Left Section must NEVER scroll horizontally
+  assert.ok(layout.leftSection.includes('shrink-0'), 'leftSection must be shrink-0');
+  assert.ok(!layout.leftSection.includes('overflow-x-auto'), 'leftSection must not scroll horizontally');
+
+  // Middle Dock Section isolates pills and expands to fill space without pushing neighbors
+  assert.ok(layout.dockSection.includes('flex-1'), 'dockSection must be flex-1');
+  assert.ok(layout.dockSection.includes('min-w-0'), 'dockSection must have min-w-0 to prevent layout blowout');
+  assert.ok(layout.dockSection.includes('border-l'), 'dockSection must have left border divider');
+  assert.ok(layout.dockSection.includes('border-r'), 'dockSection must have right border divider');
+
+  // Minimized Pills Container is the ONLY element that scrolls horizontally
+  assert.ok(layout.pillsContainer.includes('overflow-x-auto'), 'pillsContainer must have overflow-x-auto');
+  assert.ok(layout.pillsContainer.includes('scrollbar-none'), 'pillsContainer must have scrollbar-none');
+  assert.ok(layout.pillsContainer.includes('flex-1'), 'pillsContainer must be flex-1');
+
+  // Pinned Right Section must NEVER scroll horizontally or be compressed
+  assert.ok(layout.rightSection.includes('shrink-0'), 'rightSection must be shrink-0');
+  assert.ok(!layout.rightSection.includes('overflow-x-auto'), 'rightSection must not scroll horizontally');
+});
+
+test('getConsoleWindowPillClasses properly styles active, minimized, and background windows', async () => {
+  const { getConsoleWindowPillClasses } = await import('./navigationViewModel.ts');
+
+  // 1. Active open window
+  const activeStyles = getConsoleWindowPillClasses(true, false);
+  assert.ok(activeStyles.pill.includes('shrink-0'), 'active pill must be shrink-0');
+  assert.ok(activeStyles.pill.includes('border-[#58a6ff]'), 'active pill must have active border');
+  assert.ok(activeStyles.dot.includes('bg-[#3fb950]'), 'active dot must be green');
+  assert.ok(activeStyles.dot.includes('animate-pulse'), 'active dot must pulse');
+
+  // 2. Minimized window
+  const minStyles = getConsoleWindowPillClasses(false, true);
+  assert.ok(minStyles.pill.includes('shrink-0'), 'minimized pill must be shrink-0');
+  assert.ok(minStyles.pill.includes('text-gray-400'), 'minimized pill text must be gray-400');
+  assert.ok(minStyles.dot.includes('bg-amber-400'), 'minimized dot must be amber-400');
+
+  // 3. Inactive/background open window
+  const bgStyles = getConsoleWindowPillClasses(false, false);
+  assert.ok(bgStyles.pill.includes('shrink-0'), 'background pill must be shrink-0');
+  assert.ok(bgStyles.dot.includes('bg-gray-500'), 'background dot must be gray-500');
+});
+
+test('getSubSidebarWrapperClasses includes overflow-x-hidden across all widths', async () => {
+  const { getSubSidebarWrapperClasses } = await import('./navigationViewModel.ts');
+
+  for (const width of ['compact', 'normal', 'wide'] as const) {
+    const classes = getSubSidebarWrapperClasses(width);
+    assert.ok(classes.includes('overflow-x-hidden'), `Expected overflow-x-hidden for width ${width}`);
+    assert.ok(classes.includes('overflow-y-auto'), `Expected overflow-y-auto for width ${width}`);
+    assert.ok(classes.includes('shrink-0'), `Expected shrink-0 for width ${width}`);
+  }
+});

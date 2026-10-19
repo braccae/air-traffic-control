@@ -165,7 +165,7 @@ export function getSubSidebarWrapperClasses(width: SubSidebarWidth): string {
       ? 'col-span-12 lg:col-span-2 xl:col-span-2'
       : 'col-span-12 lg:col-span-3 xl:col-span-2';
 
-  return `${columnClasses} self-start lg:sticky lg:top-[76px] lg:max-h-[calc(100vh-100px)] overflow-y-auto scrollbar-thin shrink-0`;
+  return `${columnClasses} self-start lg:sticky lg:top-[76px] lg:max-h-[calc(100vh-100px)] overflow-y-auto overflow-x-hidden scrollbar-thin shrink-0`;
 }
 
 export function getWorkspaceWrapperClasses(width: SubSidebarWidth): string {
@@ -305,8 +305,8 @@ export function getDatacenterNavSections(playbooksCount = 4, tasksCount = 0): Da
     },
     {
       id: 'tasks',
-      title: 'Global Tasks & Executions',
-      icon: 'task_alt',
+      title: 'Console & Tasks',
+      icon: 'terminal',
       description: 'Live job queue & operational logs',
       badge: tasksCount > 0 ? `${tasksCount} active` : undefined,
     },
@@ -317,6 +317,46 @@ export function getDatacenterNavSections(playbooksCount = 4, tasksCount = 0): Da
       description: 'ZFS, NFS, and Samba storage',
     },
   ];
+}
+
+export interface ConsoleHeaderLayoutClasses {
+  headerBar: string;
+  leftSection: string;
+  dockSection: string;
+  pillsContainer: string;
+  rightSection: string;
+}
+
+export function getConsoleHeaderLayoutClasses(): ConsoleHeaderLayoutClasses {
+  return {
+    headerBar: 'h-7 bg-[#171a2d] px-2 sm:px-3 flex items-center justify-between border-b border-[#26293c] gap-2',
+    leftSection: 'shrink-0 flex items-center gap-2 h-full',
+    dockSection: 'flex-1 min-w-0 flex items-center gap-1.5 h-full px-2 border-l border-r border-[#26293c]',
+    pillsContainer: 'flex items-center gap-1 overflow-x-auto scrollbar-none flex-1 py-0.5',
+    rightSection: 'shrink-0 flex items-center gap-2 text-[#c3c6d2]',
+  };
+}
+
+export function getConsoleWindowPillClasses(isActive: boolean, isMinimized: boolean): {
+  pill: string;
+  dot: string;
+} {
+  return {
+    pill: `group flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-mono transition-all cursor-pointer border shrink-0 ${
+      isActive
+        ? 'bg-[#1f6feb]/20 border-[#58a6ff] text-white shadow-xs'
+        : isMinimized
+        ? 'bg-[#161b22] border-[#30363d] text-gray-400 hover:text-gray-200 hover:border-gray-500'
+        : 'bg-[#161b22]/70 border-[#30363d]/60 text-gray-300 hover:border-gray-500'
+    }`,
+    dot: `w-1.5 h-1.5 rounded-full shrink-0 ${
+      isActive
+        ? 'bg-[#3fb950] animate-pulse'
+        : isMinimized
+        ? 'bg-amber-400'
+        : 'bg-gray-500'
+    }`,
+  };
 }
 
 export function calculateClusterHealthScore(nodes: NodeItem[]): {

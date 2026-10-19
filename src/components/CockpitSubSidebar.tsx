@@ -60,7 +60,7 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
   };
 
   return (
-    <aside className={`flex flex-col gap-2 w-full scrollbar-thin ${className}`.trim()}>
+    <aside className={`flex flex-col gap-2 w-full overflow-x-hidden scrollbar-thin ${className}`.trim()}>
       {/* Cockpit Tree Groupings */}
       <div className="bg-[#171a2d] rounded p-2 flex flex-col gap-2 border border-[#26293c]">
         {/* SYSTEM */}
