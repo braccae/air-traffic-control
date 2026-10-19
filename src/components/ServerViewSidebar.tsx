@@ -325,21 +325,6 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                                   {badgeInfo.label}
                                 </span>
                               )}
-
-                              {onEditNode && (
-                                <button
-                                  type="button"
-                                  onClick={e => {
-                                    e.stopPropagation();
-                                    onEditNode(node);
-                                  }}
-                                  title={`Edit settings for ${node.name}`}
-                                  aria-label={`Edit settings for ${node.name}`}
-                                  className="opacity-70 hover:opacity-100 text-[#8d909b] hover:text-[#b0c9ff] p-0.5 cursor-pointer shrink-0"
-                                >
-                                  <span className="material-symbols-outlined text-[13px]">settings</span>
-                                </button>
-                              )}
                             </div>
                           );
                         })}
@@ -348,35 +333,6 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                   </div>
                 );
               })}
-            </div>
-
-            {/* Ansible / Tailscale Host Groups Box */}
-            <div className="p-1.5 mt-2 bg-[#0a0d1f] rounded border border-[#26293c]/60">
-              <div className="flex items-center justify-between text-[#c3c6d2] font-mono text-[10px] px-1.5 py-0.5">
-                <span className="font-bold uppercase tracking-wider text-[#8d909b]">
-                  Tailscale &amp; Ansible Groups
-                </span>
-                <span className="material-symbols-outlined text-[14px] text-[#8d909b]">tune</span>
-              </div>
-              <div className="flex flex-wrap gap-1 p-1 font-mono text-[11px]">
-                {hostGroups.map(hg => {
-                  const active = selectedHostGroup === hg.id;
-                  return (
-                    <button
-                      key={hg.id}
-                      type="button"
-                      onClick={() => onSelectHostGroup(hg.id)}
-                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
-                        active
-                          ? 'bg-[#313447] text-[#b0c9ff] font-bold border border-[#b0c9ff]/40'
-                          : 'bg-[#1b1e31] text-[#c3c6d2] hover:bg-[#26293c] hover:text-[#dfe1fa]'
-                      }`}
-                    >
-                      {hg.name}
-                    </button>
-                  );
-                })}
-              </div>
             </div>
           </nav>
         )}

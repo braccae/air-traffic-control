@@ -2,7 +2,26 @@ export type ThemeChoice = 'system' | 'macchiato' | 'latte';
 export type ResolvedTheme = 'macchiato' | 'latte';
 export type ThemeMode = ThemeChoice;
 
+export type AccentColor = 'blue' | 'lavender' | 'teal' | 'green' | 'peach' | 'mauve';
+
 export const THEME_STORAGE_KEY = 'prox_orch_theme';
+export const ACCENT_STORAGE_KEY = 'prox_orch_accent_color';
+
+export interface AccentPreset {
+  id: AccentColor;
+  label: string;
+  hexDark: string;
+  hexLight: string;
+}
+
+export const ACCENT_PRESETS: AccentPreset[] = [
+  { id: 'blue', label: 'Sapphire Blue', hexDark: '#8aadf4', hexLight: '#1e66f5' },
+  { id: 'lavender', label: 'Lavender', hexDark: '#b7bdf8', hexLight: '#7287fd' },
+  { id: 'teal', label: 'Teal Green', hexDark: '#8cd6cb', hexLight: '#179299' },
+  { id: 'green', label: 'Emerald Green', hexDark: '#a6da95', hexLight: '#40a02b' },
+  { id: 'peach', label: 'Peach Orange', hexDark: '#f5a97f', hexLight: '#fe640b' },
+  { id: 'mauve', label: 'Mauve Purple', hexDark: '#c6a0f6', hexLight: '#8839ef' },
+];
 
 export interface StorageLike {
   getItem?(key: string): string | null;
@@ -166,5 +185,43 @@ export function watchSystemTheme(callback: (isDark: boolean) => void): () => voi
   }
 
   return () => {};
+}
+
+/**
+ * Retrieves the stored accent color from localStorage or defaults to 'blue'.
+ */
+export function getStoredAccentColor(storage?: StorageLike): AccentColor {
+  try {
+    const s = storage || (typeof window !== 'undefined' ? window.localStorage : undefined);
+    if (!s || !s.getItem) return 'blue';
+    const val = s.getItem(ACCENT_STORAGE_KEY) as AccentColor;
+    if (ACCENT_PRESETS.some(p => p.id === val)) return val;
+    return 'blue';
+  } catch {
+    return 'blue';
+  }
+}
+
+/**
+ * Persists the selected accent color to localStorage.
+ */
+export function setStoredAccentColor(accent: AccentColor, storage?: StorageLike): void {
+  try {
+    const s = storage || (typeof window !== 'undefined' ? window.localStorage : undefined);
+    if (s && s.setItem) {
+      s.setItem(ACCENT_STORAGE_KEY, accent);
+    }
+  } catch {
+    // ignore local storage errors
+  }
+}
+
+/**
+ * Applies the selected accent color data-attribute to the document or target element.
+ */
+export function applyAccentColorToDocument(accent: AccentColor, targetElement?: ElementLike): void {
+  const el = targetElement || (typeof document !== 'undefined' ? document.documentElement : undefined);
+  if (!el) return;
+  el.setAttribute('data-accent', accent);
 }
 

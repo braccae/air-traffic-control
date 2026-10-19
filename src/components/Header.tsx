@@ -1,6 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React from 'react';
 import type { ThemeChoice, ResolvedTheme } from '../utils/themeManager.ts';
-import { getThemeIcon, getThemeLabel, resolveTheme } from '../utils/themeManager.ts';
 
 interface HeaderProps {
   onOpenAddNode: () => void;
@@ -16,69 +15,22 @@ interface HeaderProps {
   resolvedTheme?: ResolvedTheme;
   onToggleTheme?: () => void;
   onSelectTheme?: (theme: ThemeChoice) => void;
+  onOpenClientSettings?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   onOpenAddNode,
   onOpenPlaybook,
-  onOpenPlaybookEditor,
   onOpenSearch,
   onOpenGroupVars,
   onToggleSidebar,
   isSidebarOpen,
-  onlineCount,
-  totalCount,
-  theme = 'system',
-  resolvedTheme: propResolvedTheme,
-  onToggleTheme,
-  onSelectTheme,
+  onOpenClientSettings,
 }) => {
-  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
-  const themeMenuRef = useRef<HTMLDivElement>(null);
-
-  const activeResolvedTheme = propResolvedTheme ?? resolveTheme(theme);
-
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (themeMenuRef.current && !themeMenuRef.current.contains(event.target as Node)) {
-        setThemeMenuOpen(false);
-      }
-    }
-    if (themeMenuOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
-    }
-  }, [themeMenuOpen]);
-
-  const THEME_OPTIONS: Array<{
-    id: ThemeChoice;
-    label: string;
-    sublabel: string;
-    icon: string;
-  }> = [
-    {
-      id: 'system',
-      label: 'System Default',
-      sublabel: `Auto (${activeResolvedTheme === 'macchiato' ? 'Dark' : 'Light'})`,
-      icon: 'desktop_windows',
-    },
-    {
-      id: 'macchiato',
-      label: 'Catppuccin Macchiato',
-      sublabel: 'Dark Mode',
-      icon: 'dark_mode',
-    },
-    {
-      id: 'latte',
-      label: 'Catppuccin Latte',
-      sublabel: 'Light Mode',
-      icon: 'light_mode',
-    },
-  ];
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 h-10 bg-[#0a0d1f] flex items-center justify-between px-3 shadow-[0_1px_8px_rgba(0,0,0,0.5)] border-b border-[#26293c]">
-      {/* Brand & Datacenter */}
+      {/* Brand */}
       <div className="flex items-center gap-2">
         {onToggleSidebar && (
           <button
@@ -95,13 +47,6 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center gap-1.5">
           <span className="material-symbols-outlined text-[#b0c9ff] text-[20px]">dns</span>
           <span className="font-mono text-sm tracking-wider text-[#dfe1fa] font-bold">PROX-ORCH</span>
-        </div>
-        <div className="h-4 w-[1px] bg-[#434750]"></div>
-        <div className="flex items-center gap-1 text-[#c3c6d2] font-mono text-xs">
-          <span className="material-symbols-outlined text-[15px] text-[#8cd6cb]">share_location</span>
-          <span>Datacenter:</span>
-          <span className="text-[#dfe1fa] font-semibold">homelab-dc1</span>
-          <span className="w-2 h-2 rounded-full bg-[#8cd6cb] ml-1 shadow-[0_0_8px_rgba(140,214,203,0.8)]"></span>
         </div>
       </div>
 
@@ -140,18 +85,6 @@ export const Header: React.FC<HeaderProps> = ({
             <span>Run Playbook</span>
           </button>
 
-          {onOpenPlaybookEditor && (
-            <button
-              type="button"
-              onClick={onOpenPlaybookEditor}
-              className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
-              title="Add, edit, or remove Ansible playbooks"
-            >
-              <span className="material-symbols-outlined text-[14px] text-[#b0c9ff]">menu_book</span>
-              <span>Playbooks</span>
-            </button>
-          )}
-
           <button
             type="button"
             onClick={onOpenGroupVars}
@@ -161,98 +94,29 @@ export const Header: React.FC<HeaderProps> = ({
             <span>New Group Var</span>
           </button>
 
-          {(onToggleTheme || onSelectTheme) && (
-            <div className="relative" ref={themeMenuRef}>
-              <button
-                type="button"
-                onClick={() => setThemeMenuOpen(prev => !prev)}
-                className="flex items-center gap-1.5 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
-                title={`Theme: ${theme === 'system' ? `System Default (${activeResolvedTheme === 'macchiato' ? 'Macchiato Dark' : 'Latte Light'})` : theme === 'macchiato' ? 'Catppuccin Macchiato (Dark)' : 'Catppuccin Latte (Light)'}`}
-                aria-label={`Current theme: ${theme} (resolved: ${activeResolvedTheme}). Click to choose theme.`}
-                aria-expanded={themeMenuOpen}
-                aria-haspopup="menu"
-              >
-                <span className="material-symbols-outlined text-[14px] text-[#f9c068]">
-                  {getThemeIcon(theme)}
-                </span>
-                <span className="hidden sm:inline">
-                  {theme === 'system'
-                    ? `Auto (${activeResolvedTheme === 'macchiato' ? 'Dark' : 'Light'})`
-                    : theme === 'macchiato'
-                      ? 'Macchiato'
-                      : 'Latte'}
-                </span>
-                <span className="material-symbols-outlined text-[13px] text-[#8d909b]">
-                  {themeMenuOpen ? 'expand_less' : 'expand_more'}
-                </span>
-              </button>
-
-              {themeMenuOpen && (
-                <div
-                  className="absolute right-0 mt-1.5 w-60 bg-[#171a2d] border border-[#313447] rounded shadow-xl py-1 z-50 text-left"
-                  role="menu"
-                  aria-label="Theme selection menu"
-                >
-                  <div className="px-3 py-1.5 text-[10px] uppercase font-mono tracking-wider text-[#8d909b] border-b border-[#26293c] flex items-center justify-between">
-                    <span>Theme Preference</span>
-                    <span className="text-[#8cd6cb] font-semibold">{activeResolvedTheme}</span>
-                  </div>
-
-                  {THEME_OPTIONS.map(opt => {
-                    const isSelected = theme === opt.id;
-                    return (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        role="menuitem"
-                        onClick={() => {
-                          if (onSelectTheme) {
-                            onSelectTheme(opt.id);
-                          } else if (onToggleTheme) {
-                            onToggleTheme();
-                          }
-                          setThemeMenuOpen(false);
-                        }}
-                        className={`w-full text-left px-3 py-2 flex items-center justify-between hover:bg-[#26293c] text-xs font-mono transition-colors cursor-pointer ${
-                          isSelected ? 'text-[#8aadf4] bg-[#1b1e31]' : 'text-[#dfe1fa]'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className={`material-symbols-outlined text-[16px] ${isSelected ? 'text-[#8aadf4]' : 'text-[#f9c068]'}`}>
-                            {opt.icon}
-                          </span>
-                          <div className="flex flex-col">
-                            <span className="font-semibold text-xs leading-tight">{opt.label}</span>
-                            <span className="text-[10px] text-[#8d909b] leading-tight">{opt.sublabel}</span>
-                          </div>
-                        </div>
-                        {isSelected && (
-                          <span className="material-symbols-outlined text-[16px] text-[#8cd6cb]">check</span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+          {onOpenClientSettings && (
+            <button
+              type="button"
+              onClick={onOpenClientSettings}
+              className="flex items-center gap-1.5 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
+              title="Client Settings & Appearance"
+              aria-label="Open Client Settings and Appearance"
+            >
+              <span className="material-symbols-outlined text-[14px] text-[#f9c068]">palette</span>
+              <span className="hidden sm:inline">Settings</span>
+            </button>
           )}
         </div>
 
         <div className="h-4 w-[1px] bg-[#434750] mx-1"></div>
 
-        {/* Nodes Health & User Profile */}
+        {/* User Profile */}
         <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1 bg-[#171a2d] px-2 py-0.5 rounded border border-[#26293c]">
-            <span className="w-2 h-2 rounded-full bg-[#8cd6cb] animate-pulse shadow-[0_0_6px_rgba(140,214,203,0.8)]"></span>
-            <span className="font-mono text-xs text-[#c3c6d2]">
-              {onlineCount ?? 8}/{totalCount ?? 8} Up
-            </span>
-          </div>
-
           <button
             type="button"
+            onClick={onOpenClientSettings}
             className="flex items-center gap-1.5 text-[#dfe1fa] pl-1 cursor-pointer hover:opacity-90 transition-opacity"
-            title="Role-Based Access Control / OIDC (Enabled)"
+            title="Role-Based Access Control / OIDC (Enabled) - Click for Client Settings"
             aria-label="User profile: root@pam (Role-Based Access Control / OIDC Enabled)"
           >
             <div className="w-7 h-7 rounded-full bg-[#b0c9ff] text-[#002e68] flex items-center justify-center font-bold text-xs shadow-sm">

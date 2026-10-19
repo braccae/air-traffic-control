@@ -116,13 +116,9 @@ export const NodeBreadcrumbBar: React.FC<NodeBreadcrumbBarProps> = ({
       {/* Node Path and Badges */}
       <div className="flex items-center gap-2 min-w-0">
         <span className="material-symbols-outlined text-[#b0c9ff] text-[18px]">dns</span>
-        <div className="flex items-center gap-1 font-mono text-xs truncate">
-          <span className="text-[#8d909b]">{node.datacenter || 'leo-banjo.ts.net'}</span>
-          <span className="text-[#434750]">/</span>
-          <span className="text-[#d9b9ff] font-medium">{node.group}</span>
-          <span className="text-[#434750]">/</span>
-          <span className="text-[#dfe1fa] font-bold text-[#b0c9ff]">{node.name}</span>
-          <span className="px-1.5 py-0.5 bg-[#313447] text-[#8cd6cb] font-mono text-[10px] rounded ml-1 border border-[#434750]/40">
+        <div className="flex items-center gap-1.5 font-mono text-xs truncate">
+          <span className="font-bold text-[#dfe1fa] text-sm tracking-wide">{node.name}</span>
+          <span className="px-1.5 py-0.5 bg-[#313447] text-[#8cd6cb] font-mono text-[10px] rounded border border-[#434750]/40">
             {node.osDescription}
           </span>
         </div>
@@ -252,18 +248,6 @@ export const NodeBreadcrumbBar: React.FC<NodeBreadcrumbBarProps> = ({
 
       {/* Quick Operational Controls */}
       <div className="flex items-center gap-1.5">
-        {/* Edit Node Settings button */}
-        {onEditNode && (
-          <button
-            type="button"
-            onClick={onEditNode}
-            className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#d9b9ff] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[14px]">tune</span>
-            <span>Edit Settings</span>
-          </button>
-        )}
-
         {/* Reboot with dropdown */}
         <div className="relative inline-block text-left">
           <button

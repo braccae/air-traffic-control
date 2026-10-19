@@ -397,31 +397,6 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             Autorefresh 3s
           </span>
 
-          {/* Quick Playbook Launch Button */}
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('ansible');
-              setIsCollapsed(false);
-            }}
-            className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded font-mono text-[10px] cursor-pointer border border-[#434750]/30 hidden sm:inline-flex items-center gap-1 shrink-0"
-          >
-            <span className="material-symbols-outlined text-[13px]">play_arrow</span>
-            <span>Ansible Stream</span>
-          </button>
-
-          {onOpenPlaybookEditor && (
-            <button
-              type="button"
-              onClick={onOpenPlaybookEditor}
-              className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] rounded font-mono text-[10px] cursor-pointer border border-[#434750]/30 hidden md:inline-flex items-center gap-1 shrink-0"
-              title="Open Ansible Playbook Editor"
-            >
-              <span className="material-symbols-outlined text-[13px] text-[#b0c9ff]">menu_book</span>
-              <span>Manage Playbooks</span>
-            </button>
-          )}
-
           {/* Expand / Minimize buttons */}
           <button
             type="button"

@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from 'react';
 import type { NodeItem, TelemetryData, GlobalTaskItem, QueuedAnsibleTask } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ServerViewSidebar } from './components/ServerViewSidebar.tsx';
-import { TopSubNav } from './components/TopSubNav.tsx';
 import { NodeBreadcrumbBar } from './components/NodeBreadcrumbBar.tsx';
 import { CockpitSubSidebar } from './components/CockpitSubSidebar.tsx';
 import { SystemHealthTelemetry } from './components/SystemHealthTelemetry.tsx';
@@ -35,6 +34,7 @@ import { ContainerLogsModal } from './components/modals/ContainerLogsModal.tsx';
 import { RebootConfirmModal } from './components/modals/RebootConfirmModal.tsx';
 import { SearchModal } from './components/modals/SearchModal.tsx';
 import { GroupVarsModal } from './components/modals/GroupVarsModal.tsx';
+import { ClientSettingsModal } from './components/modals/ClientSettingsModal.tsx';
 import { DatacenterGlobalView } from './components/DatacenterGlobalView.tsx';
 import {
   updateNodeSettings,
@@ -56,6 +56,7 @@ import {
 import {
   type ThemeChoice,
   type ResolvedTheme,
+  type AccentColor,
   getStoredTheme,
   setStoredTheme,
   resolveTheme,
@@ -63,6 +64,9 @@ import {
   watchSystemTheme,
   toggleTheme,
   applyThemeToDocument,
+  getStoredAccentColor,
+  setStoredAccentColor,
+  applyAccentColorToDocument,
 } from './utils/themeManager.ts';
 import type { DragPosition } from './hooks/useDraggable.ts';
 import type { WindowSize } from './hooks/useResizable.ts';
@@ -429,9 +433,12 @@ export default function App() {
   const [activeConsoleTab, setActiveConsoleTab] = useState<ConsoleDrawerTab>('active');
   const [nodeStorageEngines, setNodeStorageEngines] = useState<Record<string, StorageEngineType>>({});
 
-  // Theme state: system | macchiato | latte with OS auto-preference (Task 8)
+  // Theme state: system | macchiato | latte with OS auto-preference
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>(() => getStoredTheme());
   const [systemIsDark, setSystemIsDark] = useState<boolean>(() => getSystemTheme());
+  const [accentColor, setAccentColor] = useState<AccentColor>(() => getStoredAccentColor());
+  const [clientSettingsOpen, setClientSettingsOpen] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(false);
 
   useEffect(() => {
     return watchSystemTheme((isDark) => {
@@ -445,6 +452,11 @@ export default function App() {
     applyThemeToDocument(themeChoice, undefined, systemIsDark);
     setStoredTheme(themeChoice);
   }, [themeChoice, systemIsDark]);
+
+  useEffect(() => {
+    applyAccentColorToDocument(accentColor);
+    setStoredAccentColor(accentColor);
+  }, [accentColor]);
 
   const handleToggleTheme = useCallback(() => {
     setThemeChoice(prev => toggleTheme(prev));
@@ -1179,6 +1191,7 @@ export default function App() {
         resolvedTheme={resolvedTheme}
         onToggleTheme={handleToggleTheme}
         onSelectTheme={handleSelectTheme}
+        onOpenClientSettings={() => setClientSettingsOpen(true)}
       />
 
       {/* Left Server View Sidebar */}
@@ -1197,37 +1210,9 @@ export default function App() {
         onSelectDatacenterSection={setDatacenterSection}
       />
 
-      {/* Top Sub-nav Bar */}
+      {/* Main Content Workspace */}
       <div className="lg:pl-72 pl-0">
-        <TopSubNav
-          activeTopTab={activeTopTab}
-          onSelectTopTab={tabId => {
-            setActiveTopTab(tabId);
-            if (tabId === 'summary') {
-              setSelectedViewMode('nodes');
-              setActiveOpTab('overview');
-              setActiveCockpitItem('overview');
-            }
-            if (tabId === 'mesh') {
-              setSelectedViewMode('nodes');
-              setActiveOpTab('tailscale');
-              setActiveCockpitItem('tailscale');
-            }
-            if (tabId === 'playbooks') setPlaybookOpen(true);
-            if (tabId === 'group_vars') setGroupVarsOpen(true);
-            if (tabId === 'task_queue') {
-              setActiveConsoleTab('task_queue');
-              const el = document.getElementById('global-tasks-drawer');
-              el?.scrollIntoView({ behavior: 'smooth' });
-            }
-          }}
-          clusterCpu={`${telemetry.cpuUsage.toFixed(1)}%`}
-          clusterRam={`${telemetry.memoryUsedGiB} / ${telemetry.memoryTotalGiB} GiB`}
-          queuedTasksCount={queue.filter(t => t.status === 'staged').length}
-        />
-
-        {/* Main Content Workspace */}
-        <main className={`relative pt-18 pb-48 w-full px-3 min-h-screen ${
+        <main className={`relative pt-12 pb-48 w-full px-3 min-h-screen ${
           highContrast ? 'bg-[#080a16]' : 'bg-[#0f1224]'
         }`}>
           {selectedViewMode === 'datacenter' ? (
@@ -1786,6 +1771,20 @@ export default function App() {
           setGroupVarsOpen(false);
           setMinimizedModals(prev => ({ ...prev, 'modal-group-vars': false }));
         }}
+      />
+
+      <ClientSettingsModal
+        isOpen={clientSettingsOpen}
+        onClose={() => setClientSettingsOpen(false)}
+        themeChoice={themeChoice}
+        onSelectTheme={handleSelectTheme}
+        resolvedTheme={resolvedTheme}
+        accentColor={accentColor}
+        onSelectAccentColor={setAccentColor}
+        highContrast={highContrast}
+        onToggleHighContrast={() => setHighContrast(prev => !prev)}
+        reducedMotion={reducedMotion}
+        onToggleReducedMotion={() => setReducedMotion(prev => !prev)}
       />
 
       <ToastNotification

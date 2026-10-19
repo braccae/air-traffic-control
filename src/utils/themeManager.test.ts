@@ -10,6 +10,9 @@ import {
   getThemeLabel,
   getThemeIcon,
   watchSystemTheme,
+  getStoredAccentColor,
+  setStoredAccentColor,
+  applyAccentColorToDocument,
   type ThemeChoice,
   type ResolvedTheme,
 } from './themeManager.ts';
@@ -304,6 +307,40 @@ describe('themeManager', () => {
       } finally {
         (globalThis as any).window = originalWindow;
       }
+    });
+  });
+
+  describe('Accent Colors', () => {
+    it('defaults to blue when storage is empty', () => {
+      const mockStorage = {
+        getItem: () => null,
+        setItem: () => {},
+      };
+      assert.equal(getStoredAccentColor(mockStorage), 'blue');
+    });
+
+    it('persists and retrieves accent color', () => {
+      let saved = '';
+      const mockStorage = {
+        getItem: () => saved,
+        setItem: (_k: string, v: string) => {
+          saved = v;
+        },
+      };
+      setStoredAccentColor('teal', mockStorage);
+      assert.equal(saved, 'teal');
+      assert.equal(getStoredAccentColor(mockStorage), 'teal');
+    });
+
+    it('applies accent data attribute to document element', () => {
+      const attributes: Record<string, string> = {};
+      const mockElement = {
+        setAttribute: (name: string, value: string) => {
+          attributes[name] = value;
+        },
+      };
+      applyAccentColorToDocument('peach', mockElement);
+      assert.equal(attributes['data-accent'], 'peach');
     });
   });
 });
