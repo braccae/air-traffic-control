@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { GlobalTaskItem, QueuedAnsibleTask } from '../types/index.ts';
 import type { ManagedWindow } from '../utils/windowManager.ts';
-import { getConsoleWindowPillClasses, type ConsoleDrawerTab } from '../utils/navigationViewModel.ts';
+import { getConsoleWindowPillClasses, formatTaskQueueTabLabel, type ConsoleDrawerTab } from '../utils/navigationViewModel.ts';
 import { TaskQueueTab } from './TaskQueueTab.tsx';
 
 interface GlobalTasksExecutionLogProps {
@@ -66,7 +66,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
       .catch(() => {});
 
     let ws: WebSocket | null = null;
-    let reconnectTimeout: any = null;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 
     const connectWS = () => {
       try {
@@ -278,7 +278,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
                   : 'text-[#c3c6d2] hover:text-[#dfe1fa]'
               }`}
             >
-              {`Task Queue (${queue.filter(t => t.status === 'staged').length})`}
+              {formatTaskQueueTabLabel(queue.filter(t => t.status === 'staged').length)}
             </button>
             <button
               type="button"
