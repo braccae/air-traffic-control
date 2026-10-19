@@ -1,0 +1,28 @@
+[Unit]
+Description=Air Traffic Control Homelab Host Daemon
+Documentation=https://github.com/your-org/air-traffic-control
+After=network.target network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=core
+Group=core
+WorkingDirectory=/var/lib/air-traffic-control
+ExecStart=/usr/local/bin/air-traffic-control-daemon -port 18090
+Restart=always
+RestartSec=5s
+LimitNOFILE=65535
+
+# Security hardening
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+
+# Environment
+Environment=PORT=18090
+Environment=GIN_MODE=release
+
+[Install]
+WantedBy=multi-user.target

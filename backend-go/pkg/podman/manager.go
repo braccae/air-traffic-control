@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"prox-orch/backend/pkg/ssh"
-	"prox-orch/backend/pkg/types"
+	"air-traffic-control/backend/pkg/ssh"
+	"air-traffic-control/backend/pkg/types"
 )
 
 // CommandRunner abstracts remote command execution (implemented by *ssh.ClientManager)

@@ -13,7 +13,7 @@ export interface QuickCommandItem {
   category?: QuickCommandCategory;
 }
 
-export const QUICK_COMMAND_STORAGE_KEY = 'prox_orch_quick_commands';
+export const QUICK_COMMAND_STORAGE_KEY = 'air_traffic_control_quick_commands';
 export const QUICK_COMMAND_EVENT = 'quick_commands_updated';
 
 export const DEFAULT_QUICK_COMMANDS: QuickCommandItem[] = [
@@ -101,7 +101,7 @@ export function loadQuickCommands(storage?: StorageLike): QuickCommandItem[] {
   }
 
   try {
-    const raw = store.getItem(QUICK_COMMAND_STORAGE_KEY);
+    const raw = store.getItem(QUICK_COMMAND_STORAGE_KEY) || store.getItem('prox_orch_quick_commands');
     if (!raw) {
       return DEFAULT_QUICK_COMMANDS.map((cmd) => ({ ...cmd }));
     }

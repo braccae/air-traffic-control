@@ -4,8 +4,8 @@ export type ThemeMode = ThemeChoice;
 
 export type AccentColor = 'blue' | 'lavender' | 'teal' | 'green' | 'peach' | 'mauve';
 
-export const THEME_STORAGE_KEY = 'prox_orch_theme';
-export const ACCENT_STORAGE_KEY = 'prox_orch_accent_color';
+export const THEME_STORAGE_KEY = 'air_traffic_control_theme';
+export const ACCENT_STORAGE_KEY = 'air_traffic_control_accent_color';
 
 export interface AccentPreset {
   id: AccentColor;
@@ -70,7 +70,7 @@ export function getStoredTheme(storage?: StorageLike): ThemeChoice {
   try {
     const s = storage || (typeof window !== 'undefined' ? window.localStorage : undefined);
     if (!s || !s.getItem) return 'system';
-    const val = s.getItem(THEME_STORAGE_KEY);
+    const val = s.getItem(THEME_STORAGE_KEY) || s.getItem('prox_orch_theme');
     if (val === 'latte') return 'latte';
     if (val === 'macchiato' || val === 'dark') return 'macchiato';
     if (val === 'system') return 'system';
@@ -194,7 +194,7 @@ export function getStoredAccentColor(storage?: StorageLike): AccentColor {
   try {
     const s = storage || (typeof window !== 'undefined' ? window.localStorage : undefined);
     if (!s || !s.getItem) return 'blue';
-    const val = s.getItem(ACCENT_STORAGE_KEY) as AccentColor;
+    const val = (s.getItem(ACCENT_STORAGE_KEY) || s.getItem('prox_orch_accent_color')) as AccentColor;
     if (ACCENT_PRESETS.some(p => p.id === val)) return val;
     return 'blue';
   } catch {

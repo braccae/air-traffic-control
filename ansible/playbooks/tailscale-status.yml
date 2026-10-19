@@ -1,0 +1,17 @@
+---
+- name: Audit Tailscale Status and Relay Performance
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Query Local Tailscale IP and Status
+      command: tailscale status --json
+      register: ts_status_raw
+      changed_when: false
+
+    - name: Parse Tailscale JSON
+      set_fact:
+        ts_json: "{{ ts_status_raw.stdout | from_json }}"
+
+    - name: Report Tailscale Node Details
+      debug:
+        msg: "Node {{ ts_json.Self.HostName }} running Tailscale {{ ts_json.Version }} with BackendState {{ ts_json.BackendState }}"

@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-	"prox-orch/backend/pkg/types"
+	"air-traffic-control/backend/pkg/types"
 )
 
 // Config represents credentials for SSH connections

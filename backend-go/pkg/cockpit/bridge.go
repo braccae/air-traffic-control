@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"prox-orch/backend/pkg/ssh"
+	"air-traffic-control/backend/pkg/ssh"
 )
 
 // ElevationMethod represents privilege escalation mechanism

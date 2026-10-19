@@ -1,5 +1,5 @@
 {
-  "name": "PROX-ORCH Datacenter & Homelab Orchestrator",
+  "name": "Air Traffic Control Datacenter & Homelab Orchestrator",
   "description": "Enterprise-grade datacenter and homelab orchestration dashboard featuring Cockpit-bridge, Podman pods, Glances telemetry, Restic backups, Tailscale mesh, and Go SSH backend.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

@@ -247,7 +247,7 @@ export const ClientSettingsModal: React.FC<ClientSettingsModalProps> = ({
               <span className="material-symbols-outlined text-[13px] text-[#8cd6cb]">terminal</span>
               <span>Terminal Engine: libghostty WASM (v0.4.0)</span>
             </span>
-            <span className="font-semibold text-[#dfe1fa]">PROX-ORCH Cockpit</span>
+            <span className="font-semibold text-[#dfe1fa]">Air Traffic Control</span>
           </div>
         </div>
 

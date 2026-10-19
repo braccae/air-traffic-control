@@ -6,7 +6,7 @@ export interface ApiResponse<T = any> {
 }
 
 /**
- * Defensively fetches and parses JSON responses from PROX-ORCH API endpoints.
+ * Defensively fetches and parses JSON responses from Air Traffic Control API endpoints.
  * Guards against Vite SPA HTML fallthrough (`<!doctype html>`), network errors,
  * non-JSON content types, and server-side errors, preventing unhandled JSON SyntaxErrors.
  */

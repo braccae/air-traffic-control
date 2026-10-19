@@ -1,0 +1,18 @@
+---
+- name: Cluster Health and Baseline Diagnostic
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Query Host Operating System and Kernel
+      command: uname -srmo
+      register: host_kernel
+      changed_when: false
+
+    - name: Check Systemd Uptime
+      command: uptime -p
+      register: host_uptime
+      changed_when: false
+
+    - name: Report Baseline Status
+      debug:
+        msg: "Host {{ inventory_hostname }} ({{ ansible_host }}) is running {{ host_kernel.stdout }}. Uptime: {{ host_uptime.stdout }}."

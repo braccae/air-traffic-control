@@ -1,6 +1,6 @@
-# Agent & Contributor Guidelines for PROX-ORCH Cockpit
+# Agent & Contributor Guidelines for Air Traffic Control
 
-Welcome to **PROX-ORCH Homelab Cockpit** (`air-traffic-control`). This document sets the engineering standards, architecture constraints, and behavioral policies for AI agents and human contributors working on this codebase.
+Welcome to **Air Traffic Control** (`air-traffic-control`), the multi-cockpit homelab and datacenter orchestrator. This document sets the engineering standards, architecture constraints, and behavioral policies for AI agents and human contributors working on this codebase.
 
 ---
 
@@ -11,7 +11,7 @@ The system runs a **dual-stack architecture**:
    - React 19, Vite, Tailwind CSS v4, `ghostty-web` (libghostty WASM terminal).
    - Express coordinator (`server.ts`) providing WebSocket hubs, REST endpoints, SQLite persistence, and SSH multiplexing.
 2. **High-Performance Host Daemon (`backend-go`):**
-   - Compiled Go binary (`prox-orch-daemon`) running locally or on target nodes.
+   - Compiled Go binary (`air-traffic-control-daemon`) running locally or on target nodes.
    - Rootless Podman probing, systemd Cockpit bridge framing, Restic execution, and Glances/PCP metrics collector.
 3. **Hardware & Network Fabric:**
    - Tailscale mesh (`leo-banjo.ts.net`) connecting 47+ physical and virtual nodes.

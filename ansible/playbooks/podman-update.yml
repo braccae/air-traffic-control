@@ -1,0 +1,14 @@
+---
+- name: Audit Podman Unprivileged Services and Containers
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Query System Containers
+      command: podman ps -a --format json
+      register: root_containers
+      failed_when: false
+      changed_when: false
+
+    - name: Report Containers Found
+      debug:
+        msg: "Root containers detected on {{ inventory_hostname }}: {{ root_containers.stdout | default('[]') }}"

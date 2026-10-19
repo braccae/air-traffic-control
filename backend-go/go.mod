@@ -1,4 +1,4 @@
-module prox-orch/backend
+module air-traffic-control/backend
 
 go 1.22
 

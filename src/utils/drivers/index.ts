@@ -67,34 +67,30 @@ export async function stageTaskInQueue(
     }
 
     if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('prox_orch_toast', {
-          detail: {
-            type: 'success',
-            title: 'Staged in Task Queue (1 pending)',
-            message: `${task.title} on ${task.targetNodeName}`,
-            actionText: 'View in Console →',
-            onAction: () => {
-              const el = document.getElementById('global-tasks-drawer');
-              el?.scrollIntoView({ behavior: 'smooth' });
-            },
-          },
-        })
-      );
+      const toastDetail = {
+        type: 'success' as const,
+        title: 'Staged in Task Queue (1 pending)',
+        message: `${task.title} on ${task.targetNodeName}`,
+        actionText: 'View in Console →',
+        onAction: () => {
+          const el = document.getElementById('global-tasks-drawer');
+          el?.scrollIntoView({ behavior: 'smooth' });
+        },
+      };
+      window.dispatchEvent(new CustomEvent('air_traffic_control_toast', { detail: toastDetail }));
+      window.dispatchEvent(new CustomEvent('prox_orch_toast', { detail: toastDetail }));
     }
 
     return { success: true, task: data.task };
   } catch (err: any) {
     if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('prox_orch_toast', {
-          detail: {
-            type: 'error',
-            title: 'Failed to stage in Queue',
-            message: err?.message || 'Network error',
-          },
-        })
-      );
+      const errDetail = {
+        type: 'error' as const,
+        title: 'Failed to stage in Queue',
+        message: err?.message || 'Network error',
+      };
+      window.dispatchEvent(new CustomEvent('air_traffic_control_toast', { detail: errDetail }));
+      window.dispatchEvent(new CustomEvent('prox_orch_toast', { detail: errDetail }));
     }
     return { success: false, error: err?.message || 'Failed to stage task' };
   }

@@ -500,7 +500,7 @@ export default function App() {
   const [sessions, setSessions] = useState<TerminalSession[]>(() => {
     if (typeof window !== 'undefined') {
       try {
-        const saved = localStorage.getItem('prox_orch_term_sessions');
+        const saved = localStorage.getItem('air_traffic_control_term_sessions') || localStorage.getItem('prox_orch_term_sessions');
         if (saved) return JSON.parse(saved);
       } catch {}
     }
@@ -508,7 +508,7 @@ export default function App() {
   });
   const [activeSessionId, setActiveSessionId] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('prox_orch_term_active_id');
+      return localStorage.getItem('air_traffic_control_term_active_id') || localStorage.getItem('prox_orch_term_active_id');
     }
     return null;
   });
@@ -531,17 +531,21 @@ export default function App() {
         addToast(detail);
       }
     };
+    window.addEventListener('air_traffic_control_toast', handleCustomToast);
     window.addEventListener('prox_orch_toast', handleCustomToast);
-    return () => window.removeEventListener('prox_orch_toast', handleCustomToast);
+    return () => {
+      window.removeEventListener('air_traffic_control_toast', handleCustomToast);
+      window.removeEventListener('prox_orch_toast', handleCustomToast);
+    };
   }, [addToast]);
   useEffect(() => {
     if (typeof window !== 'undefined') {
       try {
-        localStorage.setItem('prox_orch_term_sessions', JSON.stringify(sessions));
+        localStorage.setItem('air_traffic_control_term_sessions', JSON.stringify(sessions));
         if (activeSessionId) {
-          localStorage.setItem('prox_orch_term_active_id', activeSessionId);
+          localStorage.setItem('air_traffic_control_term_active_id', activeSessionId);
         } else {
-          localStorage.removeItem('prox_orch_term_active_id');
+          localStorage.removeItem('air_traffic_control_term_active_id');
         }
       } catch {}
     }

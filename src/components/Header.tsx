@@ -45,8 +45,8 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         )}
         <div className="flex items-center gap-1.5">
-          <span className="material-symbols-outlined text-[#b0c9ff] text-[20px]">dns</span>
-          <span className="font-mono text-sm tracking-wider text-[#dfe1fa] font-bold">PROX-ORCH</span>
+          <span className="material-symbols-outlined text-[#b0c9ff] text-[20px]">radar</span>
+          <span className="font-mono text-sm tracking-wider text-[#dfe1fa] font-bold">AIR TRAFFIC CONTROL</span>
         </div>
       </div>
 

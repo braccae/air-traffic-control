@@ -9,7 +9,7 @@
 
 ## 1. Intent & Context (The "Why")
 
-In the PROX-ORCH Homelab Cockpit (`air-traffic-control`), managing 47+ physical and virtual machines across Tailscale and local network meshes requires maximum predictability, structured auditability, and consistent execution tracking. 
+In Air Traffic Control (`air-traffic-control`), managing 47+ physical and virtual machines across Tailscale and local network meshes requires maximum predictability, structured auditability, and consistent execution tracking. 
 
 Previously, certain operations executed direct, ad-hoc CLI commands over non-interactive SSH (e.g. `systemctl restart`, `podman restart`, `iptables`). While effective, direct CLI commands lack uniform schema output, structured rollback semantics, and seamless integration with the homelab's Ansible inventory, secrets, and vault infrastructure.
 

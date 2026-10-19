@@ -1,0 +1,28 @@
+---
+- name: Cluster Security Baseline & Audit Verification
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Verify SSH PasswordAuthentication is Disabled
+      command: grep -Ei "^PasswordAuthentication\s+yes" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*
+      register: ssh_pwd_check
+      failed_when: false
+      changed_when: false
+
+    - name: Assert Password Authentication is Not Permitted
+      assert:
+        that:
+          - ssh_pwd_check.rc != 0
+        fail_msg: "SECURITY WARNING: PasswordAuthentication is enabled on {{ inventory_hostname }}!"
+        success_msg: "OK: PasswordAuthentication disabled on {{ inventory_hostname }}."
+
+    - name: Verify Tailscale Service Is Active
+      command: systemctl is-active tailscaled
+      register: ts_active
+      changed_when: false
+
+    - name: Assert Tailscale Active
+      assert:
+        that:
+          - ts_active.stdout == "active"
+        fail_msg: "Tailscaled is not active on {{ inventory_hostname }}!"

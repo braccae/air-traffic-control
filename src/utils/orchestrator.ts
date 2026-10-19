@@ -462,7 +462,7 @@ export function parseTerminalCommand(cmd: string, node: NodeItem): { output: str
     case 'help':
       return {
         output: [
-          'PROX-ORCH Integrated Terminal Helper',
+          'Air Traffic Control Integrated Terminal Helper',
           'Supported commands:',
           '  cockpit-bridge   - Query or run Cockpit system bridge session',
           '  podman ps        - List active rootless/system containers',

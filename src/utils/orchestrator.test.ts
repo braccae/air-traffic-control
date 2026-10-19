@@ -85,7 +85,7 @@ test('formatBytes properly scales units', () => {
 test('parseTerminalCommand responds to help and podman ps', () => {
   const helpRes = parseTerminalCommand('help', dummyNode);
   assert.equal(helpRes.exitCode, 0);
-  assert.match(helpRes.output, /PROX-ORCH Integrated Terminal Helper/);
+  assert.match(helpRes.output, /Air Traffic Control Integrated Terminal Helper/);
 
   const psRes = parseTerminalCommand('podman ps', dummyNode);
   assert.equal(psRes.exitCode, 0);

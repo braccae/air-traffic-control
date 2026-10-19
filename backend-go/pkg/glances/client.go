@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"prox-orch/backend/pkg/types"
+	"air-traffic-control/backend/pkg/types"
 )
 
 // Client interfaces with Glances REST API (typically on port 61208) or local CLI fallback

@@ -1,15 +1,15 @@
-# PROX-ORCH Homelab Cockpit Architecture & System Design
+# Air Traffic Control (ATC) Architecture & System Design
 
-Welcome to the architectural specification for **PROX-ORCH Homelab Cockpit** (`air-traffic-control`).
+Welcome to the architectural specification for **Air Traffic Control** (`air-traffic-control`), the multi-cockpit homelab and datacenter orchestrator.
 
 ---
 
 ## 1. Architectural Philosophy: Universal SSH Transport vs Agent Model
 
-A primary design requirement of PROX-ORCH Cockpit is providing single-pane-of-glass orchestration across 47+ heterogeneous physical and virtual nodes (Fedora CoreOS / Silverblue, Debian, Ubuntu, Alpine Linux, Proxmox VE, TrueNAS SCALE, VyOS, OpenWrt, and Windows).
+A primary design requirement of Air Traffic Control is providing single-pane-of-glass orchestration across 47+ heterogeneous physical and virtual nodes (Fedora CoreOS / Silverblue, Debian, Ubuntu, Alpine Linux, Proxmox VE, TrueNAS SCALE, VyOS, OpenWrt, and Windows).
 
 ### Decision: Agentless Universal SSH
-Rather than forcing custom agent installations or requiring continuous daemon maintenance on remote nodes, PROX-ORCH relies on **Universal SSH Transport**:
+Rather than forcing custom agent installations or requiring continuous daemon maintenance on remote nodes, Air Traffic Control relies on **Universal SSH Transport**:
 - **Zero-Footprint Deployment:** No agent binaries, daemons, background listeners, or custom services are installed on target machines. A machine with OpenSSH server and standard user credentials is immediately manageable.
 - **SSH Agent Forwarding:** Authentication leverages `SSH_AUTH_SOCK` (or user session sockets like `/run/user/<uid>/ssh-agent.socket`). No private keys are stored on the server or transmitted over unencrypted channels.
 - **Multi-Route Resilience:** Node connections dynamically failover across:
@@ -24,7 +24,7 @@ Rather than forcing custom agent installations or requiring continuous daemon ma
 
 ## 2. Modular Capability Autodetection Matrix
 
-Remote nodes run diverse distributions, init systems, privilege policies, and storage engines. PROX-ORCH inspects host capabilities dynamically rather than assuming a rigid stack.
+Remote nodes run diverse distributions, init systems, privilege policies, and storage engines. Air Traffic Control inspects host capabilities dynamically rather than assuming a rigid stack.
 
 ```mermaid
 flowchart TD
@@ -73,11 +73,11 @@ Privilege detection evaluates capabilities strictly in order of modern security 
 
 ### 2.2 Optional Cockpit Bridge (Zero Hard Dependency)
 - `cockpit-bridge` is used strictly as an **optional framing protocol**.
-- If `cockpit-bridge` is installed on the host, PROX-ORCH can frame DBus payloads.
+- If `cockpit-bridge` is installed on the host, Air Traffic Control can frame DBus payloads.
 - **Invariant:** If `cockpit-bridge` is absent, the backend **must not fail or crash**. All operations (reading journal logs, controlling systemd units, querying hardware disks, managing storage) gracefully execute directly via native CLI utilities (`journalctl`, `systemctl`, `smartctl`, `zpool`).
 
 ### 2.3 Container Runtime Probing
-- Rootless containers are isolated per user. PROX-ORCH discovers active container users by probing `/run/user/<uid>/libpod`, `/run/user/<uid>/podman`, and user process lists.
+- Rootless containers are isolated per user. Air Traffic Control discovers active container users by probing `/run/user/<uid>/libpod`, `/run/user/<uid>/podman`, and user process lists.
 - For each discovered unprivileged user, container and pod lists are queried via:
   `run0 --background=no --user <user> podman ps --all --format json` or
   `sudo -n -u <user> XDG_RUNTIME_DIR=/run/user/<uid> podman ps --all --format json`
@@ -101,7 +101,7 @@ The system inspects package managers by prioritizing modern immutable container-
 
 ## 3. High-Performance Host Daemon (`backend-go`)
 
-The Go daemon (`prox-orch-daemon`) acts as a high-throughput, low-latency companion for heavy host operations:
+The Go daemon (`air-traffic-control-daemon`) acts as a high-throughput, low-latency companion for heavy host operations:
 - **`pkg/ssh`:** Connection pooling and SSH agent authentication with socket autodetection.
 - **`pkg/cockpit`:** Bridge session management, privilege elevation wrapping (`run0` -> `sudo` -> `doas`), and journal JSON parsing.
 - **`pkg/podman`:** Rootless user discovery and multi-user container inspection.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== PROX-ORCH Ansible Playbook Syntax Checker ==="
+echo "=== Air Traffic Control Ansible Playbook Syntax Checker ==="
 
 INVENTORY="inventory/tailscale_inventory.py"
 PLAYBOOK_DIR="ansible/playbooks"

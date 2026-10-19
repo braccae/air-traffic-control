@@ -1,6 +1,6 @@
-# PROX-ORCH High-Performance Go Core Backend
+# Air Traffic Control High-Performance Go Core Backend
 
-This directory contains the production-grade Golang backend daemon for **PROX-ORCH**.
+This directory contains the production-grade Golang backend daemon for **Air Traffic Control** (`air-traffic-control`).
 
 ## Architecture Highlights
 - **SSH Connection Pool (`pkg/ssh`)**:
@@ -11,7 +11,7 @@ This directory contains the production-grade Golang backend daemon for **PROX-OR
   - Connects to `cockpit-bridge` via SSH stdio/JSON-RPC framing to read `journald` and `dmesg` logs securely without exposing raw ports.
   - Controls systemd services, mounts, and network interfaces.
 - **Glances Telemetry (`pkg/glances`)**:
-  - Auto-discovers and queries Glances REST API (port 61208 or SSH forwarded) for live CPU, memory, ZFS ARC, temperatures, and fan speeds.
+  - Auto-discovers and queries Glances REST API (port 61208 or SSH forwarded) and local CLI fallback for live CPU, memory, ZFS ARC, temperatures, and fan speeds.
 - **Restic Backup Backend (`pkg/restic`)**:
   - Manages AES-256 encrypted immutable backups to S3, MinIO, or local ZFS targets with deduplication statistics and integrity verification.
 - **Podman Remote Daemon (`pkg/podman`)**:
@@ -25,6 +25,6 @@ This directory contains the production-grade Golang backend daemon for **PROX-OR
 ```bash
 cd backend-go
 go mod download
-go build -o prox-orch-daemon main.go
-./prox-orch-daemon --port 8080
+go build -o air-traffic-control-daemon main.go
+./air-traffic-control-daemon --port 18090
 ```

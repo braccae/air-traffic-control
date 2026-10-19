@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "=================================================="
-echo "    PROX-ORCH Pre-Commit Quality & Test Gate       "
+echo "    Air Traffic Control Pre-Commit Quality & Test Gate       "
 echo "=================================================="
 
 echo "[1/4] Checking TypeScript compilation..."

@@ -1,4 +1,4 @@
-# PROX-ORCH Cockpit: Air Traffic Control for Homelabs
+# Air Traffic Control (ATC): Multi-Cockpit Homelab & Datacenter Orchestrator
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue.svg)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-19.0-61dafb.svg)](https://react.dev/)
@@ -7,7 +7,7 @@
 [![Tailscale](https://img.shields.io/badge/Tailscale-Mesh-blueviolet.svg)](https://tailscale.com/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**PROX-ORCH** is a modern, high-density homelab orchestration cockpit and Network Operations Center (NOC) interface. Built for operators running distributed bare-metal clusters connected over Tailscale WireGuard meshes, it unifies rootless Podman management, Cockpit bridges, ZFS storage arrays, KVM virtual machines, SMART disk telemetry, and interactive terminals into a single pane of glass.
+**Air Traffic Control** (`air-traffic-control`) is a modern, high-density homelab orchestration platform and Network Operations Center (NOC) interface. Born from an aviation theme as a unified dashboard to oversee, monitor, and coordinate multiple Linux Cockpit instances across distributed infrastructure—*Air Traffic Control managing a fleet of Cockpits*—it unifies rootless Podman management, Cockpit bridges, ZFS storage arrays, KVM virtual machines, SMART disk telemetry, and interactive terminals into a single pane of glass.
 
 ---
 
@@ -17,7 +17,7 @@
 - **Deep Tailscale Telemetry:** Real-time visibility into all 47+ mesh peers with DERP relay vs Direct WireGuard indicators, transfer throughput (`RxBytes`, `TxBytes`), and subnet routes.
 - **Rootless Podman Orchestration:** Automatic probing across unprivileged service users (`apps`, `auth`, `core`, `db`, `media`, `proxy`) via `/run/user/<uid>/podman/podman.sock`.
 - **Zero-Mock Policy:** All hardware metrics, firewall rules, network interfaces, and storage shares are queried directly from live hosts via SSH, Glances, Cockpit, and systemd.
-- **High-Performance Go Daemon:** Optional `prox-orch-daemon` compiled in Go 1.22+ for sub-millisecond host telemetry and rootless container inspection.
+- **High-Performance Go Daemon:** Optional `air-traffic-control-daemon` compiled in Go 1.22+ for sub-millisecond host telemetry and rootless container inspection.
 - **Production Ansible Integration:** Live playbook execution, dynamic inventory generation from Tailscale tags, dry-run (`--check`) verification, and encrypted group variables.
 
 ---
@@ -40,10 +40,10 @@
                ▼                           ▼
  ┌───────────────────────────┐  ┌─────────────────────────┐
  │   Target Cluster Hosts    │  │  High-Perf Go Daemon    │
- │   (`likes-it-cold`, etc.) │  │  (`prox-orch-daemon`)   │
- │  - Rootless Podman        │  │  - Cockpit Bridge D-Bus │
- │  - ZFS & SMART lsblk      │  │  - Glances / PCP client │
- │  - Firewalld & virsh KVM  │  │  - OpenPTY SSH Pools    │
+ │   (`likes-it-cold`, etc.) │  │  (`air-traffic-control- │
+ │  - Rootless Podman        │  │   daemon`)              │
+ │  - ZFS & SMART lsblk      │  │  - Cockpit Bridge D-Bus │
+ │  - Firewalld & virsh KVM  │  │  - Glances / PCP client │
  └───────────────────────────┘  └─────────────────────────┘
 ```
 
@@ -67,7 +67,7 @@ cd air-traffic-control
 npm install
 
 # Build the Go host daemon
-cd backend-go && go build -o /tmp/prox-orch-daemon main.go && cd ..
+cd backend-go && go build -o /tmp/air-traffic-control-daemon main.go && cd ..
 
 # Launch development environment (Frontend + Express coordinator)
 npm run dev
@@ -98,4 +98,5 @@ npm run build
 ## Documentation
 
 - [AGENTS.md](AGENTS.md): Coding rules, Zero-Mock policy, and pair-programming guidelines.
+- [ARCHITECTURE.md](ARCHITECTURE.md): Architectural design, Ansible mutation queue, and telemetry hierarchy.
 - [GUIDELINES.md](GUIDELINES.md): Tailscale cluster topology, host inventory, and port map.

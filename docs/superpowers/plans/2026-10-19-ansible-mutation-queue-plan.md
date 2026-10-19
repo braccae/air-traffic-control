@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Transform the PROX-ORCH Cockpit into an Ansible-driven mutation architecture where all system changes are staged into an on-the-fly playbook queue, executed step-by-step with structured JSON output, paired with a Datacenter `ansible.cfg` manager, Console accordion drill-downs, and a conservative 30–60s multi-tier Glances telemetry engine.
+**Goal:** Transform the Air Traffic Control platform into an Ansible-driven mutation architecture where all system changes are staged into an on-the-fly playbook queue, executed step-by-step with structured JSON output, paired with a Datacenter `ansible.cfg` manager, Console accordion drill-downs, and a conservative 30–60s multi-tier Glances telemetry engine.
 
 **Architecture:** 
 1. **On-the-Fly Playbook Queue:** Mutations (services, shares, firewall, containers, packages) are compiled into atomic `QueuedAnsibleTask` items with native modules (`ansible.builtin.*`), connection routing injection (`ansible_host`, `ansible_user`, `ansible_port`), and masked Vault secrets.

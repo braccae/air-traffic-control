@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"prox-orch/backend/pkg/podman"
-	"prox-orch/backend/pkg/ssh"
-	"prox-orch/backend/pkg/types"
+	"air-traffic-control/backend/pkg/podman"
+	"air-traffic-control/backend/pkg/ssh"
+	"air-traffic-control/backend/pkg/types"
 )
 
 type testSSHRunner struct{}

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "=================================================="
-echo "    PROX-ORCH Cluster Health & Doctor Diagnostic   "
+echo "    Air Traffic Control Cluster Health & Diagnostic   "
 echo "=================================================="
 
 # 1. Tailscale Status Check
@@ -33,7 +33,7 @@ else
 fi
 
 # 3. Go Daemon Check
-echo -n "[3/5] Checking Go daemon (prox-orch-daemon :18090)... "
+echo -n "[3/5] Checking Go daemon (air-traffic-control-daemon :18090)... "
 if curl -s http://127.0.0.1:18090/api/health > /dev/null 2>&1; then
     echo -e "\033[32mOK (Responding)\033[0m"
 else

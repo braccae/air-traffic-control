@@ -16,7 +16,7 @@ export interface TerminalInputResult {
 export function formatGhosttyBanner(node: NodeItem): string {
   const sshUser = node.sshUser || 'core';
   const lines = [
-    `\x1b[1;36mPROX-ORCH v8.2-ansible\x1b[0m | \x1b[1;32mlibghostty-vt WASM Terminal Engine\x1b[0m`,
+    `\x1b[1;36mAir Traffic Control v8.2-ansible\x1b[0m | \x1b[1;32mlibghostty-vt WASM Terminal Engine\x1b[0m`,
     `\x1b[38;5;250mTarget Host:\x1b[0m \x1b[1;37m${sshUser}@${node.tailscaleHost}\x1b[0m (${node.ip} / ${node.tailscaleIp})`,
     `\x1b[38;5;250mDistribution:\x1b[0m ${node.osDescription} | \x1b[38;5;250mAuth:\x1b[0m ${node.authMethod || 'ssh-ed25519 (/run/user/1000/ssh-agent.socket)'}`,
     `\x1b[38;5;244mType any shell command directly or click a Quick action above.\x1b[0m`,

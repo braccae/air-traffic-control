@@ -10,13 +10,13 @@ import (
 	"os/exec"
 	"time"
 
-	"prox-orch/backend/pkg/glances"
-	"prox-orch/backend/pkg/podman"
-	"prox-orch/backend/pkg/restic"
-	"prox-orch/backend/pkg/ssh"
-	"prox-orch/backend/pkg/tailscale"
-	"prox-orch/backend/pkg/types"
-	"prox-orch/backend/pkg/websocket"
+	"air-traffic-control/backend/pkg/glances"
+	"air-traffic-control/backend/pkg/podman"
+	"air-traffic-control/backend/pkg/restic"
+	"air-traffic-control/backend/pkg/ssh"
+	"air-traffic-control/backend/pkg/tailscale"
+	"air-traffic-control/backend/pkg/types"
+	"air-traffic-control/backend/pkg/websocket"
 )
 
 type sshWithLocalFallbackRunner struct {
@@ -277,7 +277,7 @@ func main() {
 	port := flag.Int("port", 8080, "HTTP and WebSocket server port")
 	flag.Parse()
 
-	log.Printf("Starting PROX-ORCH Go Core Daemon on port %d...", *port)
+	log.Printf("Starting Air Traffic Control Go Core Daemon on port %d...", *port)
 
 	sshManager := ssh.NewClientManager()
 	runner := &sshWithLocalFallbackRunner{sshMgr: sshManager}
@@ -304,7 +304,7 @@ func main() {
 	}()
 
 	mux := newServerMux(hub, podmanMgr)
-	log.Printf("PROX-ORCH backend listening on :%d", *port)
+	log.Printf("Air Traffic Control backend listening on :%d", *port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", *port), mux); err != nil {
 		log.Fatalf("Server stopped: %v", err)
 	}

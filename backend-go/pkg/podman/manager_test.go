@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"prox-orch/backend/pkg/ssh"
+	"air-traffic-control/backend/pkg/ssh"
 )
 
 type mockRunner struct {
