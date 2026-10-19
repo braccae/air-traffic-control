@@ -952,9 +952,9 @@ export default function App() {
             } else if (msg.type === 'node_deleted' && msg.nodeId) {
               setNodesList(prev => prev.filter(n => n.id !== msg.nodeId));
               addToast({ type: 'warning', title: 'Node Removed', message: `Deleted node ${msg.nodeId}` });
-            } else if (msg.type === 'chunks_updated' && msg.chunks) {
+            } else if (msg.type === 'chunks_updated') {
               setChunks(Array.isArray(msg.chunks) ? msg.chunks : []);
-            } else if (msg.type === 'folders_updated' && msg.folders) {
+            } else if (msg.type === 'folders_updated') {
               setFolders(Array.isArray(msg.folders) ? msg.folders : []);
             } else if (msg.type === 'nodes_updated' && Array.isArray(msg.nodes)) {
               setNodesList(msg.nodes);
@@ -1101,8 +1101,8 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
       });
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        const data = await res.json();
         if (data?.folder) {
           setFolders(prev => [...prev.filter(f => f.id !== data.folder.id), data.folder]);
         }
@@ -1111,9 +1111,20 @@ export default function App() {
           title: 'Folder Created',
           message: `Created custom folder "${name}"`,
         });
+      } else {
+        addToast({
+          type: 'error',
+          title: 'Folder Creation Failed',
+          message: data?.error || 'Failed to create folder',
+        });
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to create folder:', err);
+      addToast({
+        type: 'error',
+        title: 'Folder Creation Error',
+        message: err?.message || 'Connection error creating folder',
+      });
     }
   };
 
