@@ -453,5 +453,13 @@ test('calculateClusterHealthScore accurately computes score, online counts, and 
   assert.equal(critical.statusLabel, 'CRITICAL');
 });
 
+test('TOP_SUB_NAV_TABS excludes duplicate xterm_console and contains expected cluster tabs', async () => {
+  const { TOP_SUB_NAV_TABS } = await import('./navigationViewModel.ts');
+  const tabIds = TOP_SUB_NAV_TABS.map(t => t.id);
+
+  assert.equal(tabIds.includes('xterm_console'), false, 'xterm_console must not be in top tabs');
+  assert.deepEqual(tabIds, ['summary', 'playbooks', 'group_vars', 'mesh', 'task_queue']);
+});
+
 
 

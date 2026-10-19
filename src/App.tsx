@@ -1110,7 +1110,6 @@ export default function App() {
         onOpenAddNode={() => setAddNodeOpen(true)}
         onOpenPlaybook={() => setPlaybookOpen(true)}
         onOpenPlaybookEditor={() => handleOpenPlaybookEditor()}
-        onOpenTerminal={() => handleOpenTerminal()}
         onOpenSearch={() => setSearchOpen(true)}
         onOpenGroupVars={() => setGroupVarsOpen(true)}
         onToggleSidebar={() => setMobileSidebarOpen(!mobileSidebarOpen)}
@@ -1155,7 +1154,6 @@ export default function App() {
               setActiveOpTab('tailscale');
               setActiveCockpitItem('tailscale');
             }
-            if (tabId === 'xterm_console') handleOpenTerminal();
             if (tabId === 'playbooks') setPlaybookOpen(true);
             if (tabId === 'group_vars') setGroupVarsOpen(true);
             if (tabId === 'task_queue') {
@@ -1589,7 +1587,6 @@ export default function App() {
         onRestoreWindow={handleRestoreWindow}
         onMinimizeWindow={handleMinimizeWindow}
         onCloseWindow={handleCloseWindow}
-        onNewTerminal={() => handleNewTerminalSession()}
       />
 
       {/* Interactive Modals */}

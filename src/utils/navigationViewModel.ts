@@ -312,4 +312,17 @@ export function calculateClusterHealthScore(nodes: NodeItem[]): {
   return { score, onlineCount: online, totalCount: total, statusLabel, statusColor };
 }
 
+export interface TopSubNavTab {
+  id: string;
+  label: string;
+}
+
+export const TOP_SUB_NAV_TABS: TopSubNavTab[] = [
+  { id: 'summary', label: 'Cluster Summary' },
+  { id: 'playbooks', label: 'Ansible Playbooks' },
+  { id: 'group_vars', label: 'Group Vars & Vault' },
+  { id: 'mesh', label: 'Tailscale Mesh Status' },
+  { id: 'task_queue', label: 'Ansible Task Queue' },
+];
+
 

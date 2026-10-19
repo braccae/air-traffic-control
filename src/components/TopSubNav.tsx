@@ -1,4 +1,5 @@
 import React from 'react';
+import { TOP_SUB_NAV_TABS } from '../utils/navigationViewModel.ts';
 
 interface TopSubNavProps {
   activeTopTab: string;
@@ -13,14 +14,7 @@ export const TopSubNav: React.FC<TopSubNavProps> = ({
   clusterCpu = '14.8%',
   clusterRam = '42.1 / 128 GB',
 }) => {
-  const tabs = [
-    { id: 'summary', label: 'Cluster Summary' },
-    { id: 'playbooks', label: 'Ansible Playbooks' },
-    { id: 'group_vars', label: 'Group Vars & Vault' },
-    { id: 'mesh', label: 'Tailscale Mesh Status' },
-    { id: 'task_queue', label: 'Ansible Task Queue' },
-    { id: 'xterm_console', label: 'Host Terminal (libghostty)' },
-  ];
+  const tabs = TOP_SUB_NAV_TABS;
 
   return (
     <div className="fixed top-10 lg:left-72 left-0 right-0 h-8 bg-[#1b1e31] z-30 flex items-center justify-between px-3 shadow-[0_1px_4px_rgba(0,0,0,0.2)] border-b border-[#26293c]">

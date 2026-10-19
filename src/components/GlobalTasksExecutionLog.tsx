@@ -12,7 +12,6 @@ interface GlobalTasksExecutionLogProps {
   onRestoreWindow?: (id: string) => void;
   onMinimizeWindow?: (id: string) => void;
   onCloseWindow?: (id: string) => void;
-  onNewTerminal?: () => void;
 }
 
 export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = ({
@@ -25,7 +24,6 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
   onRestoreWindow,
   onMinimizeWindow,
   onCloseWindow,
-  onNewTerminal,
 }) => {
   const [activeTab, setActiveTab] = useState<'active' | 'ansible' | 'syslog' | 'vault'>('active');
   const [isExpanded, setIsExpanded] = useState(false);
@@ -218,18 +216,6 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
                   );
                 })}
               </div>
-
-              {onNewTerminal && (
-                <button
-                  type="button"
-                  onClick={onNewTerminal}
-                  className="flex items-center gap-1 px-1.5 py-0.5 bg-[#238636]/20 border border-[#238636]/50 hover:bg-[#238636]/40 text-[#3fb950] rounded text-[10px] font-mono transition-colors shrink-0 cursor-pointer"
-                  title="Open new terminal session"
-                >
-                  <span className="material-symbols-outlined text-[12px]">add</span>
-                  <span>Term</span>
-                </button>
-              )}
             </div>
           )}
         </div>

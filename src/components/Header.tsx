@@ -6,7 +6,6 @@ interface HeaderProps {
   onOpenAddNode: () => void;
   onOpenPlaybook: () => void;
   onOpenPlaybookEditor?: () => void;
-  onOpenTerminal: () => void;
   onOpenSearch: () => void;
   onOpenGroupVars: () => void;
   onToggleSidebar?: () => void;
@@ -23,7 +22,6 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAddNode,
   onOpenPlaybook,
   onOpenPlaybookEditor,
-  onOpenTerminal,
   onOpenSearch,
   onOpenGroupVars,
   onToggleSidebar,
@@ -94,10 +92,9 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
           </button>
         )}
-        <div className="flex items-center gap-1.5 bg-[#313447] px-2 py-0.5 rounded border border-[#434750]/50">
-          <span className="material-symbols-outlined text-[#b0c9ff] text-[18px]">dns</span>
-          <span className="font-mono text-xs tracking-wider text-[#b0c9ff] font-bold">PROX-ORCH</span>
-          <span className="font-mono text-[10px] px-1 bg-[#171a2d] text-[#8cd6cb] rounded">v8.2-ansible</span>
+        <div className="flex items-center gap-1.5">
+          <span className="material-symbols-outlined text-[#b0c9ff] text-[20px]">dns</span>
+          <span className="font-mono text-sm tracking-wider text-[#dfe1fa] font-bold">PROX-ORCH</span>
         </div>
         <div className="h-4 w-[1px] bg-[#434750]"></div>
         <div className="flex items-center gap-1 text-[#c3c6d2] font-mono text-xs">
@@ -162,15 +159,6 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <span className="material-symbols-outlined text-[14px] text-[#d9b9ff]">lock_reset</span>
             <span>New Group Var</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenTerminal}
-            className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[14px] text-[#b0c9ff]">terminal</span>
-            <span>Terminal / SSH</span>
           </button>
 
           {(onToggleTheme || onSelectTheme) && (
@@ -261,7 +249,12 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
           </div>
 
-          <div className="flex items-center gap-1.5 text-[#dfe1fa] pl-1">
+          <button
+            type="button"
+            className="flex items-center gap-1.5 text-[#dfe1fa] pl-1 cursor-pointer hover:opacity-90 transition-opacity"
+            title="Role-Based Access Control / OIDC (Enabled)"
+            aria-label="User profile: root@pam (Role-Based Access Control / OIDC Enabled)"
+          >
             <div className="w-7 h-7 rounded-full bg-[#b0c9ff] text-[#002e68] flex items-center justify-center font-bold text-xs shadow-sm">
               <span className="material-symbols-outlined text-[18px]">person</span>
             </div>
@@ -269,7 +262,7 @@ export const Header: React.FC<HeaderProps> = ({
               <span className="font-mono text-xs text-[#dfe1fa] leading-tight font-bold">root@pam</span>
               <span className="font-mono text-[10px] text-[#8cd6cb] leading-none">PAM AUTH</span>
             </div>
-          </div>
+          </button>
         </div>
       </div>
     </header>
