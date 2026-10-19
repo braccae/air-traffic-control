@@ -593,3 +593,223 @@ test('formatTaskQueueTabLabel formats staged task count correctly', async () => 
   assert.strictEqual(formatTaskQueueTabLabel(5), 'Task Queue (5)');
 });
 
+test('buildInventoryTree partitions nodes into Tailscale tag groups and Non-Tailscale standalone & folders matching operator sketch', async () => {
+  const { buildInventoryTree } = await import('./navigationViewModel.ts');
+  const typeImport = await import('../types/index.ts');
+
+  const chunks = [
+    { id: 'chunk-worker', tag: 'tag:worker', authMethod: 'tailscale-ssh' as const, createdAt: 100 },
+    { id: 'chunk-pve', tag: 'tag:pve', authMethod: 'vault-password' as const, createdAt: 200 },
+  ];
+
+  const folders = [
+    { id: 'folder-lab', name: 'Lab Hardware', createdAt: 500 },
+  ];
+
+  const nodes: NodeItem[] = [
+    {
+      ...sampleNodes[0],
+      id: 'node-ts-1',
+      name: 'worker-01',
+      group: 'tag:worker',
+      tailscaleIp: '100.97.159.101',
+      tags: ['tag:worker'],
+    },
+    {
+      ...sampleNodes[0],
+      id: 'node-ts-2',
+      name: 'worker-02',
+      group: '',
+      followedTag: 'tag:worker',
+      tailscaleIp: '100.97.159.102',
+      tags: [],
+    },
+    {
+      ...sampleNodes[0],
+      id: 'node-ts-3',
+      name: 'pve-host-1',
+      group: 'tag:pve',
+      tailscaleIp: '100.97.159.103',
+      tags: ['tag:pve'],
+    },
+    {
+      ...sampleNodes[0],
+      id: 'node-nonts-1',
+      name: 'router-direct-1',
+      group: 'network',
+      tailscaleIp: '',
+      ip: '192.168.1.1',
+      tags: [],
+      folder: undefined,
+    },
+    {
+      ...sampleNodes[0],
+      id: 'node-nonts-2',
+      name: 'winrm-box-1',
+      group: 'windows',
+      tailscaleIp: '',
+      ip: '192.168.1.50',
+      tags: [],
+      folder: undefined,
+    },
+    {
+      ...sampleNodes[0],
+      id: 'node-nonts-3',
+      name: 'lab-pdu-01',
+      group: 'iot',
+      tailscaleIp: '',
+      ip: '192.168.1.99',
+      tags: [],
+      folder: 'folder-lab',
+    },
+  ];
+
+  const tree = buildInventoryTree(nodes, chunks, folders, 'leo-banjo.ts.net');
+
+  // Verify Tailscale section
+  assert.equal(tree.tailscale.shortName, 'leo-banjo.ts.net');
+  assert.equal(tree.tailscale.tags.length, 2);
+
+  const workerTag = tree.tailscale.tags.find(t => t.tag === 'tag:worker');
+  assert.ok(workerTag, 'tag:worker should exist');
+  assert.equal(workerTag?.chunk?.id, 'chunk-worker');
+  assert.deepEqual(workerTag?.nodes.map(n => n.id), ['node-ts-1', 'node-ts-2']);
+
+  const pveTag = tree.tailscale.tags.find(t => t.tag === 'tag:pve');
+  assert.ok(pveTag, 'tag:pve should exist');
+  assert.equal(pveTag?.chunk?.id, 'chunk-pve');
+  assert.deepEqual(pveTag?.nodes.map(n => n.id), ['node-ts-3']);
+
+  // Verify Non-Tailscale section
+  assert.equal(tree.nonTailscale.standalone.length, 2);
+  assert.deepEqual(tree.nonTailscale.standalone.map(n => n.id), ['node-nonts-1', 'node-nonts-2']);
+
+  assert.equal(tree.nonTailscale.folders.length, 1);
+  assert.equal(tree.nonTailscale.folders[0].folder.id, 'folder-lab');
+  assert.equal(tree.nonTailscale.folders[0].folder.name, 'Lab Hardware');
+  assert.deepEqual(tree.nonTailscale.folders[0].nodes.map(n => n.id), ['node-nonts-3']);
+});
+
+test('buildInventoryTree preserves empty chunks and empty folders with nodes: []', async () => {
+  const { buildInventoryTree } = await import('./navigationViewModel.ts');
+
+  const chunks = [
+    { id: 'chunk-active', tag: 'tag:active', authMethod: 'tailscale-ssh' as const, createdAt: 100 },
+    { id: 'chunk-empty', tag: 'tag:empty', authMethod: 'vault-password' as const, createdAt: 200 },
+  ];
+
+  const folders = [
+    { id: 'folder-filled', name: 'Filled Folder', createdAt: 300 },
+    { id: 'folder-empty', name: 'Cold Storage Empty', createdAt: 400 },
+  ];
+
+  const nodes: NodeItem[] = [
+    {
+      ...sampleNodes[0],
+      id: 'node-1',
+      group: 'tag:active',
+      tailscaleIp: '100.97.159.10',
+      tags: ['tag:active'],
+    },
+    {
+      ...sampleNodes[0],
+      id: 'node-2',
+      tailscaleIp: '',
+      ip: '192.168.1.20',
+      tags: [],
+      folder: 'folder-filled',
+    },
+  ];
+
+  const tree = buildInventoryTree(nodes, chunks, folders);
+
+  // Empty chunk preserved
+  const emptyChunkTag = tree.tailscale.tags.find(t => t.tag === 'tag:empty');
+  assert.ok(emptyChunkTag, 'empty chunk should be preserved in tags');
+  assert.equal(emptyChunkTag?.chunk?.id, 'chunk-empty');
+  assert.equal(emptyChunkTag?.nodes.length, 0);
+
+  // Active chunk has node
+  const activeChunkTag = tree.tailscale.tags.find(t => t.tag === 'tag:active');
+  assert.ok(activeChunkTag);
+  assert.equal(activeChunkTag?.nodes.length, 1);
+
+  // Empty folder preserved
+  const emptyFolder = tree.nonTailscale.folders.find(f => f.folder.id === 'folder-empty');
+  assert.ok(emptyFolder, 'empty folder should be preserved in folders');
+  assert.equal(emptyFolder?.nodes.length, 0);
+
+  // Filled folder has node
+  const filledFolder = tree.nonTailscale.folders.find(f => f.folder.id === 'folder-filled');
+  assert.ok(filledFolder);
+  assert.equal(filledFolder?.nodes.length, 1);
+});
+
+test('buildInventoryTree matches folder by name when node.folder equals folder.name', async () => {
+  const { buildInventoryTree } = await import('./navigationViewModel.ts');
+
+  const folders = [
+    { id: 'folder-123', name: 'Lab Hardware', createdAt: 100 },
+  ];
+
+  const nodes: NodeItem[] = [
+    {
+      ...sampleNodes[0],
+      id: 'node-named-folder',
+      tailscaleIp: '',
+      ip: '192.168.1.30',
+      tags: [],
+      folder: 'Lab Hardware', // Matches name, not id
+    },
+  ];
+
+  const tree = buildInventoryTree(nodes, [], folders);
+  assert.equal(tree.nonTailscale.standalone.length, 0);
+  assert.equal(tree.nonTailscale.folders[0].nodes.length, 1);
+  assert.equal(tree.nonTailscale.folders[0].nodes[0].id, 'node-named-folder');
+});
+
+test('buildInventoryTree with filterNodesBySearchQuery supports tree searching across TS and non-TS hosts', async () => {
+  const { buildInventoryTree, filterNodesBySearchQuery } = await import('./navigationViewModel.ts');
+
+  const nodes: NodeItem[] = [
+    {
+      ...sampleNodes[0],
+      id: 'node-ts-ai',
+      name: 'ai-worker-01',
+      group: 'tag:worker',
+      tailscaleIp: '100.97.159.50',
+      tags: ['tag:worker'],
+    },
+    {
+      ...sampleNodes[0],
+      id: 'node-nonts-ai',
+      name: 'ai-storage-san',
+      group: 'storage',
+      tailscaleIp: '',
+      ip: '192.168.1.60',
+      tags: [],
+    },
+    {
+      ...sampleNodes[0],
+      id: 'node-other',
+      name: 'web-frontend',
+      group: 'tag:web',
+      tailscaleIp: '100.97.159.70',
+      tags: ['tag:web'],
+    },
+  ];
+
+  const filtered = filterNodesBySearchQuery(nodes, 'ai-');
+  const tree = buildInventoryTree(filtered, [], []);
+
+  // Only AI nodes should be in the tree
+  assert.equal(tree.tailscale.tags.length, 1);
+  assert.equal(tree.tailscale.tags[0].nodes.length, 1);
+  assert.equal(tree.tailscale.tags[0].nodes[0].id, 'node-ts-ai');
+
+  assert.equal(tree.nonTailscale.standalone.length, 1);
+  assert.equal(tree.nonTailscale.standalone[0].id, 'node-nonts-ai');
+});
+
+
