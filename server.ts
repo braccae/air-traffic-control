@@ -54,6 +54,11 @@ import {
   type PackageManager,
   type PackageCheckResult,
 } from './src/utils/packageManager.ts';
+import {
+  loadAnsibleConfig,
+  saveAnsibleConfig,
+  type AnsibleConfigSettings,
+} from './src/utils/ansibleConfigManager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1734,6 +1739,78 @@ registerPackageRoutes(app, {
 const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
 registerPlaybookRoutes(app, playbookDir, {
   inventoryScriptPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
+});
+
+app.get('/api/ansible/config', async (_req, res) => {
+  try {
+    const cfgPath = path.resolve(__dirname, 'ansible/ansible.cfg');
+    const settings = await loadAnsibleConfig(cfgPath);
+    res.json({ success: true, settings });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to load ansible.cfg' });
+  }
+});
+
+app.put('/api/ansible/config', async (req, res) => {
+  try {
+    const rawSettings = req.body?.settings || req.body;
+    if (!rawSettings || typeof rawSettings !== 'object') {
+      res.status(400).json({ success: false, error: 'Invalid settings body' });
+      return;
+    }
+
+    const cfgPath = path.resolve(__dirname, 'ansible/ansible.cfg');
+    const existing = await loadAnsibleConfig(cfgPath);
+
+    const validCallbacks = ['json', 'yaml', 'default'];
+    if (rawSettings.stdoutCallback && !validCallbacks.includes(rawSettings.stdoutCallback)) {
+      res.status(400).json({
+        success: false,
+        error: `Invalid stdoutCallback: ${rawSettings.stdoutCallback}. Must be one of ${validCallbacks.join(', ')}`,
+      });
+      return;
+    }
+
+    const validBecomeMethods = ['run0', 'sudo', 'doas'];
+    if (rawSettings.becomeMethod && !validBecomeMethods.includes(rawSettings.becomeMethod)) {
+      res.status(400).json({
+        success: false,
+        error: `Invalid becomeMethod: ${rawSettings.becomeMethod}. Must be one of ${validBecomeMethods.join(', ')}`,
+      });
+      return;
+    }
+
+    if (rawSettings.forks !== undefined && (typeof rawSettings.forks !== 'number' || rawSettings.forks < 1 || rawSettings.forks > 500)) {
+      res.status(400).json({ success: false, error: 'Forks must be a number between 1 and 500' });
+      return;
+    }
+
+    if (rawSettings.timeout !== undefined && (typeof rawSettings.timeout !== 'number' || rawSettings.timeout < 1 || rawSettings.timeout > 600)) {
+      res.status(400).json({ success: false, error: 'Timeout must be a number between 1 and 600' });
+      return;
+    }
+
+    const updatedSettings: AnsibleConfigSettings = {
+      ...existing,
+      stdoutCallback: rawSettings.stdoutCallback || existing.stdoutCallback,
+      forks: typeof rawSettings.forks === 'number' ? rawSettings.forks : existing.forks,
+      timeout: typeof rawSettings.timeout === 'number' ? rawSettings.timeout : existing.timeout,
+      hostKeyChecking: typeof rawSettings.hostKeyChecking === 'boolean' ? rawSettings.hostKeyChecking : existing.hostKeyChecking,
+      pipelining: typeof rawSettings.pipelining === 'boolean' ? rawSettings.pipelining : existing.pipelining,
+      becomeMethod: rawSettings.becomeMethod || existing.becomeMethod,
+      vaultPasswordFile: rawSettings.vaultPasswordFile !== undefined ? rawSettings.vaultPasswordFile : existing.vaultPasswordFile,
+    };
+
+    const saved = await saveAnsibleConfig(updatedSettings, cfgPath);
+    if (!saved) {
+      res.status(500).json({ success: false, error: 'Failed to write ansible.cfg' });
+      return;
+    }
+
+    res.json({ success: true, settings: updatedSettings });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to update ansible.cfg' });
+  }
 });
 
 app.get('/api/ansible/inventory', (_req, res) => {

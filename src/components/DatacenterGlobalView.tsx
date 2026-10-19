@@ -18,6 +18,7 @@ import {
   type QuickCommandItem,
   type QuickCommandCategory,
 } from '../utils/quickCommandsManager.ts';
+import type { AnsibleConfigSettings } from '../utils/ansibleConfigManager.ts';
 
 export interface DatacenterGlobalViewProps {
   datacenterName?: string;
@@ -105,6 +106,70 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
   const [formCategory, setFormCategory] = useState<QuickCommandCategory>('custom');
   const [confirmReset, setConfirmReset] = useState(false);
   const [formError, setFormError] = useState('');
+
+  // Ansible Engine Configuration State
+  const [ansibleConfig, setAnsibleConfig] = useState<AnsibleConfigSettings>({
+    stdoutCallback: 'json',
+    forks: 10,
+    timeout: 30,
+    hostKeyChecking: false,
+    pipelining: true,
+    becomeMethod: 'run0',
+  });
+  const [loadingAnsibleConfig, setLoadingAnsibleConfig] = useState(false);
+  const [savingAnsibleConfig, setSavingAnsibleConfig] = useState(false);
+  const [ansibleConfigFeedback, setAnsibleConfigFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+
+  useEffect(() => {
+    setLoadingAnsibleConfig(true);
+    fetch('/api/ansible/config')
+      .then(res => res.json())
+      .then(data => {
+        if (data?.success && data?.settings) {
+          setAnsibleConfig(data.settings);
+        }
+      })
+      .catch(err => {
+        console.error('Failed to load ansible.cfg settings', err);
+      })
+      .finally(() => setLoadingAnsibleConfig(false));
+  }, []);
+
+  const handleSaveAnsibleConfig = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setSavingAnsibleConfig(true);
+    setAnsibleConfigFeedback(null);
+    try {
+      const res = await fetch('/api/ansible/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: ansibleConfig }),
+      });
+      const data = await res.json();
+      if (data?.success && data?.settings) {
+        setAnsibleConfig(data.settings);
+        setAnsibleConfigFeedback({
+          type: 'success',
+          message: 'ansible.cfg synchronized successfully to disk.',
+        });
+      } else {
+        setAnsibleConfigFeedback({
+          type: 'error',
+          message: data?.error || 'Failed to save ansible.cfg',
+        });
+      }
+    } catch (err: any) {
+      setAnsibleConfigFeedback({
+        type: 'error',
+        message: err?.message || 'Network error saving ansible.cfg',
+      });
+    } finally {
+      setSavingAnsibleConfig(false);
+    }
+  };
 
   const health = calculateClusterHealthScore(nodes);
   const clusterGroups = groupNodesByDynamicCluster(nodes);
@@ -1128,6 +1193,238 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
             })}
           </div>
         )}
+      </div>
+
+      {/* Section 7: Ansible Engine Configuration (ansible.cfg) */}
+      <div
+        id="datacenter-ansible-config"
+        data-testid="datacenter-ansible-config-card"
+        className="rounded-lg bg-[#121528] border border-[#26293c] p-4 shadow-md flex flex-col gap-3"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[18px] text-[#8cd6cb]">tune</span>
+            <h2 className="text-xs font-mono font-bold text-[#dfe1fa] uppercase tracking-wider">
+              Ansible Engine Configuration (<code className="text-[#8cd6cb] font-mono">ansible.cfg</code>)
+            </h2>
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-[#1b2a38] text-[#8cd6cb] border border-[#8cd6cb]/30">
+              Driver: {ansibleConfig.stdoutCallback}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleSaveAnsibleConfig}
+            disabled={savingAnsibleConfig || loadingAnsibleConfig}
+            className="px-3 py-1 rounded text-xs font-mono font-bold text-white bg-[#1f6feb] hover:bg-[#388bfd] disabled:opacity-50 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+            title="Save and write updated settings to ansible/ansible.cfg"
+          >
+            <span className="material-symbols-outlined text-[15px]">
+              {savingAnsibleConfig ? 'sync' : 'save'}
+            </span>
+            <span>{savingAnsibleConfig ? 'Syncing...' : 'Save & Sync ansible.cfg'}</span>
+          </button>
+        </div>
+
+        <p className="text-[11px] text-[#8d909b] font-mono">
+          Global execution parameters for on-the-fly and baseline homelab playbooks. Output is set to the JSON driver to streamline telemetry parsing for the web UI.
+        </p>
+
+        {ansibleConfigFeedback && (
+          <div
+            className={`p-2.5 rounded text-xs font-mono border flex items-center justify-between ${
+              ansibleConfigFeedback.type === 'success'
+                ? 'bg-[#162620] text-[#8cd6cb] border-[#8cd6cb]/30'
+                : 'bg-[#311c1c] text-[#ffb4ab] border-[#ffb4ab]/30'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-[16px]">
+                {ansibleConfigFeedback.type === 'success' ? 'check_circle' : 'error'}
+              </span>
+              <span>{ansibleConfigFeedback.message}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAnsibleConfigFeedback(null)}
+              className="text-[#8d909b] hover:text-[#dfe1fa] cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[14px]">close</span>
+            </button>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {/* stdout_callback */}
+          <div className="p-3 rounded-lg bg-[#171a2d] border border-[#26293c] flex flex-col gap-1.5">
+            <label className="text-xs font-mono font-bold text-[#dfe1fa] flex items-center justify-between">
+              <span>STDOUT Driver (<code className="text-[#79c0ff]">stdout_callback</code>)</span>
+              <span className="text-[10px] text-[#8d909b] uppercase">Output</span>
+            </label>
+            <select
+              value={ansibleConfig.stdoutCallback}
+              onChange={e =>
+                setAnsibleConfig(prev => ({
+                  ...prev,
+                  stdoutCallback: e.target.value as 'json' | 'yaml' | 'default',
+                }))
+              }
+              className="w-full bg-[#121528] border border-[#26293c] rounded px-2.5 py-1.5 text-xs font-mono text-[#dfe1fa] focus:border-[#79c0ff] focus:outline-hidden cursor-pointer"
+            >
+              <option value="json">json (Structured for Web UI)</option>
+              <option value="yaml">yaml (Formatted CLI)</option>
+              <option value="default">default (Standard prose)</option>
+            </select>
+            <span className="text-[10px] font-mono text-[#8d909b]">
+              Driver used by runner to format task payloads and recap.
+            </span>
+          </div>
+
+          {/* become_method */}
+          <div className="p-3 rounded-lg bg-[#171a2d] border border-[#26293c] flex flex-col gap-1.5">
+            <label className="text-xs font-mono font-bold text-[#dfe1fa] flex items-center justify-between">
+              <span>Privilege Elevation (<code className="text-[#d9b9ff]">become_method</code>)</span>
+              <span className="text-[10px] text-[#8d909b] uppercase">Security</span>
+            </label>
+            <select
+              value={ansibleConfig.becomeMethod}
+              onChange={e =>
+                setAnsibleConfig(prev => ({
+                  ...prev,
+                  becomeMethod: e.target.value as 'run0' | 'sudo' | 'doas',
+                }))
+              }
+              className="w-full bg-[#121528] border border-[#26293c] rounded px-2.5 py-1.5 text-xs font-mono text-[#dfe1fa] focus:border-[#d9b9ff] focus:outline-hidden cursor-pointer"
+            >
+              <option value="run0">run0 (systemd 256+ polkit preferred)</option>
+              <option value="sudo">sudo (Standard Linux fallback)</option>
+              <option value="doas">doas (Lightweight BSD/Alpine)</option>
+            </select>
+            <span className="text-[10px] font-mono text-[#8d909b]">
+              Method used to execute elevated commands on remote nodes.
+            </span>
+          </div>
+
+          {/* forks */}
+          <div className="p-3 rounded-lg bg-[#171a2d] border border-[#26293c] flex flex-col gap-1.5">
+            <label className="text-xs font-mono font-bold text-[#dfe1fa] flex items-center justify-between">
+              <span>Parallel Host Forks (<code className="text-[#ffd580]">forks</code>)</span>
+              <span className="text-[10px] font-mono text-[#ffd580]">{ansibleConfig.forks} forks</span>
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={ansibleConfig.forks}
+              onChange={e => {
+                const val = parseInt(e.target.value, 10);
+                setAnsibleConfig(prev => ({
+                  ...prev,
+                  forks: isNaN(val) ? 1 : Math.max(1, Math.min(50, val)),
+                }));
+              }}
+              className="w-full bg-[#121528] border border-[#26293c] rounded px-2.5 py-1.5 text-xs font-mono text-[#dfe1fa] focus:border-[#ffd580] focus:outline-hidden"
+            />
+            <span className="text-[10px] font-mono text-[#8d909b]">
+              Max parallel SSH worker processes (1 - 50).
+            </span>
+          </div>
+
+          {/* timeout */}
+          <div className="p-3 rounded-lg bg-[#171a2d] border border-[#26293c] flex flex-col gap-1.5">
+            <label className="text-xs font-mono font-bold text-[#dfe1fa] flex items-center justify-between">
+              <span>Connection Timeout (<code className="text-[#ffb4ab]">timeout</code>)</span>
+              <span className="text-[10px] font-mono text-[#ffb4ab]">{ansibleConfig.timeout}s</span>
+            </label>
+            <input
+              type="number"
+              min={10}
+              max={300}
+              value={ansibleConfig.timeout}
+              onChange={e => {
+                const val = parseInt(e.target.value, 10);
+                setAnsibleConfig(prev => ({
+                  ...prev,
+                  timeout: isNaN(val) ? 10 : Math.max(10, Math.min(300, val)),
+                }));
+              }}
+              className="w-full bg-[#121528] border border-[#26293c] rounded px-2.5 py-1.5 text-xs font-mono text-[#dfe1fa] focus:border-[#ffb4ab] focus:outline-hidden"
+            />
+            <span className="text-[10px] font-mono text-[#8d909b]">
+              Default SSH connection timeout in seconds (10 - 300).
+            </span>
+          </div>
+
+          {/* host_key_checking */}
+          <div className="p-3 rounded-lg bg-[#171a2d] border border-[#26293c] flex flex-col justify-between gap-1.5">
+            <div>
+              <div className="text-xs font-mono font-bold text-[#dfe1fa] flex items-center justify-between mb-1">
+                <span>Host Key Checking (<code className="text-[#8cd6cb]">host_key_checking</code>)</span>
+                <span
+                  className={`text-[10px] font-mono px-1.5 py-0.2 rounded ${
+                    ansibleConfig.hostKeyChecking
+                      ? 'bg-[#162620] text-[#8cd6cb] border border-[#8cd6cb]/30'
+                      : 'bg-[#1b2a38] text-[#79c0ff] border border-[#79c0ff]/30'
+                  }`}
+                >
+                  {ansibleConfig.hostKeyChecking ? 'Strict' : 'Disabled'}
+                </span>
+              </div>
+              <p className="text-[10px] font-mono text-[#8d909b]">
+                Disable for zero-touch Tailscale node provisioning without host fingerprint prompts.
+              </p>
+            </div>
+            <label className="inline-flex items-center gap-2 cursor-pointer mt-1">
+              <input
+                type="checkbox"
+                checked={ansibleConfig.hostKeyChecking}
+                onChange={e =>
+                  setAnsibleConfig(prev => ({
+                    ...prev,
+                    hostKeyChecking: e.target.checked,
+                  }))
+                }
+                className="rounded bg-[#121528] border-[#26293c] text-[#1f6feb] focus:ring-0 cursor-pointer"
+              />
+              <span className="text-xs font-mono text-[#dfe1fa]">Enforce host key verification</span>
+            </label>
+          </div>
+
+          {/* pipelining */}
+          <div className="p-3 rounded-lg bg-[#171a2d] border border-[#26293c] flex flex-col justify-between gap-1.5">
+            <div>
+              <div className="text-xs font-mono font-bold text-[#dfe1fa] flex items-center justify-between mb-1">
+                <span>SSH Pipelining (<code className="text-[#8cd6cb]">pipelining</code>)</span>
+                <span
+                  className={`text-[10px] font-mono px-1.5 py-0.2 rounded ${
+                    ansibleConfig.pipelining
+                      ? 'bg-[#162620] text-[#8cd6cb] border border-[#8cd6cb]/30'
+                      : 'bg-[#291717] text-[#ffb4ab] border border-[#ffb4ab]/30'
+                  }`}
+                >
+                  {ansibleConfig.pipelining ? 'Enabled' : 'Disabled'}
+                </span>
+              </div>
+              <p className="text-[10px] font-mono text-[#8d909b]">
+                Pipes Python modules directly into remote SSH session; drastically reduces network roundtrips.
+              </p>
+            </div>
+            <label className="inline-flex items-center gap-2 cursor-pointer mt-1">
+              <input
+                type="checkbox"
+                checked={ansibleConfig.pipelining}
+                onChange={e =>
+                  setAnsibleConfig(prev => ({
+                    ...prev,
+                    pipelining: e.target.checked,
+                  }))
+                }
+                className="rounded bg-[#121528] border-[#26293c] text-[#1f6feb] focus:ring-0 cursor-pointer"
+              />
+              <span className="text-xs font-mono text-[#dfe1fa]">Enable SSH pipelining</span>
+            </label>
+          </div>
+        </div>
       </div>
     </div>
   );
