@@ -11,7 +11,7 @@ A primary design requirement of Air Traffic Control is providing single-pane-of-
 ### Decision: Agentless Universal SSH
 Rather than forcing custom agent installations or requiring continuous daemon maintenance on remote nodes, Air Traffic Control relies on **Universal SSH Transport**:
 - **Zero-Footprint Deployment:** No agent binaries, daemons, background listeners, or custom services are installed on target machines. A machine with OpenSSH server and standard user credentials is immediately manageable.
-- **SSH Agent Forwarding:** Authentication leverages `SSH_AUTH_SOCK` (or user session sockets like `/run/user/<uid>/ssh-agent.socket`). No private keys are stored on the server or transmitted over unencrypted channels.
+- **SSH Agent Forwarding Policy:** Authentication leverages `SSH_AUTH_SOCK` (or user session sockets like `/run/user/<uid>/ssh-agent.socket`). No private keys are stored on the server or transmitted over unencrypted channels. Note that `ssh-agent forwarding` is strictly for local testing and developer workstations; production environments rely on keyless PAM `tailscale-ssh` or Ansible Vault encrypted credentials.
 - **Multi-Route Resilience:** Node connections dynamically failover across:
   1. Tailscale WireGuard mesh (`100.x.y.z` / `*.ts.net`)
   2. Local Area Network IPv4/IPv6 (`192.168.x.y`, `10.x.y.z`)
@@ -240,3 +240,84 @@ To prevent polling storms and CPU spikes across 47+ homelab nodes, telemetry col
   3. **Tier 3 (Glances CLI):** Fallback executing `glances --stdout-json cpu,mem,load,sensors` over SSH when the daemon is not running.
   4. **Tier 4 (proc/sysfs Direct Extraction):** Fallback reading `/proc/stat`, `/proc/meminfo`, and `/sys/class/thermal` directly over SSH.
 - **Strict Zero-Mock Invariant:** If all 4 tiers fail, the node displays an unmonitored / offline status. No synthetic numbers or fluctuating mock telemetry is ever generated.
+
+---
+
+## 10. Automated uv Bootstrapper & Persistent Ansible Virtualenv
+
+Air Traffic Control provisions and isolates Ansible and WinRM execution environments without altering global system packages:
+- **Persistent Location:** `data/ansible-venv` (persisted on disk; git-ignored).
+- **Standalone `uv` Toolchain:** Self-bootstraps via standalone `uv` binary cached in `data/bin/uv` (`https://astral.sh/uv/install.sh`), with fallback to system `uv` or standard Python `venv`.
+- **Pre-packaged Runtime Matrix:** Includes `ansible-core` (CLI runners), `pywinrm[kerberos]` (WinRM transport), `requests-credssp` (Windows credential delegation), and `pydantic`.
+- **Auto-Healing Initialization:** `ensureAnsibleVenv()` verifies interpreter integrity, environment variables (`VIRTUAL_ENV`, `PATH`), and required packages on daemon boot before accepting automation commands.
+
+---
+
+## 11. Multi-Pathway Node Onboarding Architecture
+
+The **Add Node Modal** provides operators with four distinct pathways for node enrollment:
+
+```mermaid
+flowchart TD
+    AddNodeModal[Add Node Modal] --> Pathway1[1. Tailscale Mesh Selection]
+    AddNodeModal --> Pathway2[2. Manual Linux SSH]
+    AddNodeModal --> Pathway3[3. WinRM for Windows]
+    AddNodeModal --> Pathway4[4. Follow Tailscale Tag]
+
+    Pathway1 --> TS_SSH[Keyless tailscale-ssh via PAM: No credentials stored]
+    Pathway2 --> VaultSSH[Ansible Vault AES256: Password or SSH Key]
+    Pathway3 --> VaultWinRM[WinRM HTTP 5985 / HTTPS 5986: NTLM / Kerberos + Vault]
+    Pathway4 --> DynChunk[Dynamic TagInventoryChunk: Auto-syncs matching peers]
+```
+
+1. **Tailscale Mesh Manual Selection:** Queries live `tailscale status --json` peers. Pre-fills DNS names, Tailscale IPs, and tags. Employs keyless PAM `tailscale-ssh` with zero key distribution.
+2. **Manual Linux SSH:** Connects directly over SSH to physical or virtual Linux hosts. Sensitive passwords or private keys are encrypted on-the-fly into `$ANSIBLE_VAULT;1.1;AES256` blocks via `/api/vault/encrypt`.
+3. **WinRM Connections for Windows Hosts:** Connects to Windows Server instances over WinRM (port 5985 HTTP or 5986 HTTPS) with NTLM or Kerberos authentication and Vault-encrypted administrator passwords.
+4. **Follow Tailscale Tag (Dynamic Inventory Chunk):** Operators can follow an entire fleet tag (e.g., `tag:worker`). The backend persists a `TagInventoryChunk` that queries live peers periodically and auto-provisions or retires nodes matching the tag with shared credentials (defaulting to keyless `tailscale-ssh` when blank).
+
+---
+
+## 12. Tiered Ansible Vault Credential Resolution Hierarchy
+
+To decrypt secrets for automation runs and playbook executions, Air Traffic Control evaluates vault password sources through a tiered resolution strategy:
+
+```mermaid
+flowchart TD
+    Req[Secret Decryption Request] --> Tier1{Tier 1: vault_password_file?}
+    Tier1 -- File exists on disk --> UseFile[Read password from file / ansible.cfg]
+    Tier1 -- Absent / Not found --> Tier2{Tier 2: Environment Variables?}
+    Tier2 -- ANSIBLE_VAULT_PASSWORD or FILE set --> UseEnv[Read password from environment variable]
+    Tier2 -- Absent / Empty --> Tier3{Tier 3: Interactive Prompt?}
+    Tier3 -- Operator entered password --> UsePrompt[Decrypt with operator master password]
+    Tier3 -- Cancelled / None --> Error[Throw PASSWORD_REQUIRED Error]
+```
+
+1. **Tier 1 (File-First):** Checks `vault_password_file` in options or `ansible.cfg` (supporting relative paths resolved against the project's `ansible/` root).
+2. **Tier 2 (Environment):** Checks `ANSIBLE_VAULT_PASSWORD` (inline string) or `ANSIBLE_VAULT_PASSWORD_FILE` (environment file pointer).
+3. **Tier 3 (Interactive Fallback):** Prompts the operator via `ask_password` input modal when no automated source is present.
+
+---
+
+## 13. Hierarchical Inventory Topology (Tag Chunks & Custom Folders)
+
+The inventory sidebar (`ServerViewSidebar`) models real datacenter and homelab infrastructure hierarchies:
+
+```
+Inventory
+  <ts-shortname> (e.g. leo-banjo.ts.net)
+    <tag1> (e.g. tag:host)
+      <host 1>
+      <host 2>
+    <tag2> (e.g. tag:worker)
+      <host 3>
+      <host 4>
+  (non ts-host)
+  <non-ts-host 2>
+  <Folder/> (e.g. Cold Storage)
+    <non ts-host 3>
+```
+
+- **Dynamic Tag Chunks:** Tailscale nodes are automatically grouped into their respective tag chunks (or an "Unassigned" cluster if no chunk tag applies).
+- **Custom Folders:** Non-Tailscale physical/virtual machines can be organized into arbitrary operator-defined folders stored in SQLite (`custom_folders`).
+- **Real-Time WebSocket Synchronization:** Updates to chunks (`chunks_updated`), folders (`folders_updated`), or nodes (`nodes_updated`) trigger live, non-destructive UI re-renders.
+

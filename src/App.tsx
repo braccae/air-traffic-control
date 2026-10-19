@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import type { NodeItem, TelemetryData, GlobalTaskItem, QueuedAnsibleTask } from './types/index.ts';
+import type { NodeItem, TelemetryData, GlobalTaskItem, QueuedAnsibleTask, TagInventoryChunk, CustomFolder } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ServerViewSidebar } from './components/ServerViewSidebar.tsx';
 import { NodeBreadcrumbBar } from './components/NodeBreadcrumbBar.tsx';
@@ -432,6 +432,8 @@ export default function App() {
   const [isQueueRunning, setIsQueueRunning] = useState<boolean>(false);
   const [activeConsoleTab, setActiveConsoleTab] = useState<ConsoleDrawerTab>('active');
   const [nodeStorageEngines, setNodeStorageEngines] = useState<Record<string, StorageEngineType>>({});
+  const [chunks, setChunks] = useState<TagInventoryChunk[]>([]);
+  const [folders, setFolders] = useState<CustomFolder[]>([]);
 
   // Theme state: system | macchiato | latte with OS auto-preference
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>(() => getStoredTheme());
@@ -842,6 +844,28 @@ export default function App() {
         }
       })
       .catch(() => {});
+
+    fetch('/api/inventory/chunks')
+      .then(res => res.json())
+      .then(data => {
+        if (data?.chunks && Array.isArray(data.chunks)) {
+          setChunks(data.chunks);
+        } else if (Array.isArray(data)) {
+          setChunks(data);
+        }
+      })
+      .catch(() => {});
+
+    fetch('/api/inventory/folders')
+      .then(res => res.json())
+      .then(data => {
+        if (data?.folders && Array.isArray(data.folders)) {
+          setFolders(data.folders);
+        } else if (Array.isArray(data)) {
+          setFolders(data);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   // Fetch live telemetry when selectedNode changes
@@ -928,6 +952,16 @@ export default function App() {
             } else if (msg.type === 'node_deleted' && msg.nodeId) {
               setNodesList(prev => prev.filter(n => n.id !== msg.nodeId));
               addToast({ type: 'warning', title: 'Node Removed', message: `Deleted node ${msg.nodeId}` });
+            } else if (msg.type === 'chunks_updated' && msg.chunks) {
+              setChunks(Array.isArray(msg.chunks) ? msg.chunks : []);
+            } else if (msg.type === 'folders_updated' && msg.folders) {
+              setFolders(Array.isArray(msg.folders) ? msg.folders : []);
+            } else if (msg.type === 'nodes_updated' && Array.isArray(msg.nodes)) {
+              setNodesList(msg.nodes);
+              setSelectedNode(prev => {
+                const match = msg.nodes.find((n: NodeItem) => n.id === prev.id);
+                return match || (msg.nodes.length > 0 ? msg.nodes[0] : prev);
+              });
             } else if (msg.type === 'init' && msg.queue) {
               if (Array.isArray(msg.queue.tasks)) setQueue(msg.queue.tasks);
               setIsQueueRunning(Boolean(msg.queue.isRunning));
@@ -1059,6 +1093,71 @@ export default function App() {
     });
     fetch(`/api/nodes/${encodeURIComponent(nodeId)}`, { method: 'DELETE' }).catch(() => {});
   };
+
+  const handleCreateFolder = async (name: string) => {
+    try {
+      const res = await fetch('/api/inventory/folders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.folder) {
+          setFolders(prev => [...prev.filter(f => f.id !== data.folder.id), data.folder]);
+        }
+        addToast({
+          type: 'success',
+          title: 'Folder Created',
+          message: `Created custom folder "${name}"`,
+        });
+      }
+    } catch (err) {
+      console.error('Failed to create folder:', err);
+    }
+  };
+
+  const handleDeleteFolder = async (id: string) => {
+    try {
+      const res = await fetch(`/api/inventory/folders/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        setFolders(prev => prev.filter(f => f.id !== id));
+        addToast({
+          type: 'info',
+          title: 'Folder Deleted',
+          message: 'Deleted custom folder',
+        });
+      }
+    } catch (err) {
+      console.error('Failed to delete folder:', err);
+    }
+  };
+
+  const handleFollowTag = useCallback((chunk: { tag: string; authMethod: string; sshUser?: string; vaultSecretId?: string }) => {
+    fetch('/api/inventory/chunks')
+      .then(res => res.json())
+      .then(data => {
+        if (data?.chunks && Array.isArray(data.chunks)) {
+          setChunks(data.chunks);
+        }
+      })
+      .catch(() => {});
+    fetch('/api/nodes')
+      .then(res => res.json())
+      .then(data => {
+        if (Array.isArray(data)) {
+          setNodesList(data);
+        }
+      })
+      .catch(() => {});
+    addToast({
+      type: 'success',
+      title: 'Tag Followed',
+      message: `Now dynamically following ${chunk.tag}`,
+    });
+  }, [addToast]);
 
   const handleRunPlaybook = (
     playbook: string,
@@ -1212,6 +1311,10 @@ export default function App() {
         onSelectViewMode={setSelectedViewMode}
         selectedDatacenterSection={datacenterSection}
         onSelectDatacenterSection={setDatacenterSection}
+        chunks={chunks}
+        folders={folders}
+        onCreateFolder={handleCreateFolder}
+        onDeleteFolder={handleDeleteFolder}
       />
 
       {/* Main Content Workspace */}
@@ -1668,6 +1771,7 @@ export default function App() {
           setMinimizedModals(prev => ({ ...prev, 'modal-add-node': false }));
         }}
         onAddNode={handleAddNode}
+        onFollowTag={handleFollowTag}
       />
 
       <CreateVmModal
