@@ -133,15 +133,14 @@ async function refreshTailscaleNodes(currentNodes: NodeItem[]): Promise<NodeItem
   let updated = await baseRefreshTailscaleNodes(currentNodes);
   try {
     const chunks = hostCache.getAllTagChunks();
-    if (chunks.length > 0) {
+    const hasDynamicNodes = updated.some(n => n.isDynamicTagMember);
+    if (chunks.length > 0 || hasDynamicNodes) {
       const peers = await fetchLiveTailscalePeers();
-      if (peers.length > 0) {
-        const syncResult = syncTagInventoryChunks(chunks, peers, updated);
-        for (const rem of syncResult.removedNodes) {
-          hostCache.deleteHost(rem.id);
-        }
-        updated = [...syncResult.unchangedNodes, ...syncResult.updatedNodes, ...syncResult.addedNodes];
+      const syncResult = syncTagInventoryChunks(chunks, peers, updated);
+      for (const rem of syncResult.removedNodes) {
+        hostCache.deleteHost(rem.id);
       }
+      updated = [...syncResult.unchangedNodes, ...syncResult.updatedNodes, ...syncResult.addedNodes];
     }
   } catch (err) {
     console.error('Error synchronizing Tailscale tag inventory chunks:', err);
@@ -512,37 +511,6 @@ app.delete('/api/nodes/:id', (req, res) => {
   hostCache.deleteHost(removed.id);
   broadcast({ type: 'node_deleted', nodeId: removed.id });
   res.json({ success: true, removed });
-});
-
-// Dynamic Tag Chunks & Custom Folders Inventory Routes
-const VALID_AUTH_METHODS = new Set(['tailscale-ssh', 'vault-password', 'vault-sshkey', 'ssh-agent']);
-app.post('/api/inventory/chunks', async (req, res) => {
-  const { tag, authMethod, sshUser, vaultSecretId, id, createdAt } = req.body || {};
-  if (!tag || !authMethod || !VALID_AUTH_METHODS.has(authMethod)) {
-    return res.status(400).json({ success: false, error: 'Valid tag and authMethod are required' });
-  }
-  const chunk: TagInventoryChunk = {
-    id: id || `chunk-${tag}`,
-    tag,
-    sshUser: sshUser || undefined,
-    vaultSecretId: vaultSecretId || undefined,
-    authMethod,
-    createdAt: createdAt || Date.now(),
-  };
-  hostCache.upsertTagChunk(chunk);
-  const chunks = hostCache.getAllTagChunks();
-  broadcast({ type: 'chunks_updated', chunks });
-
-  // Immediately invoke tag synchronization so newly added chunks immediately populate member hosts into inventory
-  try {
-    nodes = await refreshTailscaleNodes(nodes);
-    hostCache.upsertHosts(nodes);
-    broadcast({ type: 'nodes_updated', nodes });
-  } catch (err) {
-    console.error('Failed to sync tailscale nodes on chunk creation:', err);
-  }
-
-  res.json({ success: true, chunk });
 });
 
 registerInventoryRoutes(app, {
