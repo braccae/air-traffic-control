@@ -9,7 +9,7 @@ import { createServer as createViteServer } from 'vite';
 import { getDefaultHostPodmanProbe, probeUnprivilegedPodmanUsers, parseTerminalCommand } from './src/utils/orchestrator.ts';
 import {
   LIVE_TAILNET_NODES,
-  refreshTailscaleNodes,
+  refreshTailscaleNodes as baseRefreshTailscaleNodes,
   fetchLiveNodeTelemetry,
   probeNodePodmanAndIdentities,
   runNodeCommand,
@@ -17,6 +17,7 @@ import {
   probeNodePrivilege,
   testNodePrivilege,
 } from './src/utils/liveCluster.ts';
+import { syncTagInventoryChunks, fetchLiveTailscalePeers } from './src/utils/tailscaleSync.ts';
 import { updateNodeSettings } from './src/utils/navigationViewModel.ts';
 import { createHostCacheStore, registerInventoryRoutes } from './src/utils/hostCacheDb.ts';
 import { fetchNodeTelemetryMultiTier } from './src/utils/telemetryCollector.ts';
@@ -33,7 +34,7 @@ import {
   updatePlaybook,
   deletePlaybook,
 } from './src/utils/playbookManager.ts';
-import type { NodeItem, TelemetryData, GlobalTaskItem, ServiceUser, VMItem } from './src/types/index.ts';
+import type { NodeItem, TelemetryData, GlobalTaskItem, ServiceUser, VMItem, TagInventoryChunk } from './src/types/index.ts';
 import { getHardwareProbeCommand, parseHardwareProbeOutput, applyHardwareProbeToNode } from './src/utils/hardwareProbe.ts';
 import {
   buildNfsSaveCommand,
@@ -126,6 +127,27 @@ nodes = nodes.map(n => {
   return n;
 });
 hostCache.upsertHosts(nodes);
+
+// Dynamic Tailscale Tag Synchronization Wrapper
+async function refreshTailscaleNodes(currentNodes: NodeItem[]): Promise<NodeItem[]> {
+  let updated = await baseRefreshTailscaleNodes(currentNodes);
+  try {
+    const chunks = hostCache.getAllTagChunks();
+    if (chunks.length > 0) {
+      const peers = await fetchLiveTailscalePeers();
+      if (peers.length > 0) {
+        const syncResult = syncTagInventoryChunks(chunks, peers, updated);
+        for (const rem of syncResult.removedNodes) {
+          hostCache.deleteHost(rem.id);
+        }
+        updated = [...syncResult.unchangedNodes, ...syncResult.updatedNodes, ...syncResult.addedNodes];
+      }
+    }
+  } catch (err) {
+    console.error('Error synchronizing Tailscale tag inventory chunks:', err);
+  }
+  return updated;
+}
 
 // Refresh from live `tailscale status --json` on startup and periodically, persisting into SQLite
 refreshTailscaleNodes(nodes).then(updated => {
@@ -493,9 +515,50 @@ app.delete('/api/nodes/:id', (req, res) => {
 });
 
 // Dynamic Tag Chunks & Custom Folders Inventory Routes
+const VALID_AUTH_METHODS = new Set(['tailscale-ssh', 'vault-password', 'vault-sshkey', 'ssh-agent']);
+app.post('/api/inventory/chunks', async (req, res) => {
+  const { tag, authMethod, sshUser, vaultSecretId, id, createdAt } = req.body || {};
+  if (!tag || !authMethod || !VALID_AUTH_METHODS.has(authMethod)) {
+    return res.status(400).json({ success: false, error: 'Valid tag and authMethod are required' });
+  }
+  const chunk: TagInventoryChunk = {
+    id: id || `chunk-${tag}`,
+    tag,
+    sshUser: sshUser || undefined,
+    vaultSecretId: vaultSecretId || undefined,
+    authMethod,
+    createdAt: createdAt || Date.now(),
+  };
+  hostCache.upsertTagChunk(chunk);
+  const chunks = hostCache.getAllTagChunks();
+  broadcast({ type: 'chunks_updated', chunks });
+
+  // Immediately invoke tag synchronization so newly added chunks immediately populate member hosts into inventory
+  try {
+    nodes = await refreshTailscaleNodes(nodes);
+    hostCache.upsertHosts(nodes);
+    broadcast({ type: 'nodes_updated', nodes });
+  } catch (err) {
+    console.error('Failed to sync tailscale nodes on chunk creation:', err);
+  }
+
+  res.json({ success: true, chunk });
+});
+
 registerInventoryRoutes(app, {
   hostCache,
-  broadcast,
+  broadcast: (msg) => {
+    broadcast(msg);
+    if (msg.type === 'chunks_updated') {
+      refreshTailscaleNodes(nodes).then(updated => {
+        nodes = updated;
+        hostCache.upsertHosts(nodes);
+        broadcast({ type: 'nodes_updated', nodes });
+      }).catch(err => {
+        console.error('Failed to sync tailscale tag chunks:', err);
+      });
+    }
+  },
   getNodes: () => nodes,
   setNodes: (newNodes) => {
     nodes = newNodes;
