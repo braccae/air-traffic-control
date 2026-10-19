@@ -53,6 +53,12 @@ export interface NodeItem {
   folder?: string; // custom folder ID if non-tailscale
   isDynamicTagMember?: boolean;
   followedTag?: string;
+  pluginOverrides?: {
+    connection?: string;
+    elevation?: string;
+    package?: string;
+    [key: string]: string | undefined;
+  };
 }
 
 export interface TagInventoryChunk {

@@ -19,6 +19,8 @@ import { NetworkSharesView } from './components/NetworkSharesView.tsx';
 import { DisksSmartView } from './components/DisksSmartView.tsx';
 import { SystemLogsView } from './components/SystemLogsView.tsx';
 import { PackageUpdatesView } from './components/PackageUpdatesView.tsx';
+import { HostModulesView } from './components/HostModulesView.tsx';
+import { getPluginView } from './plugins/views/index.ts';
 import { ToastNotification, type ToastItem } from './components/ToastNotification.tsx';
 
 // Modals
@@ -1505,6 +1507,35 @@ export default function App() {
                     onAudit={target => setLogsTarget(target || 'pam-audit-log')}
                   />
                 )}
+
+                {/* Host Modules & Plugin Matrix View */}
+                {(activeOpTab === 'modules' || activeCockpitItem === 'modules') && (
+                  <HostModulesView
+                    node={selectedNode}
+                    onOpenQueueTask={taskId => {
+                      setLogsTarget(taskId);
+                    }}
+                  />
+                )}
+
+                {/* Dynamic Custom or Generic Plugin View Routing */}
+                {Boolean(
+                  (activeCockpitItem && activeCockpitItem.includes('/')) ||
+                  (activeOpTab && activeOpTab.includes('/'))
+                ) && (() => {
+                  const currentPluginTab = (activeCockpitItem?.includes('/') ? activeCockpitItem : activeOpTab) || '';
+                  const PluginViewComponent = getPluginView(currentPluginTab);
+                  return (
+                    <PluginViewComponent
+                      node={selectedNode}
+                      pluginId={currentPluginTab}
+                      telemetry={telemetry}
+                      onOpenLogs={handleOpenLogs}
+                      onOpenExec={() => setTerminalOpen(true)}
+                      onOpenTerminal={handleOpenTerminal}
+                    />
+                  );
+                })()}
 
                 {/* Default Overview / Reorderable Interactive Workspace */}
                 {activeOpTab === 'overview' && (

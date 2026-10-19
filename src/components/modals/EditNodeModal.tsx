@@ -64,6 +64,11 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
   });
   const [osDescription, setOsDescription] = useState('');
 
+  // Per-Node Plugin Driver Overrides
+  const [connectionOverride, setConnectionOverride] = useState<string>('');
+  const [elevationOverride, setElevationOverride] = useState<string>('');
+  const [packageOverride, setPackageOverride] = useState<string>('');
+
   // Probing and saving states
   const [probing, setProbing] = useState(false);
   const [probeStatus, setProbeStatus] = useState<{ success: boolean; message: string } | null>(null);
@@ -100,6 +105,9 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
         secureBoot: 'Disabled',
         iommu: 'Disabled',
       });
+      setConnectionOverride(node.pluginOverrides?.connection || '');
+      setElevationOverride(node.pluginOverrides?.elevation || '');
+      setPackageOverride(node.pluginOverrides?.package || '');
       setProbeStatus(null);
     }
   }, [node, isOpen]);
@@ -202,6 +210,12 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
         fallbackHost,
         osDescription,
         specs,
+        pluginOverrides: {
+          ...(node.pluginOverrides || {}),
+          ...(connectionOverride ? { connection: connectionOverride } : { connection: undefined }),
+          ...(elevationOverride ? { elevation: elevationOverride } : { elevation: undefined }),
+          ...(packageOverride ? { package: packageOverride } : { package: undefined }),
+        },
         testSsh: testSshOnSave,
       });
       onClose();
@@ -615,6 +629,74 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
                   Fallback route is automatically used if the Tailscale mesh connection times out or drops packets.
                 </p>
               </div>
+            </div>
+          </div>
+
+          {/* Section: Plugin Driver Overrides */}
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wider text-[#b0c9ff] mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[14px]">extension</span>
+                <span>Plugin Driver Overrides</span>
+              </div>
+              <span className="text-[10px] text-[#8d909b]">
+                Optional per-host transport, elevation &amp; package overrides
+              </span>
+            </div>
+
+            <div className="bg-[#131628] p-3 rounded border border-[#21253b] space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                {/* Connection override */}
+                <div>
+                  <label className="block text-[#8d909b] mb-1 text-[11px]">CONNECTION PLUGIN</label>
+                  <select
+                    value={connectionOverride}
+                    onChange={e => setConnectionOverride(e.target.value)}
+                    className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2 py-1.5 text-[#dfe1fa] outline-none text-xs"
+                  >
+                    <option value="">Auto-Detect ({routes.primary})</option>
+                    <option value="connection/ssh">connection/ssh (SSH / Agent)</option>
+                    <option value="connection/tailscale">connection/tailscale (Tailscale SSH)</option>
+                    <option value="connection/local">connection/local (Local Loopback)</option>
+                  </select>
+                </div>
+
+                {/* Elevation override */}
+                <div>
+                  <label className="block text-[#8d909b] mb-1 text-[11px]">ELEVATION PLUGIN</label>
+                  <select
+                    value={elevationOverride}
+                    onChange={e => setElevationOverride(e.target.value)}
+                    className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2 py-1.5 text-[#dfe1fa] outline-none text-xs"
+                  >
+                    <option value="">Auto-Detect (Hierarchy)</option>
+                    <option value="elevation/run0">elevation/run0 (systemd 256+ polkit)</option>
+                    <option value="elevation/sudo">elevation/sudo (sudo -n)</option>
+                    <option value="elevation/doas">elevation/doas (doas -n)</option>
+                    <option value="elevation/none">elevation/none (Direct / Unprivileged)</option>
+                  </select>
+                </div>
+
+                {/* Package manager override */}
+                <div>
+                  <label className="block text-[#8d909b] mb-1 text-[11px]">PACKAGE MANAGER PLUGIN</label>
+                  <select
+                    value={packageOverride}
+                    onChange={e => setPackageOverride(e.target.value)}
+                    className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2 py-1.5 text-[#dfe1fa] outline-none text-xs"
+                  >
+                    <option value="">Auto-Detect (Distro)</option>
+                    <option value="package/dnf">package/dnf (DNF / RPM)</option>
+                    <option value="package/apt">package/apt (APT / Dpkg)</option>
+                    <option value="package/apk">package/apk (Alpine APK)</option>
+                    <option value="package/rpmostree">package/rpmostree (rpm-ostree)</option>
+                    <option value="package/bootc">package/bootc (Bootable Containers)</option>
+                  </select>
+                </div>
+              </div>
+              <p className="text-[10px] text-[#6d7182]">
+                Overrides force the daemon and Ansible queue runner to use specific plugins for this host instead of autodetection.
+              </p>
             </div>
           </div>
 
