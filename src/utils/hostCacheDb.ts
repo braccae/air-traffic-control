@@ -9,6 +9,8 @@ import type {
   ContainerItem,
   GlobalTaskItem,
   PodItem,
+  CustomFolder,
+  TagInventoryChunk,
 } from '../types/index.ts';
 
 export interface CachedHostTelemetry {
@@ -63,6 +65,12 @@ export interface HostCacheStore {
   seedGroupVarsIfEmpty(defaults: Record<string, string>): Record<string, string>;
   upsertGroupVar(file: string, content: string): void;
   getAllGroupVars(): Record<string, string>;
+  upsertCustomFolder(folder: CustomFolder): void;
+  getAllCustomFolders(): CustomFolder[];
+  deleteCustomFolder(id: string): boolean;
+  upsertTagChunk(chunk: TagInventoryChunk): void;
+  getAllTagChunks(): TagInventoryChunk[];
+  deleteTagChunk(id: string): boolean;
   close(): void;
 }
 
@@ -140,11 +148,28 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
       updated_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS inventory_folders (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS tag_inventory_chunks (
+      id TEXT PRIMARY KEY,
+      tag TEXT NOT NULL,
+      ssh_user TEXT,
+      vault_secret_id TEXT,
+      auth_method TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_hosts_sort ON hosts(sort_order ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_hosts_tailscale ON hosts(tailscale_host, tailscale_ip);
     CREATE INDEX IF NOT EXISTS idx_sections_host ON host_section_cache(host_id, section);
     CREATE INDEX IF NOT EXISTS idx_telemetry_updated ON host_telemetry_cache(updated_at);
     CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_folders_name ON inventory_folders(name ASC);
+    CREATE INDEX IF NOT EXISTS idx_chunks_created ON tag_inventory_chunks(created_at ASC);
   `);
 
   try {
@@ -235,6 +260,29 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
       content = excluded.content,
       updated_at = excluded.updated_at
   `);
+
+  const stmtSelectAllFolders = db.prepare('SELECT id, name, created_at FROM inventory_folders ORDER BY name ASC');
+  const stmtUpsertFolder = db.prepare(`
+    INSERT INTO inventory_folders (id, name, created_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET name = excluded.name
+  `);
+  const stmtDeleteFolder = db.prepare('DELETE FROM inventory_folders WHERE id = ?');
+
+  const stmtSelectAllTagChunks = db.prepare(`
+    SELECT id, tag, ssh_user, vault_secret_id, auth_method, created_at
+    FROM tag_inventory_chunks ORDER BY created_at ASC
+  `);
+  const stmtUpsertTagChunk = db.prepare(`
+    INSERT INTO tag_inventory_chunks (id, tag, ssh_user, vault_secret_id, auth_method, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      tag = excluded.tag,
+      ssh_user = excluded.ssh_user,
+      vault_secret_id = excluded.vault_secret_id,
+      auth_method = excluded.auth_method
+  `);
+  const stmtDeleteTagChunk = db.prepare('DELETE FROM tag_inventory_chunks WHERE id = ?');
 
   function upsertSingleHost(node: NodeItem, sortOrder?: number): void {
     const existing = stmtSelectHostById.get(node.id) as { sort_order?: number } | undefined;
@@ -502,8 +550,162 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
       `).run(progress, progressEta, status, logs, Date.now(), id);
     },
 
+    upsertCustomFolder(folder: CustomFolder): void {
+      stmtUpsertFolder.run(folder.id, folder.name, folder.createdAt);
+    },
+
+    getAllCustomFolders(): CustomFolder[] {
+      const rows = stmtSelectAllFolders.all() as Array<{ id: string; name: string; created_at: number }>;
+      return rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        createdAt: Number(r.created_at),
+      }));
+    },
+
+    deleteCustomFolder(id: string): boolean {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const hosts = this.getAllHosts();
+        for (const host of hosts) {
+          if (host.folder === id) {
+            delete host.folder;
+            upsertSingleHost(host);
+          }
+        }
+        const res = stmtDeleteFolder.run(id);
+        db.exec('COMMIT');
+        return Number(res.changes) > 0;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    },
+
+    upsertTagChunk(chunk: TagInventoryChunk): void {
+      stmtUpsertTagChunk.run(
+        chunk.id,
+        chunk.tag,
+        chunk.sshUser || null,
+        chunk.vaultSecretId || null,
+        chunk.authMethod,
+        chunk.createdAt
+      );
+    },
+
+    getAllTagChunks(): TagInventoryChunk[] {
+      const rows = stmtSelectAllTagChunks.all() as Array<{
+        id: string;
+        tag: string;
+        ssh_user: string | null;
+        vault_secret_id: string | null;
+        auth_method: string;
+        created_at: number;
+      }>;
+      return rows.map(r => ({
+        id: r.id,
+        tag: r.tag,
+        sshUser: r.ssh_user || undefined,
+        vaultSecretId: r.vault_secret_id || undefined,
+        authMethod: r.auth_method as TagInventoryChunk['authMethod'],
+        createdAt: Number(r.created_at),
+      }));
+    },
+
+    deleteTagChunk(id: string): boolean {
+      const res = stmtDeleteTagChunk.run(id);
+      return Number(res.changes) > 0;
+    },
+
     close(): void {
       db.close();
     },
   };
 }
+
+export interface InventoryRoutesOptions {
+  hostCache: HostCacheStore;
+  broadcast?: (msg: any) => void;
+  getNodes?: () => NodeItem[];
+  setNodes?: (nodes: NodeItem[]) => void;
+}
+
+export function registerInventoryRoutes(
+  app: any,
+  options: InventoryRoutesOptions
+): void {
+  const { hostCache, broadcast, getNodes, setNodes } = options;
+
+  app.get('/api/inventory/chunks', (_req: any, res: any) => {
+    res.json({ success: true, chunks: hostCache.getAllTagChunks() });
+  });
+
+  const VALID_AUTH_METHODS = new Set(['tailscale-ssh', 'vault-password', 'vault-sshkey', 'ssh-agent']);
+  app.post('/api/inventory/chunks', (req: any, res: any) => {
+    const { tag, authMethod, sshUser, vaultSecretId, id, createdAt } = req.body || {};
+    if (!tag || !authMethod || !VALID_AUTH_METHODS.has(authMethod)) {
+      res.status(400).json({ success: false, error: 'Valid tag and authMethod are required' });
+      return;
+    }
+    const chunk: TagInventoryChunk = {
+      id: id || `chunk-${tag}`,
+      tag,
+      sshUser: sshUser || undefined,
+      vaultSecretId: vaultSecretId || undefined,
+      authMethod,
+      createdAt: createdAt || Date.now(),
+    };
+    hostCache.upsertTagChunk(chunk);
+    const chunks = hostCache.getAllTagChunks();
+    if (broadcast) {
+      broadcast({ type: 'chunks_updated', chunks });
+    }
+    res.json({ success: true, chunk });
+  });
+
+  app.delete('/api/inventory/chunks/:id', (req: any, res: any) => {
+    const deleted = hostCache.deleteTagChunk(req.params.id);
+    const chunks = hostCache.getAllTagChunks();
+    if (broadcast) {
+      broadcast({ type: 'chunks_updated', chunks });
+    }
+    res.json({ success: true, deleted });
+  });
+
+  app.get('/api/inventory/folders', (_req: any, res: any) => {
+    res.json({ success: true, folders: hostCache.getAllCustomFolders() });
+  });
+
+  app.post('/api/inventory/folders', (req: any, res: any) => {
+    const { name, id, createdAt } = req.body || {};
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      res.status(400).json({ success: false, error: 'name is required' });
+      return;
+    }
+    const folder: CustomFolder = {
+      id: id || 'folder-' + Date.now(),
+      name: name.trim(),
+      createdAt: createdAt || Date.now(),
+    };
+    hostCache.upsertCustomFolder(folder);
+    const folders = hostCache.getAllCustomFolders();
+    if (broadcast) {
+      broadcast({ type: 'folders_updated', folders });
+    }
+    res.json({ success: true, folder });
+  });
+
+  app.delete('/api/inventory/folders/:id', (req: any, res: any) => {
+    const deleted = hostCache.deleteCustomFolder(req.params.id);
+    if (setNodes && getNodes) {
+      setNodes(hostCache.getAllHosts());
+    }
+    const folders = hostCache.getAllCustomFolders();
+    if (broadcast) {
+      broadcast({ type: 'folders_updated', folders });
+      broadcast({ type: 'nodes_updated', nodes: hostCache.getAllHosts() });
+    }
+    res.json({ success: true, deleted });
+  });
+}
+

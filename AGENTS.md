@@ -35,6 +35,7 @@ The system runs a **dual-stack architecture**:
 
 - **Universal SSH Transport (Agentless Architecture):**
   - All communication with remote nodes operates strictly over non-interactive SSH with agent forwarding (`SSH_AUTH_SOCK` / `/run/user/<uid>/ssh-agent.socket`).
+  - **Testing vs Production Invariant:** `ssh-agent forwarding` is strictly for local testing and developer workstations. In production environments, credentials must be secured via keyless PAM (`tailscale-ssh`) or Tiered Ansible Vault encrypted credentials.
   - Target nodes require **zero custom agent software** or persistent background daemons installed.
   - Failover routing automatically navigates Tailscale mesh (`100.x.y.z`), LAN IP (`192.168.x.y`), and local loopback.
 - **Modular Capability Autodetection Matrix:**
@@ -121,7 +122,58 @@ To maintain minimal footprint on managed nodes and homelab network links, teleme
 
 ---
 
-## 8. Verification Commands
+## 8. Automated uv Bootstrapper & Persistent Venv Manager
+
+Air Traffic Control encapsulates all Ansible and WinRM Python dependencies in an isolated virtualenv to guarantee reproducible, zero-system-pollution execution:
+- **Persistent Virtualenv Directory:** `data/ansible-venv` (persisted across restarts; not committed to git).
+- **Standalone `uv` Bootstrapper:** Downloads or utilizes standalone binary cached at `data/bin/uv` (falling back to system `uv` or `python3 -m venv`).
+- **Core Dependencies:** Pre-installs `ansible-core`, `pywinrm[kerberos]`, `requests-credssp`, and `pydantic`.
+- **Auto-Healing Initialization:** On daemon startup, `ensureAnsibleVenv()` verifies the virtualenv and auto-heals any missing packages or corrupted environments before servicing API or playbook requests.
+
+---
+
+## 9. Multi-Pathway Node Onboarding & Tiered Vault Hierarchy
+
+The **Add Node Modal** provides four distinct onboarding pathways tailored for modern hybrid infrastructures:
+1. **Tailscale Mesh Manual Selection:** Direct peer selection from live `tailscale status --json`. Leverages keyless PAM `tailscale-ssh` with zero password/key management.
+2. **Manual SSH with Ansible Vault Encryption:** Direct SSH connections to physical/virtual Linux hosts using password or private key. Sensitive values are immediately encrypted into `$ANSIBLE_VAULT;1.1;AES256` blocks.
+3. **WinRM Connections for Windows Hosts:** Windows server management over WinRM (port 5985 HTTP / 5986 HTTPS, NTLM/Kerberos), with encrypted administrator credentials.
+4. **Following a Tailscale Tag (Dynamic Inventory Chunk):** Creates a `TagInventoryChunk` that dynamically synchronizes all nodes matching a Tailscale tag (e.g. `tag:worker`), applying shared credentials (defaulting to keyless `tailscale-ssh` if left blank).
+
+### Tiered Vault Password Resolution Hierarchy
+When encrypting or decrypting secrets, Air Traffic Control resolves the master vault password in strict precedence:
+1. **`vault_password_file` (File-First):** Path specified in `ansible.cfg` or options.
+2. **Environment Variables:** `ANSIBLE_VAULT_PASSWORD` (inline string) or `ANSIBLE_VAULT_PASSWORD_FILE` (file path).
+3. **Interactive Prompt Fallback:** Operator `ask_password` input modal when no automated source is configured.
+
+---
+
+## 10. Dynamic Tag Inventory Chunks & Hierarchical Inventory Architecture
+
+The inventory sidebar (`ServerViewSidebar`) displays nodes in a clean, multi-level hierarchy mirroring the operator's mental model:
+- **Tailscale Mesh Sub-tree:** Grouped under the tailnet shortname (e.g. `leo-banjo.ts.net`), broken down into tag chunks (`tag:host`, `tag:worker`, etc.).
+- **Unassigned / Standalone Mesh Nodes:** Nodes on the tailnet without specific chunk tags.
+- **Non-Tailscale Nodes:** Direct IP/LAN hosts displayed at root or inside operator-managed folders.
+- **Custom Folders:** Collapsible folders (`CustomFolder`) created and managed dynamically in SQLite via `POST /api/inventory/folders` and `DELETE /api/inventory/folders/:id`.
+
+```
+Inventory
+  <ts-shortname> (e.g. leo-banjo.ts.net)
+    <tag1> (e.g. tag:host)
+      <host 1>
+      <host 2>
+    <tag2> (e.g. tag:worker)
+      <host 3>
+      <host 4>
+  (non ts-host)
+  <non-ts-host 2>
+  <Folder/> (e.g. Cold Storage)
+    <non ts-host 3>
+```
+
+---
+
+## 11. Verification Commands
 
 Before concluding any work, contributors and agents must run:
 ```bash

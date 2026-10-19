@@ -48,6 +48,26 @@ export interface NodeItem {
   privilegeMethod?: 'run0' | 'sudo' | 'doas' | 'none';
   privilegeActive?: boolean;
   initSystem?: 'systemd' | 'openrc' | 'sysvinit' | 'runit' | 's6' | string;
+  connectionProtocol?: 'ssh' | 'winrm' | 'tailscale_ssh';
+  vaultSecretId?: string;
+  folder?: string; // custom folder ID if non-tailscale
+  isDynamicTagMember?: boolean;
+  followedTag?: string;
+}
+
+export interface TagInventoryChunk {
+  id: string; // e.g. "chunk-tag:worker"
+  tag: string; // e.g. "tag:worker"
+  sshUser?: string;
+  vaultSecretId?: string; // encrypted password or ssh key vault entry
+  authMethod: 'tailscale-ssh' | 'vault-password' | 'vault-sshkey' | 'ssh-agent';
+  createdAt: number;
+}
+
+export interface CustomFolder {
+  id: string; // e.g. "folder-cold-storage"
+  name: string; // e.g. "Cold Storage"
+  createdAt: number;
 }
 
 export type PrivilegeMethod = 'run0' | 'sudo' | 'doas' | 'none';

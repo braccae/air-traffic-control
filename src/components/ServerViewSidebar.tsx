@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import type { NodeItem } from '../types/index.ts';
+import type { NodeItem, TagInventoryChunk, CustomFolder } from '../types/index.ts';
 import {
-  groupNodesByDynamicCluster,
+  buildInventoryTree,
   buildHostGroupPills,
   filterNodesBySearchQuery,
   resolveNodeIcon,
@@ -26,6 +26,10 @@ interface ServerViewSidebarProps {
   onSelectViewMode?: (mode: SidebarViewMode) => void;
   selectedDatacenterSection?: DatacenterSection;
   onSelectDatacenterSection?: (section: DatacenterSection) => void;
+  chunks?: TagInventoryChunk[];
+  folders?: CustomFolder[];
+  onCreateFolder?: (name: string) => void;
+  onDeleteFolder?: (id: string) => void;
 }
 
 export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
@@ -41,10 +45,18 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   onSelectViewMode,
   selectedDatacenterSection = 'overview',
   onSelectDatacenterSection,
+  chunks = [],
+  folders = [],
+  onCreateFolder,
+  onDeleteFolder,
 }) => {
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterText, setFilterText] = useState('');
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const [tailnetCollapsed, setTailnetCollapsed] = useState(false);
+  const [collapsedTags, setCollapsedTags] = useState<Record<string, boolean>>({});
+  const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({});
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
 
   const groupFilteredNodes =
     selectedHostGroup === 'all'
@@ -52,11 +64,11 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
       : nodes.filter(
           n =>
             n.group === selectedHostGroup ||
-            (Array.isArray(n.tags) && n.tags.includes(selectedHostGroup))
+            (Array.isArray(n.tags) && n.tags.includes(selectedHostGroup)) ||
+            n.followedTag === selectedHostGroup
         );
 
   const visibleNodes = filterNodesBySearchQuery(groupFilteredNodes, filterText);
-  const clusterGroups = groupNodesByDynamicCluster(visibleNodes);
   const hostGroups = buildHostGroupPills(nodes);
 
   const selectedNode = nodes.find(n => n.id === selectedNodeId) || nodes[0];
@@ -65,8 +77,68 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   const health = calculateClusterHealthScore(nodes);
   const datacenterSections = getDatacenterNavSections(4, 0);
 
-  const toggleGroupCollapse = (grp: string) => {
-    setCollapsedGroups(prev => ({ ...prev, [grp]: !prev[grp] }));
+  const inventoryTree = buildInventoryTree(visibleNodes, chunks, folders, datacenterName);
+  const tsNodes = inventoryTree.tailscale.tags.flatMap(t => t.nodes);
+  const tsOnlineCount = tsNodes.filter(n => n.status === 'online').length;
+  const tsTotalCount = tsNodes.length;
+
+  const renderNodeItem = (node: NodeItem) => {
+    const isSelected = node.id === selectedNodeId;
+    const badgeInfo = formatNodeTypeBadge(node);
+    const ipBadge = formatNodeIpBadge(node);
+
+    return (
+      <div
+        key={node.id}
+        className={`group flex items-center gap-1 px-2 py-1.5 rounded transition-all ${
+          isSelected
+            ? 'bg-[#21263d] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff] shadow-[inset_0_0_12px_rgba(176,201,255,0.08)]'
+            : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+        }`}
+      >
+        <button
+          type="button"
+          onClick={() => onSelectNode(node)}
+          className="flex items-center gap-1.5 flex-1 min-w-0 text-left cursor-pointer"
+        >
+          <span
+            className={`w-2 h-2 rounded-full shrink-0 ${
+              node.status === 'online'
+                ? 'bg-[#8cd6cb] shadow-[0_0_6px_rgba(140,214,203,0.8)] animate-pulse'
+                : 'bg-[#ffb4ab]'
+            }`}
+            title={
+              node.sshConnected
+                ? `SSH active (${node.sshUser || 'core'}@${node.tailscaleHost || node.ip})`
+                : `Status: ${node.status}`
+            }
+          />
+          <span className="material-symbols-outlined text-[15px] shrink-0 text-[#b0c9ff]">
+            {resolveNodeIcon(node)}
+          </span>
+          <span className="truncate flex-1 font-semibold">{node.name}</span>
+        </button>
+
+        {/* Monospaced Tailscale IP badge */}
+        {ipBadge && (
+          <span
+            className="font-mono text-[9px] text-[#8d909b] truncate max-w-[68px] shrink-0"
+            title={`IP: ${ipBadge}`}
+          >
+            {ipBadge}
+          </span>
+        )}
+
+        {/* Platform tier pill (only if distinct virtualization / platform tier) */}
+        {badgeInfo && (
+          <span
+            className={`font-mono text-[9px] px-1 py-0.2 rounded font-semibold uppercase tracking-wider shrink-0 ${badgeInfo.badgeClasses}`}
+          >
+            {badgeInfo.label}
+          </span>
+        )}
+      </div>
+    );
   };
 
   return (
@@ -240,100 +312,226 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
             </div>
           </nav>
         ) : (
-          <nav className="flex-1 overflow-y-auto overflow-x-hidden p-1.5 font-mono text-xs space-y-0.5">
-            {/* Datacenter / Tailnet Root */}
-            <div className="flex items-center gap-1 px-2 py-1 text-[#c3c6d2]">
-              <span className="material-symbols-outlined text-[14px]">arrow_drop_down</span>
-              <span className="material-symbols-outlined text-[14px] text-[#b0c9ff]">cloud_queue</span>
-              <span className="font-bold text-[#dfe1fa] truncate">{datacenterName}</span>
-              <span className="ml-auto text-[#8cd6cb] text-[10px]">({onlineCount}/{nodes.length} up)</span>
+          <nav className="flex-1 overflow-y-auto overflow-x-hidden p-1.5 font-mono text-xs space-y-1">
+            {/* Top Inventory Title */}
+            <div className="px-2 pt-1 pb-0.5 text-[10px] font-bold uppercase tracking-wider text-[#8d909b] flex items-center justify-between">
+              <span>Inventory</span>
+              <span className="text-[10px] text-[#c3c6d2] font-normal">
+                {visibleNodes.length} {visibleNodes.length === 1 ? 'host' : 'hosts'}
+              </span>
             </div>
 
-            {/* Dynamic Cluster / Tag Groups */}
-            <div className="pl-2 space-y-1">
-              {clusterGroups.map(({ group, nodes: groupNodes }) => {
-                const isCollapsed = Boolean(collapsedGroups[group]);
-                return (
-                  <div key={group} className="space-y-0.5">
-                    <button
-                      type="button"
-                      onClick={() => toggleGroupCollapse(group)}
-                      className="w-full flex items-center gap-1 px-2 py-0.5 text-[#c3c6d2] hover:text-[#dfe1fa] cursor-pointer"
-                    >
-                      <span className="material-symbols-outlined text-[14px]">
-                        {isCollapsed ? 'arrow_right' : 'arrow_drop_down'}
-                      </span>
-                      <span className="material-symbols-outlined text-[14px] text-[#d9b9ff]">hub</span>
-                      <span className="text-[#dfe1fa] font-medium">{group}</span>
-                      <span className="ml-auto text-[#8cd6cb] font-bold">[{groupNodes.length}]</span>
-                    </button>
+            {/* SECTION 1: Tailscale */}
+            <div className="space-y-0.5">
+              {/* Tailnet root item <ts-shortname> */}
+              <button
+                type="button"
+                onClick={() => setTailnetCollapsed(prev => !prev)}
+                className="w-full flex items-center gap-1 px-1.5 py-1 text-[#c3c6d2] hover:text-[#dfe1fa] cursor-pointer rounded hover:bg-[#1b1e31] transition-colors"
+              >
+                <span className="material-symbols-outlined text-[14px]">
+                  {tailnetCollapsed ? 'arrow_right' : 'arrow_drop_down'}
+                </span>
+                <span className="material-symbols-outlined text-[14px] text-[#b0c9ff]">cloud_queue</span>
+                <span className="font-bold text-[#dfe1fa] truncate">{inventoryTree.tailscale.shortName}</span>
+                <span className="ml-auto text-[#8cd6cb] text-[10px] font-bold">
+                  ({tsOnlineCount}/{tsTotalCount} up)
+                </span>
+              </button>
 
-                    {!isCollapsed && (
-                      <div className="pl-2 space-y-0.5">
-                        {groupNodes.map(node => {
-                          const isSelected = node.id === selectedNodeId;
-                          const badgeInfo = formatNodeTypeBadge(node);
-                          const ipBadge = formatNodeIpBadge(node);
+              {/* Collapsible Tag Groups */}
+              {!tailnetCollapsed && (
+                <div className="pl-2 space-y-1">
+                  {inventoryTree.tailscale.tags.map(tagGroup => {
+                    const isCollapsed = Boolean(collapsedTags[tagGroup.tag]);
+                    if (
+                      filterText &&
+                      tagGroup.nodes.length === 0 &&
+                      !tagGroup.tag.toLowerCase().includes(filterText.toLowerCase().trim())
+                    ) {
+                      return null;
+                    }
+                    if (
+                      selectedHostGroup !== 'all' &&
+                      tagGroup.tag !== selectedHostGroup &&
+                      tagGroup.nodes.length === 0
+                    ) {
+                      return null;
+                    }
 
-                          return (
-                            <div
-                              key={node.id}
-                              className={`group flex items-center gap-1 px-2 py-1.5 rounded transition-all ${
-                                isSelected
-                                  ? 'bg-[#21263d] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff] shadow-[inset_0_0_12px_rgba(176,201,255,0.08)]'
-                                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
-                              }`}
+                    return (
+                      <div key={tagGroup.tag} className="space-y-0.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCollapsedTags(prev => ({
+                              ...prev,
+                              [tagGroup.tag]: !prev[tagGroup.tag],
+                            }))
+                          }
+                          className="w-full flex items-center gap-1 px-2 py-0.5 text-[#c3c6d2] hover:text-[#dfe1fa] cursor-pointer rounded hover:bg-[#1b1e31]"
+                        >
+                          <span className="material-symbols-outlined text-[14px]">
+                            {isCollapsed ? 'arrow_right' : 'arrow_drop_down'}
+                          </span>
+                          <span className="material-symbols-outlined text-[14px] text-[#d9b9ff]">sell</span>
+                          <span className="text-[#dfe1fa] font-medium truncate">{tagGroup.tag}</span>
+                          {tagGroup.chunk && (
+                            <span
+                              className="text-[9px] px-1 py-0.2 rounded bg-[#1f2638] text-[#8cd6cb] font-mono border border-[#8cd6cb]/30 shrink-0"
+                              title={`Dynamic chunk: ${tagGroup.chunk.authMethod}`}
                             >
-                              <button
-                                type="button"
-                                onClick={() => onSelectNode(node)}
-                                className="flex items-center gap-1.5 flex-1 min-w-0 text-left cursor-pointer"
-                              >
-                                <span
-                                  className={`w-2 h-2 rounded-full shrink-0 ${
-                                    node.status === 'online'
-                                      ? 'bg-[#8cd6cb] shadow-[0_0_6px_rgba(140,214,203,0.8)] animate-pulse'
-                                      : 'bg-[#ffb4ab]'
-                                  }`}
-                                  title={
-                                    node.sshConnected
-                                      ? `SSH active (${node.sshUser || 'core'}@${node.tailscaleHost || node.ip})`
-                                      : `Tailscale ${node.status}`
-                                  }
-                                ></span>
-                                <span className="material-symbols-outlined text-[15px] shrink-0 text-[#b0c9ff]">
-                                  {resolveNodeIcon(node)}
-                                </span>
-                                <span className="truncate flex-1 font-semibold">{node.name}</span>
-                              </button>
+                              chunk
+                            </span>
+                          )}
+                          <span className="ml-auto text-[#8cd6cb] font-bold">[{tagGroup.nodes.length}]</span>
+                        </button>
 
-                              {/* Monospaced Tailscale IP badge */}
-                              {ipBadge && (
-                                <span
-                                  className="font-mono text-[9px] text-[#8d909b] truncate max-w-[68px] shrink-0"
-                                  title={`Tailscale IP: ${ipBadge}`}
-                                >
-                                  {ipBadge}
-                                </span>
-                              )}
-
-                              {/* Platform tier pill (only if distinct virtualization / platform tier) */}
-                              {badgeInfo && (
-                                <span
-                                  className={`font-mono text-[9px] px-1 py-0.2 rounded font-semibold uppercase tracking-wider shrink-0 ${badgeInfo.badgeClasses}`}
-                                >
-                                  {badgeInfo.label}
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })}
+                        {/* Indented Member Nodes */}
+                        {!isCollapsed && (
+                          <div className="pl-3 space-y-0.5">
+                            {tagGroup.nodes.length === 0 ? (
+                              <div className="px-2 py-1 text-[10px] text-[#8d909b] italic">
+                                No discovered hosts
+                              </div>
+                            ) : (
+                              tagGroup.nodes.map(node => renderNodeItem(node))
+                            )}
+                          </div>
+                        )}
                       </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* SECTION 2: Non-Tailscale Infrastructure */}
+            {(inventoryTree.nonTailscale.standalone.length > 0 ||
+              inventoryTree.nonTailscale.folders.length > 0 ||
+              onCreateFolder) && (
+              <div className="pt-2 space-y-1">
+                {/* Standalone Non-Tailscale Hosts */}
+                {inventoryTree.nonTailscale.standalone.map(node => renderNodeItem(node))}
+
+                {/* Custom Folders */}
+                {inventoryTree.nonTailscale.folders.map(folderGroup => {
+                  const isCollapsed = Boolean(collapsedFolders[folderGroup.folder.id]);
+                  if (
+                    filterText &&
+                    folderGroup.nodes.length === 0 &&
+                    !folderGroup.folder.name.toLowerCase().includes(filterText.toLowerCase().trim())
+                  ) {
+                    return null;
+                  }
+
+                  return (
+                    <div key={folderGroup.folder.id} className="space-y-0.5">
+                      <div className="group flex items-center justify-between px-1.5 py-0.5 text-[#c3c6d2] hover:text-[#dfe1fa] rounded hover:bg-[#1b1e31]">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCollapsedFolders(prev => ({
+                              ...prev,
+                              [folderGroup.folder.id]: !prev[folderGroup.folder.id],
+                            }))
+                          }
+                          className="flex items-center gap-1 min-w-0 flex-1 text-left cursor-pointer"
+                        >
+                          <span className="material-symbols-outlined text-[14px]">
+                            {isCollapsed ? 'arrow_right' : 'arrow_drop_down'}
+                          </span>
+                          <span className="material-symbols-outlined text-[14px] text-[#ffd580]">folder</span>
+                          <span className="text-[#dfe1fa] font-medium truncate">{folderGroup.folder.name}</span>
+                          <span className="text-[#8cd6cb] font-bold text-[10px] ml-1">
+                            [{folderGroup.nodes.length}]
+                          </span>
+                        </button>
+
+                        {onDeleteFolder && (
+                          <button
+                            type="button"
+                            onClick={() => onDeleteFolder(folderGroup.folder.id)}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity text-[#8d909b] hover:text-[#ffb4ab] p-0.5 cursor-pointer"
+                            title={`Delete folder "${folderGroup.folder.name}"`}
+                          >
+                            <span className="material-symbols-outlined text-[13px]">delete</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Nested Host Nodes */}
+                      {!isCollapsed && (
+                        <div className="pl-3 space-y-0.5">
+                          {folderGroup.nodes.length === 0 ? (
+                            <div className="px-2 py-1 text-[10px] text-[#8d909b] italic">
+                              Folder is empty
+                            </div>
+                          ) : (
+                            folderGroup.nodes.map(node => renderNodeItem(node))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {/* "+ New Folder" Action Button / Inline Prompt */}
+                {onCreateFolder && (
+                  <div className="pt-1 px-1">
+                    {isCreatingFolder ? (
+                      <form
+                        onSubmit={e => {
+                          e.preventDefault();
+                          if (newFolderName.trim()) {
+                            onCreateFolder(newFolderName.trim());
+                            setNewFolderName('');
+                            setIsCreatingFolder(false);
+                          }
+                        }}
+                        className="flex items-center gap-1 bg-[#121528] p-1 rounded border border-[#26293c]"
+                      >
+                        <span className="material-symbols-outlined text-[14px] text-[#ffd580]">folder</span>
+                        <input
+                          type="text"
+                          autoFocus
+                          value={newFolderName}
+                          onChange={e => setNewFolderName(e.target.value)}
+                          placeholder="Folder name..."
+                          className="bg-transparent text-[#dfe1fa] text-[11px] px-1 py-0.5 outline-none flex-1 font-mono min-w-0"
+                        />
+                        <button
+                          type="submit"
+                          disabled={!newFolderName.trim()}
+                          className="text-[#8cd6cb] hover:text-[#b0c9ff] text-[11px] font-bold px-1 cursor-pointer disabled:opacity-40"
+                        >
+                          Add
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsCreatingFolder(false);
+                            setNewFolderName('');
+                          }}
+                          className="text-[#8d909b] hover:text-[#dfe1fa] text-[11px] px-1 cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </form>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setIsCreatingFolder(true)}
+                        className="flex items-center gap-1 text-[11px] text-[#8d909b] hover:text-[#dfe1fa] cursor-pointer py-1 px-1.5 rounded hover:bg-[#1b1e31] transition-colors w-full"
+                      >
+                        <span className="material-symbols-outlined text-[14px] text-[#8cd6cb]">create_new_folder</span>
+                        <span>+ New Folder</span>
+                      </button>
                     )}
                   </div>
-                );
-              })}
-            </div>
+                )}
+              </div>
+            )}
           </nav>
         )}
 

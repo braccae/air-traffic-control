@@ -1,4 +1,4 @@
-import type { NodeItem, NodeType } from '../types/index.ts';
+import type { NodeItem, NodeType, TagInventoryChunk, CustomFolder } from '../types/index.ts';
 
 export function filterNodesBySearchQuery(nodes: NodeItem[], query: string): NodeItem[] {
   const normalized = query.trim().toLowerCase();
@@ -140,6 +140,12 @@ export function buildProvisionedNode(
       secureBoot: 'Enabled',
       iommu: 'Enabled',
     },
+    ...(input.connectionProtocol ? { connectionProtocol: input.connectionProtocol } : {}),
+    ...(input.vaultSecretId ? { vaultSecretId: input.vaultSecretId } : {}),
+    ...(input.winrmPort !== undefined ? { winrmPort: input.winrmPort } : {}),
+    ...(input.folder ? { folder: input.folder } : {}),
+    ...(input.isDynamicTagMember !== undefined ? { isDynamicTagMember: input.isDynamicTagMember } : {}),
+    ...(input.followedTag ? { followedTag: input.followedTag } : {}),
   };
 }
 
@@ -402,6 +408,132 @@ export type ConsoleDrawerTab = 'active' | 'task_queue' | 'ansible' | 'syslog' | 
 export function formatTaskQueueTabLabel(stagedCount: number): string {
   return `Task Queue (${stagedCount})`;
 }
+
+export interface InventoryTagGroup {
+  tag: string;
+  chunk?: TagInventoryChunk;
+  nodes: NodeItem[];
+}
+
+export interface InventoryFolderGroup {
+  folder: CustomFolder;
+  nodes: NodeItem[];
+}
+
+export interface InventoryTree {
+  tailscale: {
+    shortName: string;
+    tags: InventoryTagGroup[];
+  };
+  nonTailscale: {
+    standalone: NodeItem[];
+    folders: InventoryFolderGroup[];
+  };
+}
+
+export function buildInventoryTree(
+  nodes: NodeItem[],
+  chunks: TagInventoryChunk[] = [],
+  folders: CustomFolder[] = [],
+  defaultTailnet?: string
+): InventoryTree {
+  const shortName =
+    defaultTailnet ||
+    nodes.find(n => Boolean(n.datacenter))?.datacenter ||
+    'leo-banjo.ts.net';
+
+  // Tailscale nodes: Boolean(node.tailscaleIp || node.isDynamicTagMember || node.followedTag || (node.group && node.group.startsWith('tag:')) || (Array.isArray(node.tags) && node.tags.length > 0))
+  const isTailscaleNode = (node: NodeItem): boolean =>
+    Boolean(
+      node.tailscaleIp ||
+      node.isDynamicTagMember ||
+      node.followedTag ||
+      (node.group && node.group.startsWith('tag:')) ||
+      (Array.isArray(node.tags) && node.tags.length > 0)
+    );
+
+  const tailscaleNodes: NodeItem[] = [];
+  const nonTailscaleNodes: NodeItem[] = [];
+
+  for (const node of nodes) {
+    if (isTailscaleNode(node)) {
+      tailscaleNodes.push(node);
+    } else {
+      nonTailscaleNodes.push(node);
+    }
+  }
+
+  // Group Tailscale nodes by their tag (prefer node.followedTag || node.group || node.tags?.[0] || 'tag:host')
+  const tagMap = new Map<string, { chunk?: TagInventoryChunk; nodes: NodeItem[] }>();
+
+  // Ensure any active TagInventoryChunk is listed even if currently 0 members
+  for (const chunk of chunks) {
+    if (chunk && chunk.tag) {
+      tagMap.set(chunk.tag, { chunk, nodes: [] });
+    }
+  }
+
+  for (const node of tailscaleNodes) {
+    const tag =
+      node.followedTag ||
+      (node.group && node.group.startsWith('tag:') ? node.group : undefined) ||
+      (Array.isArray(node.tags) && node.tags.find(t => t.startsWith('tag:'))) ||
+      node.group ||
+      (Array.isArray(node.tags) && node.tags[0]) ||
+      'tag:host';
+
+    const existing = tagMap.get(tag);
+    if (existing) {
+      existing.nodes.push(node);
+    } else {
+      tagMap.set(tag, { chunk: undefined, nodes: [node] });
+    }
+  }
+
+  const tags: InventoryTagGroup[] = Array.from(tagMap.entries()).map(([tag, data]) => ({
+    tag,
+    chunk: data.chunk,
+    nodes: data.nodes,
+  }));
+
+  // Partition non-Tailscale into folders and standalone
+  const folderMap = new Map<string, InventoryFolderGroup>();
+
+  // Include all folders from folders input even if empty
+  for (const folder of folders) {
+    folderMap.set(folder.id, { folder, nodes: [] });
+  }
+
+  const standalone: NodeItem[] = [];
+  for (const node of nonTailscaleNodes) {
+    if (node.folder) {
+      const matchedFolder = folders.find(
+        f => f.id === node.folder || f.name === node.folder
+      );
+      if (matchedFolder && folderMap.has(matchedFolder.id)) {
+        folderMap.get(matchedFolder.id)!.nodes.push(node);
+      } else {
+        standalone.push(node);
+      }
+    } else {
+      standalone.push(node);
+    }
+  }
+
+  const folderGroups: InventoryFolderGroup[] = folders.map(f => folderMap.get(f.id)!);
+
+  return {
+    tailscale: {
+      shortName,
+      tags,
+    },
+    nonTailscale: {
+      standalone,
+      folders: folderGroups,
+    },
+  };
+}
+
 
 
 

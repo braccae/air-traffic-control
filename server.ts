@@ -9,7 +9,7 @@ import { createServer as createViteServer } from 'vite';
 import { getDefaultHostPodmanProbe, probeUnprivilegedPodmanUsers, parseTerminalCommand } from './src/utils/orchestrator.ts';
 import {
   LIVE_TAILNET_NODES,
-  refreshTailscaleNodes,
+  refreshTailscaleNodes as baseRefreshTailscaleNodes,
   fetchLiveNodeTelemetry,
   probeNodePodmanAndIdentities,
   runNodeCommand,
@@ -17,8 +17,9 @@ import {
   probeNodePrivilege,
   testNodePrivilege,
 } from './src/utils/liveCluster.ts';
+import { syncTagInventoryChunks, fetchLiveTailscalePeers } from './src/utils/tailscaleSync.ts';
 import { updateNodeSettings } from './src/utils/navigationViewModel.ts';
-import { createHostCacheStore } from './src/utils/hostCacheDb.ts';
+import { createHostCacheStore, registerInventoryRoutes } from './src/utils/hostCacheDb.ts';
 import { fetchNodeTelemetryMultiTier } from './src/utils/telemetryCollector.ts';
 import { registerPrivilegeRoutes } from './src/utils/privilegeEscalation.ts';
 import { buildJournalctlCommand, sanitizeLogFilter } from './src/utils/systemLogs.ts';
@@ -33,7 +34,7 @@ import {
   updatePlaybook,
   deletePlaybook,
 } from './src/utils/playbookManager.ts';
-import type { NodeItem, TelemetryData, GlobalTaskItem, ServiceUser, VMItem } from './src/types/index.ts';
+import type { NodeItem, TelemetryData, GlobalTaskItem, ServiceUser, VMItem, TagInventoryChunk } from './src/types/index.ts';
 import { getHardwareProbeCommand, parseHardwareProbeOutput, applyHardwareProbeToNode } from './src/utils/hardwareProbe.ts';
 import {
   buildNfsSaveCommand,
@@ -69,6 +70,13 @@ import {
   clearQueue,
   executeNextQueueTask,
 } from './src/utils/ansibleQueueRunner.ts';
+import {
+  getAnsibleVenvPath,
+  findOrBootstrapUv,
+  ensureAnsibleVenv,
+  REQUIRED_VENV_PACKAGES,
+} from './src/utils/ansibleVenvManager.ts';
+import { registerVaultRoutes } from './src/utils/vaultManager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -119,6 +127,26 @@ nodes = nodes.map(n => {
   return n;
 });
 hostCache.upsertHosts(nodes);
+
+// Dynamic Tailscale Tag Synchronization Wrapper
+async function refreshTailscaleNodes(currentNodes: NodeItem[]): Promise<NodeItem[]> {
+  let updated = await baseRefreshTailscaleNodes(currentNodes);
+  try {
+    const chunks = hostCache.getAllTagChunks();
+    const hasDynamicNodes = updated.some(n => n.isDynamicTagMember);
+    if (chunks.length > 0 || hasDynamicNodes) {
+      const peers = await fetchLiveTailscalePeers();
+      const syncResult = syncTagInventoryChunks(chunks, peers, updated);
+      for (const rem of syncResult.removedNodes) {
+        hostCache.deleteHost(rem.id);
+      }
+      updated = [...syncResult.unchangedNodes, ...syncResult.updatedNodes, ...syncResult.addedNodes];
+    }
+  } catch (err) {
+    console.error('Error synchronizing Tailscale tag inventory chunks:', err);
+  }
+  return updated;
+}
 
 // Refresh from live `tailscale status --json` on startup and periodically, persisting into SQLite
 refreshTailscaleNodes(nodes).then(updated => {
@@ -332,6 +360,11 @@ app.post('/api/nodes', (req, res) => {
       secureBoot: 'Enabled',
       iommu: 'Enabled',
     },
+    connectionProtocol: req.body.connectionProtocol,
+    vaultSecretId: req.body.vaultSecretId,
+    folder: req.body.folder,
+    isDynamicTagMember: req.body.isDynamicTagMember,
+    followedTag: req.body.followedTag,
   };
   nodes.push(newNode);
   hostCache.upsertHost(newNode);
@@ -478,6 +511,26 @@ app.delete('/api/nodes/:id', (req, res) => {
   hostCache.deleteHost(removed.id);
   broadcast({ type: 'node_deleted', nodeId: removed.id });
   res.json({ success: true, removed });
+});
+
+registerInventoryRoutes(app, {
+  hostCache,
+  broadcast: (msg) => {
+    broadcast(msg);
+    if (msg.type === 'chunks_updated') {
+      refreshTailscaleNodes(nodes).then(updated => {
+        nodes = updated;
+        hostCache.upsertHosts(nodes);
+        broadcast({ type: 'nodes_updated', nodes });
+      }).catch(err => {
+        console.error('Failed to sync tailscale tag chunks:', err);
+      });
+    }
+  },
+  getNodes: () => nodes,
+  setNodes: (newNodes) => {
+    nodes = newNodes;
+  },
 });
 
 app.get('/api/telemetry', async (req, res) => {
@@ -1769,6 +1822,7 @@ const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
 registerPlaybookRoutes(app, playbookDir, {
   inventoryScriptPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
 });
+registerVaultRoutes(app);
 
 app.get('/api/ansible/config', async (_req, res) => {
   try {
@@ -1852,6 +1906,30 @@ app.put('/api/ansible/config', async (req, res) => {
     res.json({ success: true, settings: updatedSettings });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err?.message || 'Failed to update ansible.cfg' });
+  }
+});
+
+app.get('/api/ansible/environment', async (_req, res) => {
+  try {
+    const venvPath = getAnsibleVenvPath();
+    const ansibleBinary = path.join(venvPath, 'bin', 'ansible');
+    const installed = fs.existsSync(ansibleBinary);
+    let uvPath = '';
+    try {
+      uvPath = await findOrBootstrapUv({ downloadIfMissing: false });
+    } catch {
+      // uv not found without download
+    }
+
+    res.json({
+      success: true,
+      venvPath,
+      uvPath,
+      installed,
+      packages: REQUIRED_VENV_PACKAGES,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to check ansible environment' });
   }
 });
 
@@ -2339,6 +2417,8 @@ async function startServer() {
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Air Traffic Control Fullstack server running on http://0.0.0.0:${PORT}`);
+    // Non-blocking background initialization of persistent Ansible virtual environment
+    ensureAnsibleVenv().catch(err => console.warn('Background venv init error:', err));
   });
 }
 
