@@ -240,15 +240,17 @@ export function buildSmbSaveCommand(config: SmbShareConfig): string {
     `else:`,
     `    if content and not content.endswith('\\n'): content += '\\n'`,
     `    content += '\\n' + new_block`,
-    `with open('/tmp/smb.conf.tmp', 'w') as f: f.write(content)`,
+    `tmp_path = sys.argv[1] if len(sys.argv) > 1 else '/tmp/smb.conf.$$.tmp'`,
+    `with open(tmp_path, 'w') as f: f.write(content)`,
   ].join('\n');
 
   const escapedPython = escapeShellSingleQuote(pythonScript);
 
   return [
-    `printf '%s\\n' '${escapedBlock}' | python3 -c '${escapedPython}'`,
+    `TMP_FILE="/tmp/smb.conf.$$.tmp"`,
+    `printf '%s\\n' '${escapedBlock}' | python3 -c '${escapedPython}' "$TMP_FILE"`,
     `sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.bak 2>/dev/null || true`,
-    `sudo mv /tmp/smb.conf.tmp /etc/samba/smb.conf`,
+    `sudo mv "$TMP_FILE" /etc/samba/smb.conf`,
     `sudo smbcontrol all reload-config 2>&1 || sudo systemctl reload smbd smb 2>&1 || sudo systemctl restart smbd smb 2>&1 || true`,
   ].join(' && ');
 }

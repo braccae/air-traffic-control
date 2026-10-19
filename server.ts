@@ -1368,14 +1368,26 @@ app.post('/api/nodes/:id/interfaces/connect', async (req, res) => {
 
 app.post('/api/nodes/:id/vms/:name/action', async (req, res) => {
   const targetNode = findNode(req.params.id);
-  const vmName = req.params.name;
-  const action = req.body.action || 'start'; // 'start' | 'shutdown' | 'destroy' | 'reboot'
+  const vmName = String(req.params.name || '').trim();
+  const rawAction = String(req.body.action || 'start').trim().toLowerCase();
+  const ALLOWED_ACTIONS = ['start', 'shutdown', 'destroy', 'reboot', 'reset', 'resume', 'suspend'];
+
+  if (!ALLOWED_ACTIONS.includes(rawAction)) {
+    res.status(400).json({ success: false, error: `Invalid VM action: ${rawAction}. Allowed: ${ALLOWED_ACTIONS.join(', ')}` });
+    return;
+  }
+
+  if (!/^[a-zA-Z0-9_\-\.]+$/.test(vmName)) {
+    res.status(400).json({ success: false, error: 'Invalid VM name format' });
+    return;
+  }
+
   try {
-    const out = await runNodeCommand(targetNode, `sudo virsh ${action} ${vmName}`, 8000);
+    const out = await runNodeCommand(targetNode, `sudo virsh ${rawAction} ${vmName}`, 8000);
     hostCache.invalidateHostSections(targetNode.id);
-    res.json({ success: true, vm: vmName, action, output: out.trim() });
+    res.json({ success: true, vm: vmName, action: rawAction, output: out.trim() });
   } catch (err: any) {
-    res.status(500).json({ success: false, error: err?.message || `Failed to execute ${action} on VM ${vmName}` });
+    res.status(500).json({ success: false, error: err?.message || `Failed to execute ${rawAction} on VM ${vmName}` });
   }
 });
 
@@ -1397,13 +1409,14 @@ app.post('/api/nodes/:id/vms/create', async (req, res) => {
   }
 
   const cleanName = name.trim().replace(/[^a-zA-Z0-9_-]/g, '-');
+  const cleanBridge = String(bridge || 'virbr0').trim().replace(/[^a-zA-Z0-9_.-]/g, '');
   const ramMb = Number(ramGiB) * 1024;
   const numCpus = Number(vcpus) || 2;
   const diskSize = Number(diskGb) || 20;
 
   try {
     const cmd = [
-      `virt-install --name "${cleanName}" --vcpus ${numCpus} --memory ${ramMb} --disk size=${diskSize} --network bridge=${bridge} --noautoconsole --import --check path_in_use=off 2>&1 || virsh define /dev/stdin << 'EOF'\n<domain type='kvm'><name>${cleanName}</name><memory unit='MiB'>${ramMb}</memory><vcpu>${numCpus}</vcpu><os><type arch='x86_64'>hvm</type></os></domain>\nEOF 2>&1`,
+      `virt-install --name "${cleanName}" --vcpus ${numCpus} --memory ${ramMb} --disk size=${diskSize} --network bridge=${cleanBridge} --noautoconsole --import --check path_in_use=off 2>&1 || virsh define /dev/stdin << 'EOF'\n<domain type='kvm'><name>${cleanName}</name><memory unit='MiB'>${ramMb}</memory><vcpu>${numCpus}</vcpu><os><type arch='x86_64'>hvm</type></os></domain>\nEOF 2>&1`,
       autostart ? `virsh autostart "${cleanName}" 2>&1 || true` : 'true',
     ].join(' && ');
 
