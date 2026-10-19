@@ -245,18 +245,28 @@ If a user action requires a module outside `ansible.builtin` or `ansible.posix` 
 
 ---
 
-## 6. Implementation Plan & Work Sizing
+---
 
-This work is sized as **a project with a written design**, followed by a multi-task implementation plan executed using subagents:
-1. **Module 1: Ansible Config Manager & Datacenter UI**:
-   - `src/utils/ansibleConfigManager.ts`, `ansible/ansible.cfg` parser/writer, unit tests.
-   - `DatacenterGlobalView.tsx` Ansible Settings card and API endpoints `GET/PUT /api/ansible/config`.
-2. **Module 2: On-the-Fly Playbook Queue Engine**:
-   - `src/utils/ansibleQueueManager.ts`, task compilers for services, firewall, shares, containers, and packages.
-   - Backend routes `GET/POST/DELETE /api/queue` and one-by-one execution runner with `ANSIBLE_STDOUT_CALLBACK=json`.
-3. **Module 3: Console "Task Queue" Tab & Accordion Drill-Down (Option A)**:
-   - Accordion view with module badges, parameter table, Vault secret masking, and single/batch execution controls.
-4. **Module 4: Conservative Telemetry & Glances API Integration**:
-   - 30–60s conservative interval, REST API query -> SSH localhost curl fallback -> CLI `--stdout-json` fallback.
-5. **Module 5: Whole-System Verification**:
-   - All 4 verification gates passed (`backend-go` tests, `npm test`, `npm run lint`, `npm run build`).
+## 7. Extensibility & Future Modularization Architecture
+
+To prepare the codebase for upcoming modularization efforts, all components designed in this project follow a decoupled, driver-oriented architecture:
+
+### A. Pluggable Task & Mutation Drivers
+The queue compiler delegates module generation through typed driver interfaces:
+- **Core Drivers (Target for current phase):**
+  - `SystemDriver`: systemd unit management (`ansible.builtin.systemd`), journalctl logs, host reboots (`ansible.builtin.reboot`).
+  - `ContainerDriver`: Podman rootful and rootless management (`containers.podman.podman_container`, `podman_pod`).
+  - `StorageDriver`: Samba template management, NFS exports, and ZFS/Btrfs datasets.
+  - `NetworkDriver`: Firewalld rules (`ansible.posix.firewalld`), network interfaces.
+  - `PackageDriver`: Package upgrades (`ansible.builtin.package`, `dnf`, `apt`, `apk`).
+- **Future Extension Points (Prepared interfaces):**
+  - `DatabaseDriver`: Database schema migration, user creation, and service control for MongoDB (`community.mongodb.*`) and SQL flavors (PostgreSQL `community.postgresql.*`, MySQL `community.mysql.*`).
+  - `KubernetesDriver`: Manifest application and pod controls for K3s / vanilla Kubernetes (`kubernetes.core.*`).
+  - `NetworkSwitchDriver`: Network device management for Cisco switches (`cisco.ios.*`) and VyOS router nodes.
+
+### B. Target Stack Alignment & Graceful Degradation
+- **Primary Target Stack:** Systemd-based Linux (Fedora, Debian, Ubuntu, Silverblue, Rocky/RHEL) with OpenSSH, Tailscale, and Glances.
+- **Fallback Paths (Non-Systemd / Minimal Hosts / Network Gear):**
+  - **Non-Systemd Linux (Alpine / OpenRC / SysVinit):** Detect service manager via facts/autodetection; if systemd is absent, map service tasks to `ansible.builtin.service` (`use: openrc` or `use: sysvinit`) and privilege escalation to `doas -n` or `sudo -n`.
+  - **Hosts without Glances / Tailscale:** If Glances API is unreachable and CLI is missing, fallback to PCP (`pmcd`) or sysfs reads without throwing exceptions; if Tailscale is absent, route through the configured fallback LAN IP.
+  - **Cisco & Network Switches:** Handled via connection plugins (`ansible_connection: network_cli` or direct management port `22`/`443`) rather than POSIX shell executors.
