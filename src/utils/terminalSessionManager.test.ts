@@ -7,6 +7,8 @@ import {
   toggleSessionMaximized,
   updateSessionPosition,
   updateSessionSize,
+  formatSshTarget,
+  TERMINAL_QUICK_COMMANDS,
 } from './terminalSessionManager.ts';
 
 describe('TerminalSessionManager', () => {
@@ -64,5 +66,74 @@ describe('TerminalSessionManager', () => {
 
     const resized = updateSessionSize(moved, s.id, { width: 1024, height: 768 });
     assert.deepEqual(resized[0].size, { width: 1024, height: 768 });
+  });
+
+  it('maintains independent isolation between multiple terminal sessions', () => {
+    const s1 = createTerminalSession('n1', 'host1', '100.64.0.1', undefined, 0);
+    const s2 = createTerminalSession('n2', 'host2', '100.64.0.2', undefined, 1);
+    const s3 = createTerminalSession('n3', 'host3', '100.64.0.3', undefined, 2);
+    let list = [s1, s2, s3];
+
+    // Mutate position of session 2 only
+    list = updateSessionPosition(list, s2.id, { x: 500, y: 400 });
+    assert.deepEqual(list[0].position, s1.position);
+    assert.deepEqual(list[1].position, { x: 500, y: 400 });
+    assert.deepEqual(list[2].position, s3.position);
+
+    // Mutate size of session 1 only
+    list = updateSessionSize(list, s1.id, { width: 1200, height: 800 });
+    assert.deepEqual(list[0].size, { width: 1200, height: 800 });
+    assert.deepEqual(list[1].size, s2.size);
+    assert.deepEqual(list[2].size, s3.size);
+
+    // Minimize session 2 only
+    list = setSessionMinimized(list, s2.id, true);
+    assert.equal(list[0].isMinimized, false);
+    assert.equal(list[1].isMinimized, true);
+    assert.equal(list[2].isMinimized, false);
+
+    // Maximize session 3 only
+    list = toggleSessionMaximized(list, s3.id);
+    assert.equal(list[0].isMaximized, false);
+    assert.equal(list[1].isMaximized, false);
+    assert.equal(list[2].isMaximized, true);
+  });
+
+  it('formats SSH target correctly with user fallback and node attributes', () => {
+    // With explicit sshUser and tailscaleHost
+    const target1 = formatSshTarget({
+      sshUser: 'admin',
+      tailscaleHost: 'node-alpha.leo-banjo.ts.net',
+      ip: '192.168.1.100',
+    });
+    assert.equal(target1, 'admin@node-alpha.leo-banjo.ts.net');
+
+    // With fallback sshUser ('core') and tailscaleIp
+    const target2 = formatSshTarget({
+      tailscaleIp: '100.80.90.10',
+    });
+    assert.equal(target2, 'core@100.80.90.10');
+
+    // With session fallback host if node properties are missing
+    const target3 = formatSshTarget(undefined, '100.70.60.50');
+    assert.equal(target3, 'core@100.70.60.50');
+
+    // Default localhost fallback
+    const target4 = formatSshTarget();
+    assert.equal(target4, 'core@localhost');
+  });
+
+  it('provides predefined quick commands for cockpit operators', () => {
+    assert(TERMINAL_QUICK_COMMANDS.length >= 4);
+    const labels = TERMINAL_QUICK_COMMANDS.map((qc) => qc.label);
+    assert(labels.includes('htop'));
+    assert(labels.includes('podman ps'));
+    assert(labels.includes('journalctl'));
+    assert(labels.includes('uptime'));
+
+    for (const qc of TERMINAL_QUICK_COMMANDS) {
+      assert(typeof qc.label === 'string' && qc.label.length > 0);
+      assert(typeof qc.cmd === 'string' && qc.cmd.length > 0);
+    }
   });
 });

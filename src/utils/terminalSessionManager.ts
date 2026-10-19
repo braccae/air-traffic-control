@@ -14,6 +14,28 @@ export interface TerminalSession {
   createdAt: number;
 }
 
+export interface QuickCommand {
+  label: string;
+  cmd: string;
+}
+
+export const TERMINAL_QUICK_COMMANDS: QuickCommand[] = [
+  { label: 'htop', cmd: 'htop' },
+  { label: 'podman ps', cmd: 'podman ps' },
+  { label: 'journalctl', cmd: 'journalctl -f -n 50' },
+  { label: 'ip a', cmd: 'ip -br a' },
+  { label: 'uptime', cmd: 'uptime' },
+];
+
+export function formatSshTarget(
+  node?: { sshUser?: string; tailscaleHost?: string; tailscaleIp?: string; ip?: string; name?: string },
+  sessionFallbackHost?: string
+): string {
+  const user = node?.sshUser || 'core';
+  const host = node?.tailscaleHost || node?.tailscaleIp || node?.ip || sessionFallbackHost || 'localhost';
+  return `${user}@${host}`;
+}
+
 export function createTerminalSession(
   nodeId: string,
   nodeName: string,
