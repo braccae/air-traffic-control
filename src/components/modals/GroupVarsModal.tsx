@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { VarsSecretsEditor } from '../VarsSecretsEditor';
 
 interface GroupVarsModalProps {
   isOpen: boolean;
@@ -101,7 +102,7 @@ export const GroupVarsModal: React.FC<GroupVarsModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
-      <div className="w-full max-w-2xl bg-[#0a0d1f] rounded-lg shadow-2xl border border-[#313447] flex flex-col h-[520px] overflow-hidden">
+      <div className="w-full max-w-4xl bg-[#0a0d1f] rounded-lg shadow-2xl border border-[#313447] flex flex-col h-[620px] overflow-hidden">
         <div className="h-9 bg-[#171a2d] px-3 flex items-center justify-between border-b border-[#26293c]">
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-[#d9b9ff] text-[18px]">lock_reset</span>
@@ -119,7 +120,7 @@ export const GroupVarsModal: React.FC<GroupVarsModalProps> = ({
         </div>
 
         {/* Tab files */}
-        <div className="bg-[#1b1e31] px-3 py-1 flex items-center gap-1.5 border-b border-[#26293c] font-mono text-xs overflow-x-auto">
+        <div className="bg-[#1b1e31] px-3 py-1 flex items-center gap-1.5 border-b border-[#26293c] font-mono text-xs overflow-x-auto shrink-0">
           {fileKeys.map(f => (
             <button
               key={f}
@@ -142,12 +143,11 @@ export const GroupVarsModal: React.FC<GroupVarsModalProps> = ({
           </span>
         </div>
 
-        <div className="flex-1 p-3 bg-[#0a0d1f] font-mono text-xs">
-          <textarea
-            value={currentContent}
-            onChange={e => handleContentChange(e.target.value)}
-            className="w-full h-full bg-[#171a2d] p-3 text-[#dfe1fa] rounded border border-[#26293c] focus:border-[#b0c9ff] outline-none font-mono resize-none"
-            spellCheck={false}
+        <div className="flex-1 overflow-hidden">
+          <VarsSecretsEditor
+            yamlContent={currentContent}
+            onChangeYaml={handleContentChange}
+            title={selectedFile}
           />
         </div>
 

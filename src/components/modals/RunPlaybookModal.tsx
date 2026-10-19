@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { VarsSecretsEditor } from '../VarsSecretsEditor';
 
 interface RunPlaybookModalProps {
   isOpen: boolean;
@@ -83,8 +84,8 @@ export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
-      <div className="w-full max-w-lg bg-[#0a0d1f] rounded-lg shadow-2xl border border-[#313447] overflow-hidden">
-        <div className="h-9 bg-[#171a2d] px-3 flex items-center justify-between border-b border-[#26293c]">
+      <div className="w-full max-w-2xl bg-[#0a0d1f] rounded-lg shadow-2xl border border-[#313447] max-h-[90vh] flex flex-col overflow-hidden">
+        <div className="h-9 bg-[#171a2d] px-3 flex items-center justify-between border-b border-[#26293c] shrink-0">
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-[#b0c9ff] text-[18px]">play_arrow</span>
             <span className="font-mono text-xs text-[#dfe1fa] font-bold">
@@ -100,7 +101,7 @@ export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-4 space-y-3 font-mono text-xs">
+        <form onSubmit={handleSubmit} className="p-4 space-y-3 font-mono text-xs flex-1 overflow-y-auto">
           <div>
             <div className="flex items-center justify-between mb-1">
               <label className="text-[#8d909b]">SELECT TARGET PLAYBOOK</label>
@@ -199,15 +200,20 @@ export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
             </div>
           </div>
 
-          <div>
-            <label className="block text-[#8d909b] mb-1">EXTRA VARIABLES JSON / YAML (--extra-vars)</label>
-            <input
-              type="text"
-              placeholder='e.g. {"force_reload": true}'
-              value={extraVars}
-              onChange={e => setExtraVars(e.target.value)}
-              className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] outline-none font-mono"
-            />
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[#8d909b] font-bold">EXTRA VARIABLES &amp; SECRETS (--extra-vars)</label>
+              <span className="text-[10px] text-[#8cd6cb]">Structured Key-Value &amp; Vault Masking</span>
+            </div>
+            <div className="h-44 border border-[#26293c] rounded overflow-hidden">
+              <VarsSecretsEditor
+                yamlContent={extraVars}
+                onChangeYaml={setExtraVars}
+                compact={true}
+                allowModeToggle={true}
+                defaultMode="structured"
+              />
+            </div>
           </div>
 
           <div className="flex items-center gap-2 pt-1">
