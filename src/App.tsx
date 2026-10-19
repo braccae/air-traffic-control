@@ -46,6 +46,13 @@ import {
   updateSessionSize,
   type TerminalSession,
 } from './utils/terminalSessionManager.ts';
+import {
+  type ThemeMode,
+  getStoredTheme,
+  setStoredTheme,
+  toggleTheme,
+  applyThemeToDocument,
+} from './utils/themeManager.ts';
 import type { DragPosition } from './hooks/useDraggable.ts';
 import type { WindowSize } from './hooks/useResizable.ts';
 
@@ -404,6 +411,18 @@ export default function App() {
 
   const [telemetry, setTelemetry] = useState<TelemetryData>(initialTelemetry);
   const [tasks, setTasks] = useState<GlobalTaskItem[]>(initialTasks);
+
+  // Theme state: dark | latte (Task 6)
+  const [theme, setTheme] = useState<ThemeMode>(() => getStoredTheme());
+
+  useEffect(() => {
+    applyThemeToDocument(theme);
+    setStoredTheme(theme);
+  }, [theme]);
+
+  const handleToggleTheme = useCallback(() => {
+    setTheme(prev => toggleTheme(prev));
+  }, []);
 
   // Mobile sidebar state
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -886,6 +905,8 @@ export default function App() {
         isSidebarOpen={mobileSidebarOpen}
         onlineCount={nodesList.filter(n => n.status === 'online').length}
         totalCount={nodesList.length}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
       />
 
       {/* Left Server View Sidebar */}

@@ -1,4 +1,6 @@
 import React from 'react';
+import type { ThemeMode } from '../utils/themeManager.ts';
+import { getThemeIcon, getThemeLabel } from '../utils/themeManager.ts';
 
 interface HeaderProps {
   onOpenAddNode: () => void;
@@ -11,6 +13,8 @@ interface HeaderProps {
   isSidebarOpen?: boolean;
   onlineCount?: number;
   totalCount?: number;
+  theme?: ThemeMode;
+  onToggleTheme?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -24,6 +28,8 @@ export const Header: React.FC<HeaderProps> = ({
   isSidebarOpen,
   onlineCount,
   totalCount,
+  theme = 'dark',
+  onToggleTheme,
 }) => {
   return (
     <header className="fixed top-0 left-0 right-0 z-50 h-10 bg-[#0a0d1f] flex items-center justify-between px-3 shadow-[0_1px_8px_rgba(0,0,0,0.5)] border-b border-[#26293c]">
@@ -119,6 +125,21 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="material-symbols-outlined text-[14px] text-[#b0c9ff]">terminal</span>
             <span>Terminal / SSH</span>
           </button>
+
+          {onToggleTheme && (
+            <button
+              type="button"
+              onClick={onToggleTheme}
+              className="flex items-center gap-1.5 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
+              title={`Toggle Theme (Current: ${theme === 'latte' ? 'Catppuccin Latte' : 'Dark'})`}
+              aria-label={`Toggle theme (currently ${theme === 'latte' ? 'Latte' : 'Dark'})`}
+            >
+              <span className="material-symbols-outlined text-[14px] text-[#f9c068]">
+                {getThemeIcon(theme)}
+              </span>
+              <span>{getThemeLabel(theme)}</span>
+            </button>
+          )}
         </div>
 
         <div className="h-4 w-[1px] bg-[#434750] mx-1"></div>

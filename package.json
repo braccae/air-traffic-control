@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "node --test src/utils/orchestrator.test.ts src/utils/podmanViewModel.test.ts src/utils/navigationViewModel.test.ts src/utils/hostCacheDb.test.ts src/utils/ghosttyTerminal.test.ts src/utils/terminalSessionManager.test.ts src/utils/zfsParser.test.ts src/utils/systemLogs.test.ts src/utils/playbookManager.test.ts src/utils/varsParser.test.ts"
+    "test": "node --test src/utils/orchestrator.test.ts src/utils/podmanViewModel.test.ts src/utils/navigationViewModel.test.ts src/utils/hostCacheDb.test.ts src/utils/ghosttyTerminal.test.ts src/utils/terminalSessionManager.test.ts src/utils/zfsParser.test.ts src/utils/systemLogs.test.ts src/utils/playbookManager.test.ts src/utils/varsParser.test.ts src/utils/themeManager.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
