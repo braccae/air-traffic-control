@@ -13,9 +13,13 @@ import {
   fetchLiveNodeTelemetry,
   probeNodePodmanAndIdentities,
   runNodeCommand,
+  runNodeElevatedCommand,
+  probeNodePrivilege,
+  testNodePrivilege,
 } from './src/utils/liveCluster.ts';
 import { updateNodeSettings } from './src/utils/navigationViewModel.ts';
 import { createHostCacheStore } from './src/utils/hostCacheDb.ts';
+import { registerPrivilegeRoutes } from './src/utils/privilegeEscalation.ts';
 import { buildJournalctlCommand, sanitizeLogFilter } from './src/utils/systemLogs.ts';
 import {
   registerPlaybookRoutes,
@@ -1247,6 +1251,13 @@ app.get('/api/tailscale/peers', (_req, res) => {
   } catch (err: any) {
     res.status(500).json({ success: false, error: err?.message || 'Failed to query tailscale status' });
   }
+});
+
+registerPrivilegeRoutes(app, {
+  findNode,
+  probeNodePrivilege,
+  testNodePrivilege,
+  hostCache,
 });
 
 app.get('/api/nodes/:id/tailscale', (req, res) => {

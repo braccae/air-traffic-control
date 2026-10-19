@@ -1,8 +1,22 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { NodeItem, TelemetryData, UnprivilegedPodmanUser, ServiceUser, ContainerItem, PodItem } from '../types/index.ts';
+import type {
+  NodeItem,
+  TelemetryData,
+  UnprivilegedPodmanUser,
+  ServiceUser,
+  ContainerItem,
+  PodItem,
+  PrivilegeMethod,
+  PrivilegeStatus,
+} from '../types/index.ts';
 import { probeUnprivilegedPodmanUsers } from './orchestrator.ts';
 import { parseDockerPsOutput, separatePodsAndStandaloneContainers } from './podmanViewModel.ts';
+import {
+  wrapElevatedCommand,
+  buildPrivilegeProbeCommand,
+  parsePrivilegeProbeOutput,
+} from './privilegeEscalation.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -308,6 +322,12 @@ export const LIVE_TAILNET_NODES: NodeItem[] = [
 ];
 
 export async function runNodeCommand(node: NodeItem, command: string, timeoutMs = 6000): Promise<string> {
+  // If node prefers run0 and command attempts sudo, transparently wrap with run0
+  let effectiveCommand = command;
+  if (node.privilegeMethod === 'run0' && (command.startsWith('sudo ') || command.startsWith('sudo -n '))) {
+    effectiveCommand = wrapElevatedCommand(command, 'run0', node.sshUser || 'core');
+  }
+
   const isLocal =
     node.ip === '127.0.0.1' ||
     node.ip === 'localhost' ||
@@ -315,7 +335,7 @@ export async function runNodeCommand(node: NodeItem, command: string, timeoutMs 
     node.tailscaleHost.startsWith('dev-pc');
 
   if (isLocal) {
-    const { stdout } = await execFileAsync('sh', ['-c', command], {
+    const { stdout } = await execFileAsync('sh', ['-c', effectiveCommand], {
       timeout: timeoutMs,
       env: { ...process.env, SSH_AUTH_SOCK: SSH_AGENT_SOCKET },
     });
@@ -340,7 +360,7 @@ export async function runNodeCommand(node: NodeItem, command: string, timeoutMs 
       '-p',
       port,
       `${sshUser}@${targetHost}`,
-      command,
+      effectiveCommand,
     ],
     {
       timeout: timeoutMs,
@@ -348,6 +368,82 @@ export async function runNodeCommand(node: NodeItem, command: string, timeoutMs 
     }
   );
   return stdout;
+}
+
+export async function runNodeElevatedCommand(
+  node: NodeItem,
+  command: string,
+  timeoutMs = 6000
+): Promise<string> {
+  const method = node.privilegeMethod || 'run0';
+  const effectiveCmd = wrapElevatedCommand(command, method, node.sshUser || 'core');
+  return runNodeCommand(node, effectiveCmd, timeoutMs);
+}
+
+export async function probeNodePrivilege(node: NodeItem): Promise<PrivilegeStatus> {
+  const user = node.sshUser || 'core';
+  if (user === 'root') {
+    node.privilegeMethod = 'none';
+    node.privilegeActive = true;
+    return {
+      method: 'none',
+      active: true,
+      user: 'root',
+      canElevate: true,
+    };
+  }
+
+  const probeCmd = buildPrivilegeProbeCommand();
+  try {
+    const stdout = await runNodeCommand(node, probeCmd, 8000);
+    const status = parsePrivilegeProbeOutput(stdout, user);
+    node.privilegeMethod = status.method;
+    node.privilegeActive = status.active;
+    return status;
+  } catch (err: any) {
+    return {
+      method: 'none',
+      active: false,
+      user,
+      canElevate: false,
+      error: err?.message || String(err),
+    };
+  }
+}
+
+export async function testNodePrivilege(
+  node: NodeItem,
+  requestedMethod?: PrivilegeMethod
+): Promise<{ success: boolean; method: PrivilegeMethod; output: string; error?: string }> {
+  const method = requestedMethod || node.privilegeMethod || 'run0';
+  const testCmd =
+    method === 'run0'
+      ? 'run0 --background=no id -u'
+      : method === 'sudo'
+        ? 'sudo -n id -u'
+        : 'id -u';
+
+  try {
+    const stdout = await runNodeCommand(node, testCmd, 6000);
+    const trimmed = stdout.trim();
+    const success = trimmed === '0';
+    if (success) {
+      node.privilegeMethod = method;
+      node.privilegeActive = true;
+    }
+    return {
+      success,
+      method,
+      output: trimmed,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      method,
+      output: '',
+      error: err?.message || 'Elevation test failed',
+    };
+  }
 }
 
 export async function refreshTailscaleNodes(existingNodes: NodeItem[]): Promise<NodeItem[]> {

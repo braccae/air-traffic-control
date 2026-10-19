@@ -36,6 +36,24 @@ export interface NodeItem {
     secureBoot: string;
     iommu: string;
   };
+  privilegeMethod?: 'run0' | 'sudo' | 'none';
+  privilegeActive?: boolean;
+}
+
+export type PrivilegeMethod = 'run0' | 'sudo' | 'none';
+
+export interface PrivilegeStatus {
+  method: PrivilegeMethod;
+  active: boolean;
+  user: string;
+  canElevate: boolean;
+  error?: string;
+  details?: {
+    hasRun0?: boolean;
+    run0Active?: boolean;
+    hasSudo?: boolean;
+    sudoActive?: boolean;
+  };
 }
 
 export interface TelemetryData {
