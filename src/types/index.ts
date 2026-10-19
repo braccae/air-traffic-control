@@ -251,5 +251,7 @@ export interface QueuedAnsibleTask {
   becomeMethod: 'run0' | 'sudo' | 'doas';
   status: 'staged' | 'running' | 'completed' | 'failed' | 'cancelled';
   createdAt: number;
+  error?: string;
+  executedAt?: number;
 }
 

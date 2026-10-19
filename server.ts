@@ -60,6 +60,14 @@ import {
   validateVaultPasswordFile,
   type AnsibleConfigSettings,
 } from './src/utils/ansibleConfigManager.ts';
+import {
+  initQueueStore,
+  getQueue,
+  enqueueTask,
+  removeTask,
+  clearQueue,
+  executeNextQueueTask,
+} from './src/utils/ansibleQueueRunner.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -79,6 +87,7 @@ app.get('/ghostty-vt.wasm', (_req, res) => {
 // Initialize SQLite Host Cache DB
 const dbFilePath = process.env.HOST_CACHE_DB_PATH || path.resolve(__dirname, 'data/hosts-cache.sqlite');
 const hostCache = createHostCacheStore(dbFilePath);
+initQueueStore(dbFilePath);
 
 // Seed or load persisted hosts from SQLite
 let nodes: NodeItem[] = hostCache.seedHostsIfEmpty(LIVE_TAILNET_NODES);
@@ -1987,6 +1996,86 @@ app.post('/api/playbook/cancel', (req, res) => {
   }
 });
 
+// -------------------------------------------------------------
+// Ansible Mutation Queue API Endpoints
+// -------------------------------------------------------------
+app.get('/api/queue', (_req, res) => {
+  const q = getQueue();
+  res.json({ success: true, tasks: q.tasks, isRunning: q.isRunning });
+});
+
+app.post('/api/queue/task', (req, res) => {
+  const body = req.body;
+  if (
+    !body ||
+    typeof body !== 'object' ||
+    !body.title ||
+    !body.targetNodeId ||
+    !body.targetHostRoute ||
+    !Array.isArray(body.steps) ||
+    body.steps.length === 0
+  ) {
+    res.status(400).json({
+      success: false,
+      error: 'Invalid task payload: title, targetNodeId, targetHostRoute, and non-empty steps required',
+    });
+    return;
+  }
+
+  try {
+    const task = enqueueTask(body);
+    broadcast({ type: 'queue_updated', queue: getQueue() });
+    res.json({ success: true, task });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to enqueue task' });
+  }
+});
+
+app.delete('/api/queue/task/:id', (req, res) => {
+  const { id } = req.params;
+  const removed = removeTask(id);
+  if (!removed) {
+    res.status(404).json({ success: false, error: `Task ${id} not found in queue` });
+    return;
+  }
+  broadcast({ type: 'queue_updated', queue: getQueue() });
+  res.json({ success: true });
+});
+
+app.delete('/api/queue', (_req, res) => {
+  clearQueue();
+  broadcast({ type: 'queue_updated', queue: getQueue() });
+  res.json({ success: true });
+});
+
+app.post('/api/queue/execute', async (req, res) => {
+  const { taskId, inventoryPath } = req.body || {};
+  const inv = inventoryPath || path.resolve(__dirname, 'inventory/tailscale_inventory.py');
+
+  broadcast({ type: 'queue_execution_started', taskId, queue: getQueue() });
+
+  const { result, remainingCount, haltedOnError } = await executeNextQueueTask(inv, {
+    cwd: __dirname,
+    taskId,
+  });
+
+  broadcast({
+    type: 'queue_execution_finished',
+    taskId: result?.taskId,
+    result,
+    remainingCount,
+    haltedOnError,
+    queue: getQueue(),
+  });
+
+  res.json({
+    success: result ? result.success : false,
+    result,
+    remainingCount,
+    haltedOnError,
+  });
+});
+
 app.post('/api/restic/snapshot', async (req, res) => {
   const targetNode = findNode(req.body?.host || 'likes-it-cold');
   const snapshotTask: GlobalTaskItem = {
@@ -2040,7 +2129,7 @@ function broadcast(msg: any) {
 
 // WebSocket connection hub for bidirectional PTY and live telemetry
 wss.on('connection', ws => {
-  ws.send(JSON.stringify({ type: 'init', telemetry, tasks, nodes }));
+  ws.send(JSON.stringify({ type: 'init', telemetry, tasks, nodes, queue: getQueue() }));
 
   ws.on('message', async data => {
     try {
