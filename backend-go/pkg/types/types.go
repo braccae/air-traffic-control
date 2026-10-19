@@ -71,6 +71,7 @@ type Telemetry struct {
 type PodmanContainer struct {
 	ID        string `json:"id"`
 	PodID     string `json:"podId,omitempty"`
+	PodName   string `json:"podName,omitempty"`
 	Name      string `json:"name"`
 	Image     string `json:"image"`
 	Status    string `json:"status"` // Running, Exited, Paused

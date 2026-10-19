@@ -272,12 +272,36 @@ test('buildPodmanStateFromProbe converts live probed unprivileged users into Pod
   assert.equal(pantsIdentity.isRunningPodman, true);
   assert.equal(pantsIdentity.containerCount, 2);
 
-  const mergedPods = mergeLiveProbeIntoPods(samplePods, liveProbe);
-  assert.equal(mergedPods.length, 3);
-  assert.equal(mergedPods[0].id, 'rootless-pants-1000');
-  assert.equal(mergedPods[0].user, 'pants');
-  assert.equal(mergedPods[0].uid, 1000);
-  assert.equal(mergedPods[0].containers.length, 2);
+  const mergedPodsNoFake = mergeLiveProbeIntoPods(samplePods, liveProbe);
+  // Unpodded containers are not a pod and must not create fake synthesized pods (e.g. rootless-apps)
+  assert.equal(mergedPodsNoFake.length, 2);
+  assert.equal(mergedPodsNoFake.some(p => p.id.startsWith('rootless-')), false);
+
+  // If live probe includes a real user pod, it merges properly
+  const probeWithPod: UnprivilegedPodmanUser[] = [
+    {
+      ...liveProbe[0],
+      pods: [
+        {
+          id: 'pants-pod-1',
+          name: 'pants-pod',
+          containersRunningCount: 2,
+          ports: '3000:3000',
+          totalCpu: '',
+          totalRam: '',
+          containers: [],
+        },
+      ],
+      containers: liveProbe[0].containers.map(c => ({ ...c, podId: 'pants-pod-1' })),
+    },
+  ];
+  const mergedWithPod = mergeLiveProbeIntoPods(samplePods, probeWithPod);
+  assert.equal(mergedWithPod.length, 3);
+  assert.equal(mergedWithPod.some(p => p.id === 'pants-pod-1'), true);
+  const foundPod = mergedWithPod.find(p => p.id === 'pants-pod-1')!;
+  assert.equal(foundPod.user, 'pants');
+  assert.equal(foundPod.uid, 1000);
+  assert.equal(foundPod.containers.length, 2);
 });
 
 test('getContainerSecurityBadge accurately classifies rootful vs rootless with UID', () => {

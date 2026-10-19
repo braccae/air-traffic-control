@@ -481,7 +481,11 @@ app.delete('/api/nodes/:id', (req, res) => {
 });
 
 app.get('/api/telemetry', async (req, res) => {
-  const hostQuery = typeof req.query.host === 'string' ? req.query.host : undefined;
+  const hostQuery = (
+    typeof req.query.host === 'string' ? req.query.host :
+    typeof req.query.node === 'string' ? req.query.node :
+    typeof req.query.id === 'string' ? req.query.id : undefined
+  );
   const targetNode = findNode(hostQuery);
   const cached = hostCache.getHostTelemetry(targetNode.id);
   const CACHE_TTL_MS = 15000;

@@ -5,13 +5,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strconv"
 	"testing"
 )
 
 func TestFetchTelemetry_ParsesGlancesPayload(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/3/all" {
+		if r.URL.Path != "/api/4/all" && r.URL.Path != "/api/3/all" {
 			http.NotFound(w, r)
 			return
 		}
@@ -40,3 +41,18 @@ func TestFetchTelemetry_ParsesGlancesPayload(t *testing.T) {
 	}
 }
 
+func TestFetchTelemetry_LocalCLIFallback(t *testing.T) {
+	if _, err := exec.LookPath("glances"); err != nil {
+		t.Skip("glances CLI not installed on test host")
+	}
+
+	// Port 61209 is closed, should fall back to local glances CLI
+	client := NewClient("127.0.0.1", 61209)
+	telem, err := client.FetchTelemetry("dev-pc")
+	if err != nil {
+		t.Fatalf("expected CLI fallback to succeed for local host, got: %v", err)
+	}
+	if telem.NodeID != "dev-pc" || telem.MemoryTotalGiB <= 0 {
+		t.Errorf("unexpected telemetry from CLI fallback: %+v", telem)
+	}
+}

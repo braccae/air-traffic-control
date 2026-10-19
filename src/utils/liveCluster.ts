@@ -11,7 +11,7 @@ import type {
   PrivilegeStatus,
 } from '../types/index.ts';
 import { probeUnprivilegedPodmanUsers } from './orchestrator.ts';
-import { parseDockerPsOutput, separatePodsAndStandaloneContainers } from './podmanViewModel.ts';
+import { parseDockerPsOutput, separatePodsAndStandaloneContainers, calculatePodTotals } from './podmanViewModel.ts';
 import {
   wrapElevatedCommand,
   buildPrivilegeProbeCommand,
@@ -716,10 +716,10 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<Prob
         const parsed = JSON.parse(statsJsonStr.trim());
         if (Array.isArray(parsed)) {
           for (const s of parsed) {
-            const sid = String(s.ID || s.Id || s.Container || '').trim();
-            const sname = String(s.Name || '').trim();
-            const cpu = String(s.CPUPerc || s.CPU || s.cpu || '').trim();
-            const memRaw = String(s.MemUsage || s.Memory || s.memory || '').trim();
+            const sid = String(s.ID || s.Id || s.id || s.Container || '').trim();
+            const sname = String(s.Name || s.name || '').trim();
+            const cpu = String(s.cpu_percent || s.CPUPerc || s.CPU || s.cpu || '').trim();
+            const memRaw = String(s.mem_usage || s.MemUsage || s.Memory || s.memory || '').trim();
             const mem = memRaw.includes('/') ? memRaw.split('/')[0].trim() : memRaw;
             const entry = { cpu, memory: mem };
             if (sid) {
@@ -804,8 +804,12 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<Prob
             const pName = String(rp.Name || rp.Id || 'user-pod');
             const pId = String(rp.Id || pName);
             const memberContainers = userContainersList.filter(
-              c => c.podId === pId || c.podName === pName || c.podId === rp.Name
+              c =>
+                (c.podId && (c.podId.startsWith(pId) || pId.startsWith(c.podId))) ||
+                c.podName === pName ||
+                c.podId === rp.Name
             );
+            const podTotals = calculatePodTotals(memberContainers);
             userPodsList.push({
               id: pId,
               name: pName.startsWith('pod:') ? pName : `pod: ${pName}`,
@@ -813,8 +817,8 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<Prob
                 c.status.toLowerCase().includes('running') || c.status.toLowerCase().startsWith('up ')
               ).length,
               ports: rp.PortMappings || rp.Ports ? String(rp.PortMappings || rp.Ports) : `Host: ${node.tailscaleHost || 'local'}`,
-              totalCpu: '',
-              totalRam: '',
+              totalCpu: podTotals.totalCpu,
+              totalRam: podTotals.totalRam,
               user: uName,
               uid: uUid,
               rootless: true,

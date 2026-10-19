@@ -21,9 +21,9 @@ type ContainerStats struct {
 func (m *Manager) CollectStats(user string, uid int) (map[string]ContainerStats, error) {
 	var cmd string
 	if user == "" || user == "root" || uid == 0 {
-		cmd = "run0 --background=no podman stats --no-stream --format json 2>/dev/null || sudo -n podman stats --no-stream --format json 2>/dev/null || podman stats --no-stream --format json 2>/dev/null"
+		cmd = "run0 --background=no podman stats --no-stream --format json 2>/dev/null || sudo -n podman stats --no-stream --format json 2>/dev/null || doas -n podman stats --no-stream --format json 2>/dev/null || podman stats --no-stream --format json 2>/dev/null"
 	} else {
-		cmd = fmt.Sprintf("run0 --background=no --user %s podman stats --no-stream --format json 2>/dev/null || sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman stats --no-stream --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/%d podman stats --no-stream --format json 2>/dev/null", user, user, uid, uid)
+		cmd = fmt.Sprintf("run0 --background=no --user %s podman stats --no-stream --format json 2>/dev/null || sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman stats --no-stream --format json 2>/dev/null || doas -u %s XDG_RUNTIME_DIR=/run/user/%d podman stats --no-stream --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/%d podman stats --no-stream --format json 2>/dev/null", user, user, uid, user, uid, uid)
 	}
 
 	out, err := m.sshMgr.RunCommand(m.cfg, cmd)
@@ -41,14 +41,19 @@ func ParseStatsJSON(out string) (map[string]ContainerStats, error) {
 	}
 
 	var statsList []struct {
-		ID       string `json:"ID"`
-		Id       string `json:"Id"`
-		Name     string `json:"Name"`
-		CPUPerc  string `json:"CPUPerc"`
-		CPU      string `json:"CPU"`
-		MemUsage string `json:"MemUsage"`
-		Memory   string `json:"Memory"`
-		MemPerc  string `json:"MemPerc"`
+		ID         string `json:"id"`
+		IDUpper    string `json:"ID"`
+		IdAlt      string `json:"Id"`
+		Name       string `json:"name"`
+		NameUpper  string `json:"Name"`
+		CPUPerc    string `json:"cpu_percent"`
+		CPUPercAlt string `json:"CPUPerc"`
+		CPUAlt     string `json:"CPU"`
+		MemUsage   string `json:"mem_usage"`
+		MemAlt     string `json:"MemUsage"`
+		MemoryAlt  string `json:"Memory"`
+		MemPerc    string `json:"mem_percent"`
+		MemPercAlt string `json:"MemPerc"`
 	}
 
 	if err := json.Unmarshal([]byte(out), &statsList); err != nil {
@@ -59,26 +64,47 @@ func ParseStatsJSON(out string) (map[string]ContainerStats, error) {
 	for _, s := range statsList {
 		id := s.ID
 		if id == "" {
-			id = s.Id
+			id = s.IDUpper
 		}
+		if id == "" {
+			id = s.IdAlt
+		}
+
+		name := s.Name
+		if name == "" {
+			name = s.NameUpper
+		}
+
 		cpu := s.CPUPerc
 		if cpu == "" {
-			cpu = s.CPU
+			cpu = s.CPUPercAlt
 		}
+		if cpu == "" {
+			cpu = s.CPUAlt
+		}
+
 		mem := s.MemUsage
 		if mem == "" {
-			mem = s.Memory
+			mem = s.MemAlt
+		}
+		if mem == "" {
+			mem = s.MemoryAlt
 		}
 		if idx := strings.Index(mem, "/"); idx != -1 {
 			mem = strings.TrimSpace(mem[:idx])
 		}
 
+		memPerc := s.MemPerc
+		if memPerc == "" {
+			memPerc = s.MemPercAlt
+		}
+
 		stat := ContainerStats{
 			ID:       id,
-			Name:     s.Name,
+			Name:     name,
 			CPUPerc:  cpu,
 			MemUsage: mem,
-			MemPerc:  s.MemPerc,
+			MemPerc:  memPerc,
 		}
 
 		if id != "" {

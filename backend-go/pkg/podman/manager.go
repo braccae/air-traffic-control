@@ -235,7 +235,22 @@ func (m *Manager) ProbeUnprivilegedUsers() ([]types.UnprivilegedPodmanUser, erro
 				containers = fallback
 			}
 		}
+		if stats, sErr := m.CollectStats(cand.User, cand.UID); sErr == nil && len(stats) > 0 {
+			EnrichContainersWithStats(containers, stats)
+		}
+
 		pods, _ := m.listUserPods(cand.User, cand.UID)
+		for pi := range pods {
+			p := &pods[pi]
+			var podContainers []types.PodmanContainer
+			for _, c := range containers {
+				if matchesPod(c, *p) {
+					podContainers = append(podContainers, c)
+				}
+			}
+			p.Containers = podContainers
+			p.TotalCPU, p.TotalMemory = computePodTotals(podContainers)
+		}
 
 		if len(containers) > 0 || len(pods) > 0 {
 			cand.Containers = containers
@@ -311,12 +326,16 @@ func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContai
 	}
 
 	var rawContainers []struct {
-		ID     string      `json:"Id"`
-		Names  interface{} `json:"Names"`
-		Image  string      `json:"Image"`
-		State  string      `json:"State"`
-		Status string      `json:"Status"`
-		Pod    string      `json:"Pod"`
+		ID      string      `json:"Id"`
+		IdAlt   string      `json:"ID"`
+		IdAlt2  string      `json:"id"`
+		Names   interface{} `json:"Names"`
+		Image   string      `json:"Image"`
+		State   string      `json:"State"`
+		Status  string      `json:"Status"`
+		Pod     string      `json:"Pod"`
+		PodName string      `json:"PodName"`
+		PodId   string      `json:"PodId"`
 	}
 
 	if err := json.Unmarshal([]byte(out), &rawContainers); err != nil {
@@ -325,7 +344,15 @@ func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContai
 
 	var containers []types.PodmanContainer
 	for _, rc := range rawContainers {
-		name := rc.ID
+		cid := rc.ID
+		if cid == "" {
+			cid = rc.IdAlt
+		}
+		if cid == "" {
+			cid = rc.IdAlt2
+		}
+
+		name := cid
 		switch v := rc.Names.(type) {
 		case []interface{}:
 			if len(v) > 0 {
@@ -350,9 +377,16 @@ func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContai
 			continue
 		}
 
+		podID := rc.Pod
+		if podID == "" {
+			podID = rc.PodId
+		}
+		podName := rc.PodName
+
 		containers = append(containers, types.PodmanContainer{
-			ID:       rc.ID,
-			PodID:    rc.Pod,
+			ID:       cid,
+			PodID:    podID,
+			PodName:  podName,
 			Name:     name,
 			Image:    rc.Image,
 			Status:   status,
@@ -364,8 +398,113 @@ func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContai
 	return containers, nil
 }
 
+func matchesPod(c types.PodmanContainer, p types.PodmanPod) bool {
+	podID := strings.TrimSpace(c.PodID)
+	podName := strings.TrimSpace(c.PodName)
+	pID := strings.TrimSpace(p.ID)
+	pName := strings.TrimSpace(p.Name)
+
+	if podID != "" {
+		if podID == pID || podID == pName {
+			return true
+		}
+		if pID != "" && (strings.HasPrefix(podID, pID) || strings.HasPrefix(pID, podID)) {
+			return true
+		}
+	}
+	if podName != "" {
+		if podName == pName || podName == pID {
+			return true
+		}
+		cleanName := strings.TrimPrefix(pName, "pod: ")
+		if podName == cleanName {
+			return true
+		}
+	}
+	return false
+}
+
+func computePodTotals(containers []types.PodmanContainer) (string, string) {
+	var totalCPU float64
+	var totalMemBytes float64
+	var hasCPU, hasMem bool
+
+	for _, c := range containers {
+		if c.CPU != "" {
+			trimmed := strings.TrimSpace(strings.TrimSuffix(c.CPU, "%"))
+			if val, err := strconv.ParseFloat(trimmed, 64); err == nil {
+				totalCPU += val
+				hasCPU = true
+			}
+		}
+		if c.Memory != "" {
+			bytes := parseMemStringToBytes(c.Memory)
+			if bytes > 0 {
+				totalMemBytes += bytes
+				hasMem = true
+			}
+		}
+	}
+
+	cpuStr := ""
+	if hasCPU {
+		cpuStr = fmt.Sprintf("%.2f%%", totalCPU)
+	}
+
+	memStr := ""
+	if hasMem {
+		if totalMemBytes >= 1024*1024*1024 {
+			memStr = fmt.Sprintf("%.2f GiB", totalMemBytes/(1024*1024*1024))
+		} else if totalMemBytes >= 1024*1024 {
+			memStr = fmt.Sprintf("%.1f MiB", totalMemBytes/(1024*1024))
+		} else if totalMemBytes >= 1024 {
+			memStr = fmt.Sprintf("%.0f KiB", totalMemBytes/1024)
+		} else {
+			memStr = fmt.Sprintf("%.0f B", totalMemBytes)
+		}
+	}
+
+	return cpuStr, memStr
+}
+
+func parseMemStringToBytes(mem string) float64 {
+	mem = strings.TrimSpace(mem)
+	if idx := strings.Index(mem, "/"); idx != -1 {
+		mem = strings.TrimSpace(mem[:idx])
+	}
+	var multiplier float64 = 1
+	var numStr string
+
+	for i, ch := range mem {
+		if (ch >= '0' && ch <= '9') || ch == '.' {
+			continue
+		}
+		numStr = strings.TrimSpace(mem[:i])
+		unit := strings.ToLower(strings.TrimSpace(mem[i:]))
+		switch {
+		case strings.HasPrefix(unit, "g"):
+			multiplier = 1024 * 1024 * 1024
+		case strings.HasPrefix(unit, "m"):
+			multiplier = 1024 * 1024
+		case strings.HasPrefix(unit, "k"):
+			multiplier = 1024
+		case strings.HasPrefix(unit, "b"):
+			multiplier = 1
+		}
+		break
+	}
+	if numStr == "" {
+		numStr = mem
+	}
+	val, err := strconv.ParseFloat(numStr, 64)
+	if err != nil {
+		return 0
+	}
+	return val * multiplier
+}
+
 func (m *Manager) listUserContainers(user string, uid int) ([]types.PodmanContainer, error) {
-	cmd := fmt.Sprintf("run0 --background=no --user %s podman ps --format json 2>/dev/null || cd / && sudo -n -i -u %s XDG_RUNTIME_DIR=/run/user/%d podman ps --format json", user, user, uid)
+	cmd := fmt.Sprintf("run0 --background=no --user %s podman ps --format json 2>/dev/null || (cd / && sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman ps --format json 2>/dev/null) || (cd / && doas -u %s XDG_RUNTIME_DIR=/run/user/%d podman ps --format json 2>/dev/null) || su - %s -s /bin/sh -c \"XDG_RUNTIME_DIR=/run/user/%d podman ps --format json\" 2>/dev/null || XDG_RUNTIME_DIR=/run/user/%d podman ps --format json", user, user, uid, user, uid, user, uid, uid)
 	out, err := m.sshMgr.RunCommand(m.cfg, cmd)
 	if err != nil {
 		suCmd := fmt.Sprintf("su - %s -s /bin/sh -c \"XDG_RUNTIME_DIR=/run/user/%d podman ps --format json\"", user, uid)
@@ -382,7 +521,7 @@ func (m *Manager) listUserContainers(user string, uid int) ([]types.PodmanContai
 }
 
 func (m *Manager) listUserPods(user string, uid int) ([]types.PodmanPod, error) {
-	cmd := fmt.Sprintf("run0 --background=no --user %s podman pod ps --format json 2>/dev/null || cd / && sudo -n -i -u %s XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json", user, user, uid)
+	cmd := fmt.Sprintf("run0 --background=no --user %s podman pod ps --format json 2>/dev/null || (cd / && sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json 2>/dev/null) || (cd / && doas -u %s XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json 2>/dev/null) || su - %s -s /bin/sh -c \"XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json\" 2>/dev/null || XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json", user, user, uid, user, uid, user, uid, uid)
 	out, err := m.sshMgr.RunCommand(m.cfg, cmd)
 	if err != nil {
 		suCmd := fmt.Sprintf("su - %s -s /bin/sh -c \"XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json\"", user, uid)
@@ -403,6 +542,8 @@ func (m *Manager) listUserPods(user string, uid int) ([]types.PodmanPod, error) 
 
 	var rawPods []struct {
 		ID     string `json:"Id"`
+		IdAlt  string `json:"ID"`
+		IdAlt2 string `json:"id"`
 		Name   string `json:"Name"`
 		Status string `json:"Status"`
 	}
@@ -413,8 +554,15 @@ func (m *Manager) listUserPods(user string, uid int) ([]types.PodmanPod, error) 
 
 	var pods []types.PodmanPod
 	for _, rp := range rawPods {
+		pid := rp.ID
+		if pid == "" {
+			pid = rp.IdAlt
+		}
+		if pid == "" {
+			pid = rp.IdAlt2
+		}
 		pods = append(pods, types.PodmanPod{
-			ID:       rp.ID,
+			ID:       pid,
 			Name:     rp.Name,
 			Status:   rp.Status,
 			User:     user,
@@ -429,9 +577,12 @@ func (m *Manager) listUserPods(user string, uid int) ([]types.PodmanPod, error) 
 func (m *Manager) ListAllContainers() ([]types.PodmanContainer, error) {
 	var all []types.PodmanContainer
 
-	out, err := m.sshMgr.RunCommand(m.cfg, "run0 --background=no podman ps --all --format json 2>/dev/null || podman ps --all --format json")
+	out, err := m.sshMgr.RunCommand(m.cfg, "run0 --background=no podman ps --all --format json 2>/dev/null || sudo -n podman ps --all --format json 2>/dev/null || doas -n podman ps --all --format json 2>/dev/null || podman ps --all --format json")
 	if err == nil {
 		if rootContainers, parseErr := parseContainersJSON(out, "root", 0); parseErr == nil {
+			if rootStats, sErr := m.CollectStats("root", 0); sErr == nil && len(rootStats) > 0 {
+				EnrichContainersWithStats(rootContainers, rootStats)
+			}
 			all = append(all, rootContainers...)
 		}
 	}
@@ -451,26 +602,50 @@ func (m *Manager) ListAllContainers() ([]types.PodmanContainer, error) {
 func (m *Manager) ListPods() ([]types.PodmanPod, error) {
 	var pods []types.PodmanPod
 
-	cmd := "run0 --background=no podman pod ps --format json 2>/dev/null || podman pod ps --format json"
+	cmd := "run0 --background=no podman pod ps --format json 2>/dev/null || sudo -n podman pod ps --format json 2>/dev/null || doas -n podman pod ps --format json 2>/dev/null || podman pod ps --format json"
 	out, rootErr := m.sshMgr.RunCommand(m.cfg, cmd)
 	if rootErr == nil {
 		var rawPods []struct {
 			ID     string `json:"Id"`
+			IdAlt  string `json:"ID"`
+			IdAlt2 string `json:"id"`
 			Name   string `json:"Name"`
 			Status string `json:"Status"`
 		}
 		if parseErr := json.Unmarshal([]byte(out), &rawPods); parseErr != nil {
 			rootErr = fmt.Errorf("failed to parse pods json: %w", parseErr)
 		} else {
+			rootContainersOut, _ := m.sshMgr.RunCommand(m.cfg, "run0 --background=no podman ps --all --format json 2>/dev/null || sudo -n podman ps --all --format json 2>/dev/null || doas -n podman ps --all --format json 2>/dev/null || podman ps --all --format json")
+			rootContainers, _ := parseContainersJSON(rootContainersOut, "root", 0)
+			if rootStats, sErr := m.CollectStats("root", 0); sErr == nil && len(rootStats) > 0 {
+				EnrichContainersWithStats(rootContainers, rootStats)
+			}
+
 			for _, rp := range rawPods {
-				pods = append(pods, types.PodmanPod{
-					ID:       rp.ID,
+				pid := rp.ID
+				if pid == "" {
+					pid = rp.IdAlt
+				}
+				if pid == "" {
+					pid = rp.IdAlt2
+				}
+				pod := types.PodmanPod{
+					ID:       pid,
 					Name:     rp.Name,
 					Status:   rp.Status,
 					User:     "root",
 					UID:      0,
 					Rootless: false,
-				})
+				}
+				var podContainers []types.PodmanContainer
+				for _, c := range rootContainers {
+					if matchesPod(c, pod) {
+						podContainers = append(podContainers, c)
+					}
+				}
+				pod.Containers = podContainers
+				pod.TotalCPU, pod.TotalMemory = computePodTotals(podContainers)
+				pods = append(pods, pod)
 			}
 		}
 	}
@@ -479,16 +654,7 @@ func (m *Manager) ListPods() ([]types.PodmanPod, error) {
 	unprivUsers, probeErr := m.ProbeUnprivilegedUsers()
 	if probeErr == nil {
 		for _, u := range unprivUsers {
-			for _, p := range u.Pods {
-				var podContainers []types.PodmanContainer
-				for _, c := range u.Containers {
-					if c.PodID == p.ID {
-						podContainers = append(podContainers, c)
-					}
-				}
-				p.Containers = podContainers
-				pods = append(pods, p)
-			}
+			pods = append(pods, u.Pods...)
 		}
 	}
 
