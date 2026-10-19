@@ -372,9 +372,15 @@ export function filterContainersByStatus(
 ): ContainerItem[] {
   if (filter === 'all') return containers;
   if (filter === 'running') {
-    return containers.filter(c => c.status.toLowerCase().includes('running'));
+    return containers.filter(c => {
+      const s = (c.status || '').toLowerCase();
+      return s.includes('running') || s.startsWith('up ');
+    });
   }
-  return containers.filter(c => !c.status.toLowerCase().includes('running'));
+  return containers.filter(c => {
+    const s = (c.status || '').toLowerCase();
+    return !s.includes('running') && !s.startsWith('up ');
+  });
 }
 
 /**

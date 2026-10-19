@@ -9,8 +9,10 @@ import type {
 import {
   countPodmanStatuses,
   filterPodsByStatus,
-  filterStandaloneDaemons,
   mergeLiveProbeIntoPods,
+  getContainerSecurityBadge,
+  groupStandaloneContainersByUser,
+  filterUserContainerGroups,
 } from '../utils/podmanViewModel.ts';
 
 interface PodmanManagerProps {
@@ -29,8 +31,12 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
   onRestartPod,
 }) => {
   const [filter, setFilter] = useState<'all' | 'running' | 'stopped'>('all');
+  const [activeTab, setActiveTab] = useState<'all' | 'podman' | 'docker'>('all');
   const [probedUsers, setProbedUsers] = useState<UnprivilegedPodmanUser[]>([]);
   const [rootContainers, setRootContainers] = useState<ContainerItem[]>([]);
+  const [rootPods, setRootPods] = useState<PodItem[]>([]);
+  const [hasDocker, setHasDocker] = useState(false);
+  const [dockerContainers, setDockerContainers] = useState<ContainerItem[]>([]);
   const [customPods, setCustomPods] = useState<PodItem[]>([]);
   const [standaloneState, setStandaloneState] = useState<StandaloneDaemon[]>([]);
   const [loading, setLoading] = useState(false);
@@ -56,22 +62,30 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
         if (Array.isArray(data?.probedUsers)) {
           setProbedUsers(data.probedUsers);
         }
+        if (Array.isArray(data?.rootPods)) {
+          setRootPods(data.rootPods);
+        }
+        setHasDocker(Boolean(data?.hasDocker));
+        if (Array.isArray(data?.dockerContainers)) {
+          setDockerContainers(data.dockerContainers);
+        }
         if (Array.isArray(data?.rootContainers)) {
-          setRootContainers(
-            data.rootContainers.map((c: any) => ({
-              id: c.id,
-              name: c.name,
-              image: c.image,
-              status: c.status,
-              cpu: '0.4%',
-              memory: '96 MiB',
-              user: c.user || 'root',
-              uid: c.uid ?? 0,
-              rootless: Boolean(c.rootless),
-            }))
-          );
+          const mapped: ContainerItem[] = data.rootContainers.map((c: any) => ({
+            id: c.id,
+            name: c.name,
+            image: c.image,
+            status: c.status,
+            cpu: c.cpu || '0.4%',
+            memory: c.memory || '96 MiB',
+            user: c.user || 'root',
+            uid: c.uid ?? 0,
+            rootless: Boolean(c.rootless),
+            podId: c.podId,
+            podName: c.podName,
+          }));
+          setRootContainers(mapped);
           setStandaloneState(
-            data.rootContainers.slice(0, 6).map((c: any) => ({
+            mapped.slice(0, 6).map((c: any) => ({
               name: c.name,
               subtext: `${c.image} (${c.user || 'root'}:${c.uid ?? 0})`,
               status: String(c.status).toLowerCase().includes('exited') ? 'exited' : 'running',
@@ -110,19 +124,6 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
     });
   };
 
-  const handleStartStandalone = (name: string) => {
-    setStandaloneState(prev =>
-      prev.map(item =>
-        item.name === name ? { ...item, status: 'running', memory: '32 MiB' } : item
-      )
-    );
-    fetch('/api/podman/action', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host: hostParam, container: name, action: 'start' }),
-    }).catch(() => {});
-  };
-
   const handleCreatePodSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newPodName.trim()) return;
@@ -134,7 +135,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
       totalCpu: '0.1%',
       totalRam: '16 MiB',
       user: newPodUser,
-      uid: 1000,
+      uid: newPodUser === 'root' ? 0 : 1000,
       rootless: newPodUser !== 'root',
       containers: [
         {
@@ -145,7 +146,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
           cpu: '0.01%',
           memory: '8 MiB',
           user: newPodUser,
-          uid: 1000,
+          uid: newPodUser === 'root' ? 0 : 1000,
           rootless: newPodUser !== 'root',
         },
       ],
@@ -159,14 +160,15 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
   const handleRunContainerSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newContainerName.trim()) return;
+    const isRoot = newContainerUser === 'root';
     const newDaemon: StandaloneDaemon = {
       name: newContainerName.trim(),
-      subtext: `${newContainerImage} (${newContainerUser}:1000)`,
+      subtext: `${newContainerImage} (${newContainerUser}:${isRoot ? 0 : 1000})`,
       status: 'running',
       memory: '32 MiB',
       user: newContainerUser,
-      uid: 1000,
-      rootless: newContainerUser !== 'root',
+      uid: isRoot ? 0 : 1000,
+      rootless: !isRoot,
     };
     setStandaloneState(prev => [newDaemon, ...prev]);
     setNewContainerName('');
@@ -174,43 +176,124 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
     onRestartPod(newDaemon.name);
   };
 
-  const systemPods: PodItem[] =
-    rootContainers.length > 0
-      ? [
-          {
-            id: `system-${hostParam}`,
-            name: `pod: system-services (${selectedNode?.shortName || 'host'})`,
-            containersRunningCount: rootContainers.filter(
-              c =>
-                c.status.toLowerCase().includes('running') ||
-                c.status.toLowerCase().startsWith('up ')
-            ).length,
-            ports: `Host: ${selectedNode?.tailscaleHost || 'local'}`,
-            totalCpu: '1.8%',
-            totalRam: `${Math.max(128, rootContainers.length * 64)} MiB`,
-            user: 'root',
-            uid: 0,
-            rootless: false,
-            containers: rootContainers,
-          },
-        ]
-      : [];
+  // Combine custom pods and root pods, and merge probed users
+  const allPods = mergeLiveProbeIntoPods([...customPods, ...rootPods], probedUsers);
 
-  const allPods = mergeLiveProbeIntoPods([...customPods, ...systemPods], probedUsers);
-  const statusCounts = countPodmanStatuses(allPods, standaloneState);
+  // Extract all container IDs that belong to a pod
+  const podContainerIds = new Set<string>();
+  for (const pod of allPods) {
+    for (const c of pod.containers) {
+      if (c.id) podContainerIds.add(c.id);
+      if (c.name) podContainerIds.add(c.name);
+    }
+  }
+
+  // Standalone containers are all containers not inside a pod
+  const standaloneContainers: ContainerItem[] = [];
+
+  for (const c of rootContainers) {
+    if (!podContainerIds.has(c.id) && !podContainerIds.has(c.name)) {
+      standaloneContainers.push(c);
+    }
+  }
+
+  for (const s of standaloneState) {
+    if (!podContainerIds.has(s.name) && !standaloneContainers.some(c => c.name === s.name)) {
+      standaloneContainers.push({
+        id: s.name,
+        name: s.name,
+        image: s.subtext,
+        status: s.status === 'running' ? 'Running' : 'Exited (0)',
+        cpu: '0.1%',
+        memory: s.memory,
+        user: s.user || 'root',
+        uid: s.uid ?? 0,
+        rootless: s.rootless ?? false,
+      });
+    }
+  }
+
+  for (const u of probedUsers) {
+    for (const c of u.containers) {
+      if (
+        !podContainerIds.has(c.id) &&
+        !podContainerIds.has(c.name) &&
+        !standaloneContainers.some(sc => sc.id === c.id || sc.name === c.name)
+      ) {
+        standaloneContainers.push({
+          ...c,
+          user: u.user,
+          uid: u.uid,
+          rootless: u.uid !== 0,
+        });
+      }
+    }
+  }
+
+  const userStandaloneGroups = groupStandaloneContainersByUser(standaloneContainers);
+  const filteredUserGroups = filterUserContainerGroups(userStandaloneGroups, filter);
   const filteredPods = filterPodsByStatus(allPods, filter);
-  const filteredDaemons = filterStandaloneDaemons(standaloneState, filter);
+
+  const filteredDocker = dockerContainers.filter(c => {
+    if (filter === 'all') return true;
+    const s = (c.status || '').toLowerCase();
+    const isRunning = s.includes('running') || s.startsWith('up ');
+    return filter === 'running' ? isRunning : !isRunning;
+  });
+
+  const statusCounts = countPodmanStatuses(allPods, standaloneContainers, dockerContainers);
 
   return (
     <section className="bg-[#171a2d] rounded p-3 flex flex-col border border-[#26293c]">
       {/* Header bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 pb-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="material-symbols-outlined text-[#d9b9ff] text-[20px]">token</span>
           <span className="font-sans text-sm text-[#dfe1fa] font-semibold">
             Podman &amp; Container Runtime ({selectedNode?.shortName || 'host'})
           </span>
 
+          {/* Tab selector */}
+          <div className="flex items-center bg-[#26293c] p-0.5 rounded font-mono text-xs border border-[#434750]/40">
+            <button
+              type="button"
+              onClick={() => setActiveTab('all')}
+              className={`px-2 py-0.5 rounded cursor-pointer transition-colors ${
+                activeTab === 'all'
+                  ? 'bg-[#35384c] text-[#dfe1fa] font-bold shadow-xs'
+                  : 'text-[#8d909b] hover:text-[#dfe1fa]'
+              }`}
+            >
+              All ({statusCounts.all + (hasDocker ? dockerContainers.length : 0)})
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('podman')}
+              className={`px-2 py-0.5 rounded cursor-pointer transition-colors ${
+                activeTab === 'podman'
+                  ? 'bg-[#35384c] text-[#8cd6cb] font-bold shadow-xs'
+                  : 'text-[#8d909b] hover:text-[#8cd6cb]'
+              }`}
+            >
+              Podman Hierarchy ({statusCounts.all})
+            </button>
+            {hasDocker && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('docker')}
+                className={`px-2 py-0.5 rounded cursor-pointer transition-colors flex items-center gap-1 ${
+                  activeTab === 'docker'
+                    ? 'bg-[#35384c] text-[#b0c9ff] font-bold shadow-xs'
+                    : 'text-[#8d909b] hover:text-[#b0c9ff]'
+                }`}
+              >
+                <span className="material-symbols-outlined text-[13px]">deployed_code</span>
+                <span>Docker Engine ({dockerContainers.length})</span>
+              </button>
+            )}
+          </div>
+
+          {/* Status filter buttons */}
           <div className="flex items-center bg-[#313447] px-2 py-0.5 rounded font-mono text-xs gap-2 border border-[#434750]/40">
             <button
               type="button"
@@ -397,123 +480,382 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
         </form>
       )}
 
-      {/* Pods list */}
-      <div className="space-y-2 mt-1 font-mono text-xs">
-        {filteredPods.length === 0 ? (
-          <div className="bg-[#1b1e31] rounded p-3 text-[#8d909b] border border-[#26293c] text-center">
-            No matching Podman pods or containers on {selectedNode?.name || 'this node'} for filter &ldquo;{filter}&rdquo;.
-          </div>
-        ) : (
-          filteredPods.map(pod => (
-            <div key={pod.id} className="bg-[#1b1e31] rounded p-2 border border-[#26293c]">
-              {/* Pod header */}
-              <div className="flex items-center justify-between pb-1.5">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="material-symbols-outlined text-[#d9b9ff] text-[16px]">
-                    folder_special
-                  </span>
-                  <span className="text-[#dfe1fa] font-bold text-xs">{pod.name}</span>
-                  <span className="px-1.5 py-0.2 bg-[#8cd6cb]/20 text-[#8cd6cb] rounded text-[10px] border border-[#8cd6cb]/30">
-                    {pod.containersRunningCount} Containers Running
-                  </span>
-                  {pod.user && (
-                    <span className="px-1.5 py-0.2 bg-[#b0c9ff]/15 text-[#b0c9ff] rounded text-[10px] border border-[#b0c9ff]/30">
-                      {pod.rootless ? 'rootless' : 'system'}: {pod.user} ({pod.uid ?? 0})
-                    </span>
-                  )}
-                  <span className="text-[#8d909b] text-[11px]">{pod.ports}</span>
-                </div>
+      {/* Main Content Area */}
+      <div className="space-y-3 mt-1 font-mono text-xs">
+        {/* SECTION 1: PODS & MEMBER CONTAINERS */}
+        {(activeTab === 'all' || activeTab === 'podman') && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between pb-1 border-b border-[#26293c]/60">
+              <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold text-[#dfe1fa] uppercase tracking-wider">
+                <span className="material-symbols-outlined text-[#d9b9ff] text-[16px]">folder_special</span>
+                <span>PODMAN PODS &amp; MEMBER CONTAINERS ({filteredPods.length})</span>
+              </div>
+              <span className="text-[10px] text-[#8d909b] font-mono">
+                {filteredPods.reduce((acc, p) => acc + p.containers.length, 0)} member containers
+              </span>
+            </div>
 
-                <div className="flex items-center gap-3">
-                  <span className="text-[#8d909b]">
-                    CPU: <strong className="text-[#dfe1fa]">{pod.totalCpu}</strong>
-                  </span>
-                  <span className="text-[#8d909b]">
-                    RAM: <strong className="text-[#dfe1fa]">{pod.totalRam}</strong>
-                  </span>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => onRestartPod(pod.name)}
-                      className="p-1 bg-[#26293c] hover:bg-[#35384c] text-[#8cd6cb] rounded cursor-pointer border border-[#434750]/30"
-                      title="Restart Pod"
-                    >
-                      <span className="material-symbols-outlined text-[14px]">refresh</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onOpenLogs(pod.name)}
-                      className="p-1 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded cursor-pointer border border-[#434750]/30"
-                      title="Pod Logs"
-                    >
-                      <span className="material-symbols-outlined text-[14px]">terminal</span>
-                    </button>
+            {filteredPods.length === 0 ? (
+              <div className="bg-[#1b1e31] rounded p-3 text-[#8d909b] border border-[#26293c] text-center">
+                No matching Podman pods on {selectedNode?.name || 'this node'} for filter &ldquo;{filter}&rdquo;.
+              </div>
+            ) : (
+              filteredPods.map(pod => {
+                const badgeInfo = getContainerSecurityBadge(pod.user, pod.uid, pod.rootless);
+                return (
+                  <div key={pod.id} className="bg-[#1b1e31] rounded p-2 border border-[#26293c]">
+                    {/* Pod header */}
+                    <div className="flex items-center justify-between pb-1.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="material-symbols-outlined text-[#d9b9ff] text-[16px]">
+                          folder_special
+                        </span>
+                        <span className="text-[#dfe1fa] font-bold text-xs">{pod.name}</span>
+                        <span className="px-1.5 py-0.2 bg-[#8cd6cb]/20 text-[#8cd6cb] rounded text-[10px] border border-[#8cd6cb]/30">
+                          {pod.containersRunningCount} Containers Running
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                            badgeInfo.isRootful
+                              ? 'bg-[#ffd97d]/15 text-[#ffd97d] border-[#ffd97d]/30'
+                              : 'bg-[#8cd6cb]/15 text-[#8cd6cb] border-[#8cd6cb]/30'
+                          }`}
+                        >
+                          {badgeInfo.label}
+                        </span>
+                        {pod.user && (
+                          <span className="px-1.5 py-0.2 bg-[#b0c9ff]/15 text-[#b0c9ff] rounded text-[10px] border border-[#b0c9ff]/30">
+                            user: {pod.user} ({pod.uid ?? 0})
+                          </span>
+                        )}
+                        <span className="text-[#8d909b] text-[11px]">{pod.ports}</span>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <span className="text-[#8d909b]">
+                          CPU: <strong className="text-[#dfe1fa]">{pod.totalCpu}</strong>
+                        </span>
+                        <span className="text-[#8d909b]">
+                          RAM: <strong className="text-[#dfe1fa]">{pod.totalRam}</strong>
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => onRestartPod(pod.name)}
+                            className="p-1 bg-[#26293c] hover:bg-[#35384c] text-[#8cd6cb] rounded cursor-pointer border border-[#434750]/30"
+                            title="Restart Pod"
+                          >
+                            <span className="material-symbols-outlined text-[14px]">refresh</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onOpenLogs(pod.name)}
+                            className="p-1 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded cursor-pointer border border-[#434750]/30"
+                            title="Pod Logs"
+                          >
+                            <span className="material-symbols-outlined text-[14px]">terminal</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Containers Table */}
+                    <div className="overflow-x-auto mt-1">
+                      <table className="w-full text-left">
+                        <thead className="bg-[#0a0d1f]/70 text-[#8d909b] text-[10px]">
+                          <tr className="h-6">
+                            <th className="px-2">Container Name</th>
+                            <th className="px-2">User (UID)</th>
+                            <th className="px-2">Image</th>
+                            <th className="px-2">Status</th>
+                            <th className="px-2">CPU</th>
+                            <th className="px-2">Memory</th>
+                            <th className="px-2 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#26293c]/50">
+                          {pod.containers.map(c => (
+                            <tr key={c.id} className="h-7 hover:bg-[#26293c]/40 transition-colors">
+                              <td className="px-2 text-[#dfe1fa] font-medium flex items-center gap-1.5">
+                                <span
+                                  className={`w-1.5 h-1.5 rounded-full ${
+                                    c.status.toLowerCase().includes('exited')
+                                      ? 'bg-[#ffb4ab]'
+                                      : 'bg-[#8cd6cb]'
+                                  }`}
+                                ></span>
+                                <span>{c.name}</span>
+                              </td>
+                              <td className="px-2 text-[#b0c9ff]">
+                                {c.user ? `${c.user}:${c.uid ?? 0}` : 'root:0'}
+                              </td>
+                              <td className="px-2 text-[#8d909b] truncate max-w-xs">{c.image}</td>
+                              <td className="px-2">
+                                <span
+                                  className={
+                                    c.status.toLowerCase().includes('exited')
+                                      ? 'text-[#ffb4ab]'
+                                      : 'text-[#8cd6cb]'
+                                  }
+                                >
+                                  {c.status}
+                                </span>
+                              </td>
+                              <td className="px-2 text-[#dfe1fa]">{c.cpu}</td>
+                              <td className="px-2 text-[#dfe1fa]">{c.memory}</td>
+                              <td className="px-2 text-right space-x-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleContainerAction(c, 'restart')}
+                                  className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#ffd97d] rounded text-[10px] cursor-pointer"
+                                >
+                                  Restart
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenExec(c.name)}
+                                  className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#8cd6cb] rounded text-[10px] cursor-pointer"
+                                >
+                                  Exec
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenLogs(c.name)}
+                                  className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded text-[10px] cursor-pointer"
+                                >
+                                  Logs
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+
+        {/* SECTION 2: STANDALONE CONTAINERS GROUPED BY USER */}
+        {(activeTab === 'all' || activeTab === 'podman') && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between pb-1 pt-1 border-b border-[#26293c]/60">
+              <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold text-[#dfe1fa] uppercase tracking-wider">
+                <span className="material-symbols-outlined text-[#8cd6cb] text-[16px]">group_work</span>
+                <span>STANDALONE CONTAINERS (GROUPED BY USER) ({filteredUserGroups.length} Users)</span>
+              </div>
+              <span className="text-[10px] text-[#8d909b] font-mono">
+                {filteredUserGroups.reduce((acc, g) => acc + g.totalContainers, 0)} unpodded containers
+              </span>
+            </div>
+
+            {filteredUserGroups.length === 0 ? (
+              <div className="bg-[#1b1e31] rounded p-3 text-[#8d909b] border border-[#26293c] text-center">
+                No standalone containers matching filter &ldquo;{filter}&rdquo;.
+              </div>
+            ) : (
+              filteredUserGroups.map(group => (
+                <div key={group.user} className="bg-[#1b1e31] rounded p-2.5 border border-[#26293c]">
+                  {/* User group header */}
+                  <div className="flex items-center justify-between pb-2 border-b border-[#26293c]/40 flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="material-symbols-outlined text-[#8cd6cb] text-[18px]">
+                        {group.user === 'root' || group.user === 'core' ? 'badge' : 'deployed_code'}
+                      </span>
+                      <span className="text-[#dfe1fa] font-bold text-xs">
+                        {group.user === 'root' ? 'root (System)' : `user: ${group.user}`}
+                      </span>
+                      <span className="text-[#8d909b] text-[11px] font-mono">
+                        UID {group.uid}
+                      </span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                          !group.rootless
+                            ? 'bg-[#ffd97d]/15 text-[#ffd97d] border-[#ffd97d]/30'
+                            : 'bg-[#8cd6cb]/15 text-[#8cd6cb] border-[#8cd6cb]/30'
+                        }`}
+                      >
+                        {group.badge}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2 text-[10px] font-mono">
+                      <span className="px-1.5 py-0.5 bg-[#26293c] text-[#dfe1fa] rounded border border-[#434750]/30">
+                        Total: <strong>{group.totalContainers}</strong>
+                      </span>
+                      <span className="px-1.5 py-0.5 bg-[#8cd6cb]/15 text-[#8cd6cb] rounded border border-[#8cd6cb]/30">
+                        Running: <strong>{group.runningContainers}</strong>
+                      </span>
+                      <span className="px-1.5 py-0.5 bg-[#ffb4ab]/15 text-[#ffb4ab] rounded border border-[#ffb4ab]/30">
+                        Stopped: <strong>{group.stoppedContainers}</strong>
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* User containers table */}
+                  <div className="overflow-x-auto mt-1">
+                    <table className="w-full text-left font-mono text-xs">
+                      <thead className="bg-[#0a0d1f]/70 text-[#8d909b] text-[10px]">
+                        <tr className="h-6">
+                          <th className="px-2">Container Name</th>
+                          <th className="px-2">Image</th>
+                          <th className="px-2">Status</th>
+                          <th className="px-2">CPU</th>
+                          <th className="px-2">Memory</th>
+                          <th className="px-2 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#26293c]/50">
+                        {group.containers.map(c => (
+                          <tr key={c.id || c.name} className="h-7 hover:bg-[#26293c]/40 transition-colors">
+                            <td className="px-2 text-[#dfe1fa] font-medium flex items-center gap-1.5">
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  c.status.toLowerCase().includes('exited')
+                                    ? 'bg-[#ffb4ab]'
+                                    : 'bg-[#8cd6cb]'
+                                }`}
+                              ></span>
+                              <span>{c.name}</span>
+                            </td>
+                            <td className="px-2 text-[#8d909b] truncate max-w-xs">{c.image}</td>
+                            <td className="px-2">
+                              <span
+                                className={
+                                  c.status.toLowerCase().includes('exited')
+                                    ? 'text-[#ffb4ab]'
+                                    : 'text-[#8cd6cb]'
+                                }
+                              >
+                                {c.status}
+                              </span>
+                            </td>
+                            <td className="px-2 text-[#dfe1fa]">{c.cpu}</td>
+                            <td className="px-2 text-[#dfe1fa]">{c.memory}</td>
+                            <td className="px-2 text-right space-x-1">
+                              <button
+                                type="button"
+                                onClick={() => handleContainerAction(c, 'restart')}
+                                className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#ffd97d] rounded text-[10px] cursor-pointer"
+                              >
+                                Restart
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onOpenExec(c.name)}
+                                className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#8cd6cb] rounded text-[10px] cursor-pointer"
+                              >
+                                Exec
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onOpenLogs(c.name)}
+                                className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded text-[10px] cursor-pointer"
+                              >
+                                Logs
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
-              </div>
+              ))
+            )}
+          </div>
+        )}
 
-              {/* Containers Table */}
+        {/* SECTION 3: DOCKER ENGINE CONTAINERS */}
+        {(activeTab === 'all' || activeTab === 'docker') && (hasDocker || activeTab === 'docker') && (
+          <div className="bg-[#1b1e31] rounded p-2.5 border border-[#26293c] mt-2">
+            <div className="flex items-center justify-between pb-2 border-b border-[#26293c]/50 flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[#b0c9ff] text-[18px]">deployed_code</span>
+                <span className="font-bold text-xs text-[#dfe1fa]">
+                  Docker Engine Containers ({selectedNode?.shortName || 'host'})
+                </span>
+                <span className="px-1.5 py-0.5 bg-[#b0c9ff]/15 text-[#b0c9ff] border border-[#b0c9ff]/30 rounded text-[10px] font-bold">
+                  dockerd (rootful)
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-[11px] text-[#8d909b]">
+                <span>
+                  Active:{' '}
+                  <strong className="text-[#8cd6cb]">
+                    {
+                      filteredDocker.filter(
+                        c =>
+                          c.status.toLowerCase().includes('running') ||
+                          c.status.toLowerCase().startsWith('up ')
+                      ).length
+                    }
+                  </strong>
+                </span>
+                <span>|</span>
+                <span>
+                  Total: <strong className="text-[#dfe1fa]">{dockerContainers.length}</strong>
+                </span>
+              </div>
+            </div>
+
+            {filteredDocker.length === 0 ? (
+              <div className="p-3 text-center text-[#8d909b] text-xs">
+                {dockerContainers.length === 0
+                  ? `Docker Engine is active on ${selectedNode?.shortName || 'host'}, but no containers are currently running.`
+                  : `No Docker containers matching filter "${filter}".`}
+              </div>
+            ) : (
               <div className="overflow-x-auto mt-1">
-                <table className="w-full text-left">
+                <table className="w-full text-left font-mono text-xs">
                   <thead className="bg-[#0a0d1f]/70 text-[#8d909b] text-[10px]">
                     <tr className="h-6">
+                      <th className="px-2">Container ID</th>
                       <th className="px-2">Container Name</th>
-                      <th className="px-2">User (UID)</th>
                       <th className="px-2">Image</th>
                       <th className="px-2">Status</th>
-                      <th className="px-2">CPU</th>
-                      <th className="px-2">Memory</th>
                       <th className="px-2 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#26293c]/50">
-                    {pod.containers.map(c => (
-                      <tr key={c.id} className="h-7 hover:bg-[#26293c]/40 transition-colors">
+                    {filteredDocker.map(dc => (
+                      <tr key={dc.id || dc.name} className="h-7 hover:bg-[#26293c]/40 transition-colors">
+                        <td className="px-2 text-[#8d909b] font-mono text-[11px]">{dc.id}</td>
                         <td className="px-2 text-[#dfe1fa] font-medium flex items-center gap-1.5">
                           <span
                             className={`w-1.5 h-1.5 rounded-full ${
-                              c.status.toLowerCase().includes('exited')
+                              dc.status.toLowerCase().includes('exited')
                                 ? 'bg-[#ffb4ab]'
                                 : 'bg-[#8cd6cb]'
                             }`}
                           ></span>
-                          <span>{c.name}</span>
+                          <span>{dc.name}</span>
                         </td>
-                        <td className="px-2 text-[#b0c9ff]">
-                          {c.user ? `${c.user}:${c.uid ?? 0}` : 'root:0'}
-                        </td>
-                        <td className="px-2 text-[#8d909b] truncate max-w-xs">{c.image}</td>
+                        <td className="px-2 text-[#8d909b] truncate max-w-xs">{dc.image}</td>
                         <td className="px-2">
                           <span
                             className={
-                              c.status.toLowerCase().includes('exited')
+                              dc.status.toLowerCase().includes('exited')
                                 ? 'text-[#ffb4ab]'
                                 : 'text-[#8cd6cb]'
                             }
                           >
-                            {c.status}
+                            {dc.status}
                           </span>
                         </td>
-                        <td className="px-2 text-[#dfe1fa]">{c.cpu}</td>
-                        <td className="px-2 text-[#dfe1fa]">{c.memory}</td>
                         <td className="px-2 text-right space-x-1">
                           <button
                             type="button"
-                            onClick={() => handleContainerAction(c, 'restart')}
-                            className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#ffd97d] rounded text-[10px] cursor-pointer"
-                          >
-                            Restart
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onOpenExec(c.name)}
+                            onClick={() => onOpenExec(dc.name)}
                             className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#8cd6cb] rounded text-[10px] cursor-pointer"
                           >
                             Exec
                           </button>
                           <button
                             type="button"
-                            onClick={() => onOpenLogs(c.name)}
+                            onClick={() => onOpenLogs(dc.name)}
                             className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded text-[10px] cursor-pointer"
                           >
                             Logs
@@ -524,53 +866,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                   </tbody>
                 </table>
               </div>
-            </div>
-          ))
-        )}
-
-        {/* Standalone Operational Containers */}
-        {filteredDaemons.length > 0 && (
-          <div className="bg-[#1b1e31] rounded p-2 border border-[#26293c]">
-            <span className="font-mono text-[10px] text-[#8d909b] font-bold uppercase block pb-1">
-              ACTIVE SYSTEM &amp; QUADLET CONTAINERS ({selectedNode?.shortName || 'host'})
-            </span>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-              {filteredDaemons.map(item => (
-                <div
-                  key={item.name}
-                  className="bg-[#0a0d1f] p-2 rounded flex items-center justify-between border border-[#26293c]/50"
-                >
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                        item.status === 'running' ? 'bg-[#8cd6cb]' : 'bg-[#ffb4ab]'
-                      }`}
-                    ></span>
-                    <div className="flex flex-col min-w-0">
-                      <span className="text-[#dfe1fa] font-bold text-xs truncate">{item.name}</span>
-                      <span className="text-[#8d909b] text-[10px] truncate">{item.subtext}</span>
-                    </div>
-                  </div>
-                  {item.status === 'running' ? (
-                    <button
-                      type="button"
-                      onClick={() => onOpenLogs(item.name)}
-                      className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#8cd6cb] text-[10px] rounded cursor-pointer shrink-0"
-                    >
-                      Logs
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => handleStartStandalone(item.name)}
-                      className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] text-[10px] rounded cursor-pointer shrink-0"
-                    >
-                      Start
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
+            )}
           </div>
         )}
       </div>

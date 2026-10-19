@@ -65,6 +65,7 @@ export interface TelemetryData {
 export interface ContainerItem {
   id: string;
   podId?: string;
+  podName?: string;
   name: string;
   image: string;
   status: string;

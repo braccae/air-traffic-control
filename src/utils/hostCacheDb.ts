@@ -7,6 +7,8 @@ import type {
   UnprivilegedPodmanUser,
   ServiceUser,
   ContainerItem,
+  GlobalTaskItem,
+  PodItem,
 } from '../types/index.ts';
 
 export interface CachedHostTelemetry {
@@ -21,6 +23,9 @@ export interface CachedHostContainers {
   identities: ServiceUser[];
   customIdentities: ServiceUser[];
   rootContainers: CachedRootContainer[];
+  rootPods?: PodItem[];
+  hasDocker?: boolean;
+  dockerContainers?: ContainerItem[];
   updatedAt: number;
 }
 
@@ -42,12 +47,19 @@ export interface HostCacheStore {
       probedUsers: UnprivilegedPodmanUser[];
       identities: ServiceUser[];
       rootContainers: CachedRootContainer[];
+      rootPods?: PodItem[];
+      hasDocker?: boolean;
+      dockerContainers?: ContainerItem[];
     }
   ): void;
   addCustomIdentity(hostId: string, identity: ServiceUser): void;
   getHostContainers(hostId: string): CachedHostContainers | null;
   getHostSection<T = any>(hostId: string, section: string): { data: T; updatedAt: number } | null;
   upsertHostSection<T = any>(hostId: string, section: string, data: T): void;
+  invalidateHostSections(hostId?: string): void;
+  saveTask(task: GlobalTaskItem): void;
+  getAllTasks(limit?: number): GlobalTaskItem[];
+  updateTask(id: string, updates: Partial<GlobalTaskItem>): void;
   seedGroupVarsIfEmpty(defaults: Record<string, string>): Record<string, string>;
   upsertGroupVar(file: string, content: string): void;
   getAllGroupVars(): Record<string, string>;
@@ -66,6 +78,7 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
 
   db.exec(`
     PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
     PRAGMA foreign_keys = ON;
 
     CREATE TABLE IF NOT EXISTS hosts (
@@ -112,7 +125,37 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (host_id, section)
     );
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      start_time TEXT NOT NULL,
+      node_target TEXT NOT NULL,
+      user TEXT NOT NULL,
+      description TEXT NOT NULL,
+      progress INTEGER NOT NULL,
+      progress_eta TEXT,
+      status TEXT NOT NULL,
+      category TEXT NOT NULL,
+      log_json TEXT,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_hosts_sort ON hosts(sort_order ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_hosts_tailscale ON hosts(tailscale_host, tailscale_ip);
+    CREATE INDEX IF NOT EXISTS idx_sections_host ON host_section_cache(host_id, section);
+    CREATE INDEX IF NOT EXISTS idx_telemetry_updated ON host_telemetry_cache(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
   `);
+
+  try {
+    db.exec(`ALTER TABLE host_containers_cache ADD COLUMN root_pods_json TEXT DEFAULT '[]';`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE host_containers_cache ADD COLUMN has_docker INTEGER DEFAULT 0;`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE host_containers_cache ADD COLUMN docker_containers_json TEXT DEFAULT '[]';`);
+  } catch {}
 
   const stmtCountHosts = db.prepare('SELECT COUNT(*) as cnt FROM hosts');
   const stmtSelectAllHosts = db.prepare('SELECT node_json FROM hosts ORDER BY sort_order ASC, id ASC');
@@ -163,18 +206,23 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
   );
 
   const stmtSelectContainers = db.prepare(`
-    SELECT probed_users_json, identities_json, custom_identities_json, root_containers_json, updated_at
+    SELECT probed_users_json, identities_json, custom_identities_json, root_containers_json,
+           root_pods_json, has_docker, docker_containers_json, updated_at
     FROM host_containers_cache WHERE host_id = ?
   `);
   const stmtUpsertContainers = db.prepare(`
     INSERT INTO host_containers_cache (
-      host_id, probed_users_json, identities_json, custom_identities_json, root_containers_json, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?)
+      host_id, probed_users_json, identities_json, custom_identities_json, root_containers_json,
+      root_pods_json, has_docker, docker_containers_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(host_id) DO UPDATE SET
       probed_users_json = excluded.probed_users_json,
       identities_json = excluded.identities_json,
       custom_identities_json = excluded.custom_identities_json,
       root_containers_json = excluded.root_containers_json,
+      root_pods_json = excluded.root_pods_json,
+      has_docker = excluded.has_docker,
+      docker_containers_json = excluded.docker_containers_json,
       updated_at = excluded.updated_at
   `);
 
@@ -287,16 +335,25 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
         probedUsers: UnprivilegedPodmanUser[];
         identities: ServiceUser[];
         rootContainers: CachedRootContainer[];
+        rootPods?: PodItem[];
+        hasDocker?: boolean;
+        dockerContainers?: ContainerItem[];
       }
     ): void {
       const existing = this.getHostContainers(hostId);
       const customIdentities = existing?.customIdentities || [];
+      const rootPods = payload.rootPods ?? existing?.rootPods ?? [];
+      const hasDocker = payload.hasDocker !== undefined ? payload.hasDocker : (existing?.hasDocker ?? false);
+      const dockerContainers = payload.dockerContainers ?? existing?.dockerContainers ?? [];
       stmtUpsertContainers.run(
         hostId,
         JSON.stringify(payload.probedUsers),
         JSON.stringify(payload.identities),
         JSON.stringify(customIdentities),
         JSON.stringify(payload.rootContainers),
+        JSON.stringify(rootPods),
+        hasDocker ? 1 : 0,
+        JSON.stringify(dockerContainers),
         Date.now()
       );
     },
@@ -306,6 +363,9 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
       const probedUsers = existing?.probedUsers || [];
       const identities = existing?.identities || [];
       const rootContainers = existing?.rootContainers || [];
+      const rootPods = existing?.rootPods || [];
+      const hasDocker = existing?.hasDocker || false;
+      const dockerContainers = existing?.dockerContainers || [];
       const customIdentities = [identity, ...(existing?.customIdentities || [])];
       stmtUpsertContainers.run(
         hostId,
@@ -313,6 +373,9 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
         JSON.stringify(identities),
         JSON.stringify(customIdentities),
         JSON.stringify(rootContainers),
+        JSON.stringify(rootPods),
+        hasDocker ? 1 : 0,
+        JSON.stringify(dockerContainers),
         Date.now()
       );
     },
@@ -324,6 +387,9 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
             identities_json: string;
             custom_identities_json: string;
             root_containers_json: string;
+            root_pods_json?: string;
+            has_docker?: number;
+            docker_containers_json?: string;
             updated_at: number;
           }
         | undefined;
@@ -333,6 +399,9 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
         identities: JSON.parse(row.identities_json),
         customIdentities: JSON.parse(row.custom_identities_json),
         rootContainers: JSON.parse(row.root_containers_json),
+        rootPods: row.root_pods_json ? JSON.parse(row.root_pods_json) : [],
+        hasDocker: Boolean(row.has_docker),
+        dockerContainers: row.docker_containers_json ? JSON.parse(row.docker_containers_json) : [],
         updatedAt: Number(row.updated_at),
       };
     },
@@ -359,6 +428,78 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
         out[r.file_path] = r.content;
       }
       return out;
+    },
+
+    invalidateHostSections(hostId?: string): void {
+      if (hostId) {
+        db.prepare('DELETE FROM host_section_cache WHERE host_id = ?').run(hostId);
+      } else {
+        db.prepare('DELETE FROM host_section_cache').run();
+      }
+    },
+
+    saveTask(task: GlobalTaskItem): void {
+      db.prepare(`
+        INSERT INTO tasks (id, start_time, node_target, user, description, progress, progress_eta, status, category, log_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          progress = excluded.progress,
+          progress_eta = excluded.progress_eta,
+          status = excluded.status,
+          log_json = excluded.log_json,
+          updated_at = excluded.updated_at
+      `).run(
+        task.id,
+        task.startTime,
+        task.nodeTarget,
+        task.user,
+        task.description,
+        task.progress,
+        task.progressEta || '',
+        task.status,
+        task.category,
+        task.logs ? JSON.stringify(task.logs) : '[]',
+        Date.now()
+      );
+    },
+
+    getAllTasks(limit = 50): GlobalTaskItem[] {
+      const rows = db.prepare(`SELECT * FROM tasks ORDER BY updated_at DESC LIMIT ?`).all(limit) as Array<{
+        id: string;
+        start_time: string;
+        node_target: string;
+        user: string;
+        description: string;
+        progress: number;
+        progress_eta: string;
+        status: string;
+        category: string;
+        log_json: string;
+      }>;
+      return rows.map(r => ({
+        id: r.id,
+        startTime: r.start_time,
+        nodeTarget: r.node_target,
+        user: r.user,
+        description: r.description,
+        progress: Number(r.progress),
+        progressEta: r.progress_eta || '',
+        status: r.status as any,
+        category: r.category as any,
+        logs: r.log_json ? JSON.parse(r.log_json) : [],
+      }));
+    },
+
+    updateTask(id: string, updates: Partial<GlobalTaskItem>): void {
+      const existing = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as any;
+      if (!existing) return;
+      const progress = updates.progress ?? existing.progress;
+      const progressEta = updates.progressEta ?? existing.progress_eta;
+      const status = updates.status ?? existing.status;
+      const logs = updates.logs ? JSON.stringify(updates.logs) : existing.log_json;
+      db.prepare(`
+        UPDATE tasks SET progress = ?, progress_eta = ?, status = ?, log_json = ?, updated_at = ? WHERE id = ?
+      `).run(progress, progressEta, status, logs, Date.now(), id);
     },
 
     close(): void {

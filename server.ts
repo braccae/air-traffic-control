@@ -540,14 +540,25 @@ app.get('/api/nodes/:id/containers', async (req, res) => {
       probedUsers: cached.probedUsers,
       identities: [...cached.customIdentities, ...cached.identities],
       rootContainers: cached.rootContainers,
+      rootPods: cached.rootPods || [],
+      hasDocker: Boolean(cached.hasDocker),
+      dockerContainers: cached.dockerContainers || [],
       fromCache: true,
       cachedAt: cached.updatedAt,
     });
     return;
   }
 
-  const { probedUsers, identities, rootContainers } = await probeNodePodmanAndIdentities(targetNode);
-  hostCache.upsertHostContainers(targetNode.id, { probedUsers, identities, rootContainers });
+  const { probedUsers, identities, rootContainers, rootPods, hasDocker, dockerContainers } =
+    await probeNodePodmanAndIdentities(targetNode);
+  hostCache.upsertHostContainers(targetNode.id, {
+    probedUsers,
+    identities,
+    rootContainers,
+    rootPods,
+    hasDocker,
+    dockerContainers,
+  });
   const updatedCache = hostCache.getHostContainers(targetNode.id);
   const customIds = updatedCache?.customIdentities || [];
   res.json({
@@ -555,6 +566,9 @@ app.get('/api/nodes/:id/containers', async (req, res) => {
     probedUsers,
     identities: [...customIds, ...identities],
     rootContainers,
+    rootPods: rootPods || [],
+    hasDocker: Boolean(hasDocker),
+    dockerContainers: dockerContainers || [],
     fromCache: false,
     cachedAt: Date.now(),
   });

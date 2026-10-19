@@ -1,4 +1,10 @@
-import type { PodItem, ServiceUser, StandaloneDaemon, UnprivilegedPodmanUser } from '../types/index.ts';
+import type {
+  ContainerItem,
+  PodItem,
+  ServiceUser,
+  StandaloneDaemon,
+  UnprivilegedPodmanUser,
+} from '../types/index.ts';
 import { filterContainersByStatus } from './orchestrator.ts';
 
 export interface CorrelatedServiceIdentity extends ServiceUser {
@@ -7,6 +13,259 @@ export interface CorrelatedServiceIdentity extends ServiceUser {
   containerCount: number;
   subUidRange?: string;
   linger?: boolean;
+}
+
+export interface UserContainerGroup {
+  user: string;
+  uid: number;
+  rootless: boolean;
+  badge: string;
+  totalContainers: number;
+  runningContainers: number;
+  stoppedContainers: number;
+  containers: ContainerItem[];
+}
+
+export interface SecurityBadgeInfo {
+  isRootful: boolean;
+  label: string;
+  rootless: boolean;
+}
+
+export interface DockerProbeResult {
+  hasDocker: boolean;
+  dockerContainers: ContainerItem[];
+}
+
+/**
+ * Returns security classification and badge label for a container or pod.
+ * If user === 'root', uid === 0, or rootless === false, it is "Rootful / System".
+ * Otherwise it is "Rootless (UID <uid>)".
+ */
+export function getContainerSecurityBadge(
+  user?: string,
+  uid?: number,
+  rootless?: boolean
+): SecurityBadgeInfo {
+  const isRootful = !rootless && (user === 'root' || uid === 0 || (!user && uid === undefined));
+  if (isRootful) {
+    return {
+      isRootful: true,
+      label: 'Rootful / System',
+      rootless: false,
+    };
+  }
+  const effectiveUid = uid ?? (user === 'root' ? 0 : 1000);
+  return {
+    isRootful: false,
+    label: `Rootless (UID ${effectiveUid})`,
+    rootless: true,
+  };
+}
+
+/**
+ * Groups unpodded/standalone containers by user, placing 'root' first and
+ * sorting other users alphabetically, while computing total, running, and stopped counts.
+ */
+export function groupStandaloneContainersByUser(
+  containers: ContainerItem[]
+): UserContainerGroup[] {
+  const map = new Map<string, ContainerItem[]>();
+
+  for (const c of containers) {
+    const username = c.user || (c.uid === 0 ? 'root' : 'core');
+    if (!map.has(username)) {
+      map.set(username, []);
+    }
+    map.get(username)!.push(c);
+  }
+
+  const groups: UserContainerGroup[] = [];
+
+  for (const [user, uContainers] of map.entries()) {
+    const first = uContainers[0];
+    const uid = first?.uid ?? (user === 'root' ? 0 : 1000);
+    const rootless = user !== 'root' && uid !== 0 && first?.rootless !== false;
+    const badgeInfo = getContainerSecurityBadge(user, uid, rootless);
+
+    let running = 0;
+    let stopped = 0;
+    for (const c of uContainers) {
+      const s = (c.status || '').toLowerCase();
+      if (s.includes('running') || s.startsWith('up ')) {
+        running++;
+      } else {
+        stopped++;
+      }
+    }
+
+    groups.push({
+      user,
+      uid,
+      rootless: !badgeInfo.isRootful,
+      badge: badgeInfo.label,
+      totalContainers: uContainers.length,
+      runningContainers: running,
+      stoppedContainers: stopped,
+      containers: uContainers,
+    });
+  }
+
+  groups.sort((a, b) => {
+    if (a.user === 'root' && b.user !== 'root') return -1;
+    if (b.user === 'root' && a.user !== 'root') return 1;
+    return a.user.localeCompare(b.user);
+  });
+
+  return groups;
+}
+
+/**
+ * Filters each user container group by status ('all' | 'running' | 'stopped')
+ * and omits groups with 0 matching containers when filtering by 'running' or 'stopped'.
+ */
+export function filterUserContainerGroups(
+  groups: UserContainerGroup[],
+  filter: 'all' | 'running' | 'stopped'
+): UserContainerGroup[] {
+  if (filter === 'all') {
+    return groups;
+  }
+
+  return groups
+    .map(group => {
+      const filtered = filterContainersByStatus(group.containers, filter);
+      let running = 0;
+      let stopped = 0;
+      for (const c of filtered) {
+        const s = (c.status || '').toLowerCase();
+        if (s.includes('running') || s.startsWith('up ')) {
+          running++;
+        } else {
+          stopped++;
+        }
+      }
+      return {
+        ...group,
+        totalContainers: filtered.length,
+        runningContainers: running,
+        stoppedContainers: stopped,
+        containers: filtered,
+      };
+    })
+    .filter(g => g.containers.length > 0);
+}
+
+/**
+ * Parses raw Docker ps output (e.g. from `docker ps --format "{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}"`)
+ * and CLI detection to return whether Docker is present and the list of Docker containers.
+ */
+export function parseDockerPsOutput(
+  rawPsOutput: string,
+  cliCheckOutput?: string
+): DockerProbeResult {
+  const isCliFound = cliCheckOutput
+    ? !cliCheckOutput.includes('NO_DOCKER') && cliCheckOutput.trim().length > 0
+    : !rawPsOutput.includes('NO_DOCKER') && rawPsOutput.trim().length > 0;
+
+  const containers: ContainerItem[] = [];
+  const lines = (rawPsOutput || '').split('\n');
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line.includes(':::') || line.includes('{{')) continue;
+    const parts = line.split(':::');
+    if (parts.length < 4) continue;
+    const [id, name, image, status] = parts;
+    if (!id || !name) continue;
+    const nameLower = name.toLowerCase();
+    const imgLower = (image || '').toLowerCase();
+    if (
+      nameLower.includes('pause') ||
+      nameLower.endsWith('-infra') ||
+      imgLower.includes('pause') ||
+      imgLower.includes('podman-pause')
+    ) {
+      continue;
+    }
+    containers.push({
+      id: id.slice(0, 12),
+      name,
+      image: image || 'docker/image:latest',
+      status: status || 'Running',
+      cpu: '0.2%',
+      memory: '48 MiB',
+      user: 'docker',
+      uid: 0,
+      rootless: false,
+    });
+  }
+
+  const hasDocker = Boolean(isCliFound || containers.length > 0);
+  return {
+    hasDocker,
+    dockerContainers: containers,
+  };
+}
+
+/**
+ * Separates a list of containers into pods (containers belonging to a pod)
+ * and standalone containers (unpodded containers).
+ */
+export function separatePodsAndStandaloneContainers(
+  containers: ContainerItem[],
+  existingPods: PodItem[] = []
+): { pods: PodItem[]; standaloneContainers: ContainerItem[] } {
+  const podMap = new Map<string, PodItem>();
+  for (const p of existingPods) {
+    podMap.set(p.id, { ...p, containers: [...p.containers] });
+    podMap.set(p.name, podMap.get(p.id)!);
+  }
+
+  const standalone: ContainerItem[] = [];
+
+  for (const c of containers) {
+    const rawPodId = c.podId || (c as any).Pod || '';
+    const rawPodName = (c as any).podName || (c as any).PodName || '';
+    const podIdentifier = rawPodId || rawPodName;
+
+    if (podIdentifier && String(podIdentifier).trim() !== '') {
+      const pid = String(rawPodId || rawPodName).trim();
+      const pname = String(rawPodName || rawPodId).trim();
+      let matchedPod = podMap.get(pid) || podMap.get(pname);
+      if (!matchedPod) {
+        matchedPod = {
+          id: pid,
+          name: pname.startsWith('pod:') ? pname : `pod: ${pname}`,
+          containersRunningCount: 0,
+          ports: c.ports || 'Host Mesh',
+          totalCpu: c.cpu || '0.2%',
+          totalRam: c.memory || '64 MiB',
+          user: c.user || 'root',
+          uid: c.uid ?? 0,
+          rootless: c.rootless ?? (c.user !== 'root' && (c.uid ?? 0) !== 0),
+          containers: [],
+        };
+        podMap.set(pid, matchedPod);
+        podMap.set(pname, matchedPod);
+      }
+      if (!matchedPod.containers.some(existing => existing.id === c.id || existing.name === c.name)) {
+        matchedPod.containers.push(c);
+        const s = (c.status || '').toLowerCase();
+        if (s.includes('running') || s.startsWith('up ')) {
+          matchedPod.containersRunningCount++;
+        }
+      }
+    } else {
+      standalone.push(c);
+    }
+  }
+
+  const uniquePods = Array.from(new Set(podMap.values()));
+  return {
+    pods: uniquePods,
+    standaloneContainers: standalone,
+  };
 }
 
 /**
@@ -53,8 +312,9 @@ export function filterStandaloneDaemons(
  */
 export function countPodmanStatuses(
   pods: PodItem[],
-  daemons: StandaloneDaemon[]
-): { all: number; running: number; stopped: number } {
+  daemons: (StandaloneDaemon | ContainerItem)[] = [],
+  dockerContainers: ContainerItem[] = []
+): { all: number; running: number; stopped: number; docker?: number } {
   let running = 0;
   let stopped = 0;
 
@@ -70,18 +330,25 @@ export function countPodmanStatuses(
   }
 
   for (const d of daemons) {
-    if (d.status === 'running') {
+    const s = d.status.toLowerCase();
+    if (s === 'running' || s.startsWith('up ')) {
       running++;
     } else {
       stopped++;
     }
   }
 
-  return {
+  const result: { all: number; running: number; stopped: number; docker?: number } = {
     all: running + stopped,
     running,
     stopped,
   };
+
+  if (dockerContainers && dockerContainers.length > 0) {
+    result.docker = dockerContainers.length;
+  }
+
+  return result;
 }
 
 /**
