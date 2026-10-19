@@ -1,3 +1,5 @@
+import type { NodeItem } from '../types/index.ts';
+
 export interface ProbedHardware {
   cpu: string;
   vcpus: number;
@@ -252,5 +254,55 @@ export function parseHardwareProbeOutput(raw: string): ProbedHardware {
     arch,
     secureBoot,
     iommu,
+  };
+}
+
+/**
+ * Resolves the primary connection route (Tailscale Host/IP) and any configured
+ * fallback route (LAN IP or secondary hostname) for network failover.
+ */
+export function resolveConnectionRoute(node: NodeItem): { primary: string; fallback?: string } {
+  const tailscaleHost = (node.tailscaleHost || '').trim();
+  const tailscaleIp = (node.tailscaleIp || '').trim();
+  const lanIp = (node.ip || '').trim();
+  const fallbackHost = (node.fallbackHost || '').trim();
+  const fallbackIp = (node.fallbackIp || '').trim();
+
+  const primary = tailscaleHost || tailscaleIp || lanIp || 'localhost';
+
+  let fallback: string | undefined = undefined;
+  if (fallbackHost && fallbackHost !== primary) {
+    fallback = fallbackHost;
+  } else if (fallbackIp && fallbackIp !== primary) {
+    fallback = fallbackIp;
+  } else if (lanIp && lanIp !== primary) {
+    fallback = lanIp;
+  }
+
+  return { primary, fallback };
+}
+
+/**
+ * Applies probed hardware details into a NodeItem specification.
+ */
+export function applyHardwareProbeToNode(
+  node: NodeItem,
+  probed: Partial<ProbedHardware>
+): NodeItem {
+  return {
+    ...node,
+    osDescription: probed.osDescription || node.osDescription,
+    specs: {
+      ...node.specs,
+      cpu: probed.cpu || node.specs?.cpu || '',
+      vcpus: probed.vcpus ?? node.specs?.vcpus ?? 1,
+      ramGiB: probed.ramGiB ?? node.specs?.ramGiB ?? 1,
+      motherboard: probed.motherboard || node.specs?.motherboard || '',
+      bios: probed.bios || node.specs?.bios || '',
+      secureBoot: probed.secureBoot || node.specs?.secureBoot || 'Disabled',
+      iommu: probed.iommu || node.specs?.iommu || 'Disabled',
+      ipmi: node.specs?.ipmi || 'DHCP',
+      ecc: node.specs?.ecc || 'Non-ECC',
+    },
   };
 }

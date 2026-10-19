@@ -7,6 +7,8 @@ import {
   parseMemInfo,
   parseDmiInfo,
   getHardwareProbeCommand,
+  resolveConnectionRoute,
+  applyHardwareProbeToNode,
 } from './hardwareProbe.ts';
 
 describe('Hardware Probe Extraction & Parsing', () => {
@@ -256,6 +258,171 @@ rel-1.16.2-0-gea1b7a073390-prebuilt.qemu.org
       assert.equal(hardware.ramGiB, 4);
       assert.ok(hardware.motherboard.includes('QEMU Standard PC') || hardware.motherboard.includes('Standard PC'));
       assert.ok(hardware.bios.includes('SeaBIOS'));
+    });
+  });
+
+  describe('resolveConnectionRoute', () => {
+    test('resolves primary route via tailscaleHost and fallback via LAN fallbackIp', () => {
+      const node: any = {
+        id: 'node-alpha',
+        name: 'Alpha Host',
+        tailscaleHost: 'alpha.leo-banjo.ts.net',
+        tailscaleIp: '100.64.0.10',
+        ip: '192.168.1.100',
+        fallbackIp: '192.168.1.100',
+      };
+      const routes = resolveConnectionRoute(node);
+      assert.equal(routes.primary, 'alpha.leo-banjo.ts.net');
+      assert.equal(routes.fallback, '192.168.1.100');
+    });
+
+    test('resolves fallback via fallbackHost if provided', () => {
+      const node: any = {
+        id: 'node-beta',
+        name: 'Beta Host',
+        tailscaleHost: 'beta.leo-banjo.ts.net',
+        tailscaleIp: '100.64.0.11',
+        ip: '192.168.1.101',
+        fallbackHost: 'beta.local',
+      };
+      const routes = resolveConnectionRoute(node);
+      assert.equal(routes.primary, 'beta.leo-banjo.ts.net');
+      assert.equal(routes.fallback, 'beta.local');
+    });
+
+    test('resolves fallback via node.ip when distinct from primary and no fallbackHost is set', () => {
+      const node: any = {
+        id: 'node-gamma',
+        name: 'Gamma Host',
+        tailscaleHost: 'gamma.leo-banjo.ts.net',
+        ip: '10.0.0.5',
+      };
+      const routes = resolveConnectionRoute(node);
+      assert.equal(routes.primary, 'gamma.leo-banjo.ts.net');
+      assert.equal(routes.fallback, '10.0.0.5');
+    });
+
+    test('falls back to tailscaleIp or ip as primary when tailscaleHost is empty', () => {
+      const node1: any = {
+        id: 'node-delta',
+        name: 'Delta Host',
+        tailscaleHost: '',
+        tailscaleIp: '100.64.0.25',
+        ip: '192.168.1.200',
+      };
+      assert.equal(resolveConnectionRoute(node1).primary, '100.64.0.25');
+
+      const node2: any = {
+        id: 'node-eps',
+        name: 'Epsilon Host',
+        tailscaleHost: '',
+        tailscaleIp: '',
+        ip: '192.168.1.201',
+      };
+      assert.equal(resolveConnectionRoute(node2).primary, '192.168.1.201');
+      assert.equal(resolveConnectionRoute(node2).fallback, undefined);
+    });
+
+    test('returns undefined fallback when fallback matches primary', () => {
+      const node: any = {
+        id: 'node-zeta',
+        name: 'Zeta Host',
+        tailscaleHost: '',
+        tailscaleIp: '',
+        ip: '192.168.1.250',
+        fallbackIp: '192.168.1.250',
+      };
+      const routes = resolveConnectionRoute(node);
+      assert.equal(routes.primary, '192.168.1.250');
+      assert.equal(routes.fallback, undefined);
+    });
+
+    test('prefers fallbackHost over fallbackIp when both are present', () => {
+      const node: any = {
+        id: 'node-eta',
+        name: 'Eta Host',
+        tailscaleHost: 'eta.leo-banjo.ts.net',
+        fallbackHost: 'eta-lan.local',
+        fallbackIp: '192.168.1.155',
+      };
+      const routes = resolveConnectionRoute(node);
+      assert.equal(routes.primary, 'eta.leo-banjo.ts.net');
+      assert.equal(routes.fallback, 'eta-lan.local');
+    });
+  });
+
+  describe('applyHardwareProbeToNode', () => {
+    test('merges probed hardware telemetry into node specs and updates osDescription', () => {
+      const initialNode: any = {
+        id: 'node-pve-01',
+        name: 'Proxmox Alpha',
+        osDescription: 'Debian 12',
+        specs: {
+          cpu: 'Generic',
+          vcpus: 1,
+          ramGiB: 2,
+          motherboard: 'Unknown',
+          bios: 'Old',
+          secureBoot: 'Disabled',
+          iommu: 'Disabled',
+          ipmi: '192.168.1.254',
+          ecc: 'Active ECC',
+        },
+      };
+
+      const probed: any = {
+        cpu: 'AMD EPYC 7002',
+        vcpus: 32,
+        ramGiB: 128,
+        motherboard: 'Supermicro H11SSL-i',
+        bios: '2.5b (2023-11-01)',
+        osDescription: 'Proxmox VE 8.2 (Debian 12)',
+        secureBoot: 'Enabled',
+        iommu: 'Enabled (AMD-Vi)',
+      };
+
+      const updated = applyHardwareProbeToNode(initialNode, probed);
+      assert.equal(updated.osDescription, 'Proxmox VE 8.2 (Debian 12)');
+      assert.equal(updated.specs.cpu, 'AMD EPYC 7002');
+      assert.equal(updated.specs.vcpus, 32);
+      assert.equal(updated.specs.ramGiB, 128);
+      assert.equal(updated.specs.motherboard, 'Supermicro H11SSL-i');
+      assert.equal(updated.specs.bios, '2.5b (2023-11-01)');
+      assert.equal(updated.specs.secureBoot, 'Enabled');
+      assert.equal(updated.specs.iommu, 'Enabled (AMD-Vi)');
+      assert.equal(updated.specs.ipmi, '192.168.1.254');
+      assert.equal(updated.specs.ecc, 'Active ECC');
+    });
+
+    test('handles empty or partial probe gracefully without crashing or wiping specs', () => {
+      const initialNode: any = {
+        id: 'node-bare',
+        name: 'Bare Node',
+        osDescription: 'Fedora 40',
+        specs: {
+          cpu: 'Intel Xeon E-2288G',
+          vcpus: 8,
+          ramGiB: 64,
+          motherboard: 'ASRock Rack E3C246D4U',
+          bios: 'P2.40',
+          secureBoot: 'Enabled',
+          iommu: 'Enabled (VT-d)',
+          ipmi: '10.0.1.5',
+          ecc: 'ECC Unbuffered',
+        },
+      };
+
+      const updated = applyHardwareProbeToNode(initialNode, {});
+      assert.equal(updated.osDescription, 'Fedora 40');
+      assert.equal(updated.specs.cpu, 'Intel Xeon E-2288G');
+      assert.equal(updated.specs.vcpus, 8);
+      assert.equal(updated.specs.ramGiB, 64);
+      assert.equal(updated.specs.motherboard, 'ASRock Rack E3C246D4U');
+      assert.equal(updated.specs.bios, 'P2.40');
+      assert.equal(updated.specs.secureBoot, 'Enabled');
+      assert.equal(updated.specs.iommu, 'Enabled (VT-d)');
+      assert.equal(updated.specs.ipmi, '10.0.1.5');
+      assert.equal(updated.specs.ecc, 'ECC Unbuffered');
     });
   });
 });

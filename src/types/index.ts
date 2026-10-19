@@ -1,4 +1,4 @@
-export type NodeType = 'linux' | 'windows' | 'router_switch' | 'pbs' | 'lxc' | 'k3s';
+export type NodeType = 'linux' | 'windows' | 'router_switch' | 'pbs' | 'pve' | 'vm' | 'lxc' | 'k3s';
 
 export interface NodeItem {
   id: string;
@@ -18,6 +18,15 @@ export interface NodeItem {
   rttMs?: string;
   tailscaleIp: string;
   tailscaleHost: string;
+  tailscaleTag?: string;
+  fallbackHost?: string;
+  fallbackIp?: string;
+  apiPort?: number;
+  apiUser?: string;
+  winrmPort?: number;
+  rdpPort?: number;
+  hypervisorHost?: string;
+  vmId?: number;
   osDescription: string;
   status: 'online' | 'stopped' | 'degraded';
   uptime: string;

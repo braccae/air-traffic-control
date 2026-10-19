@@ -33,7 +33,7 @@ import {
   deletePlaybook,
 } from './src/utils/playbookManager.ts';
 import type { NodeItem, TelemetryData, GlobalTaskItem, ServiceUser, VMItem } from './src/types/index.ts';
-import { getHardwareProbeCommand, parseHardwareProbeOutput } from './src/utils/hardwareProbe.ts';
+import { getHardwareProbeCommand, parseHardwareProbeOutput, applyHardwareProbeToNode } from './src/utils/hardwareProbe.ts';
 import {
   buildNfsSaveCommand,
   buildSmbSaveCommand,
@@ -389,6 +389,35 @@ app.post('/api/nodes/probe-host', async (req, res) => {
     res.status(502).json({
       success: false,
       error: err?.message || `Failed to probe hardware on ${host}`,
+    });
+  }
+});
+
+app.post('/api/nodes/:id/probe-host', async (req, res) => {
+  const node = nodes.find(n => n.id === req.params.id);
+  if (!node) {
+    res.status(404).json({ success: false, error: `Node ${req.params.id} not found` });
+    return;
+  }
+
+  try {
+    const probeCmd = getHardwareProbeCommand();
+    const out = await runNodeCommand(node, probeCmd, 8000);
+    const hardware = parseHardwareProbeOutput(out);
+    const updated = applyHardwareProbeToNode(node, hardware);
+
+    const idx = nodes.findIndex(n => n.id === req.params.id);
+    if (idx !== -1) {
+      nodes[idx] = updated;
+    }
+    hostCache.upsertHost(updated);
+    broadcast({ type: 'node_updated', node: updated });
+
+    res.json({ success: true, hardware, node: updated, rawOutput: out });
+  } catch (err: any) {
+    res.status(502).json({
+      success: false,
+      error: err?.message || `Failed to probe hardware on node ${node.name}`,
     });
   }
 });
