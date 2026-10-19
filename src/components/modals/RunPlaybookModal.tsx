@@ -78,7 +78,12 @@ export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onRunPlaybook(playbook, target, checkMode, tags.trim() || undefined, extraVars.trim() || undefined);
+    const trimmedExtraVars = extraVars.trim();
+    const sanitizedExtraVars =
+      !trimmedExtraVars || trimmedExtraVars === '---' || trimmedExtraVars === '...'
+        ? undefined
+        : trimmedExtraVars;
+    onRunPlaybook(playbook, target, checkMode, tags.trim() || undefined, sanitizedExtraVars);
     onClose();
   };
 

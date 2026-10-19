@@ -80,9 +80,10 @@ export function coerceValueByType(type: VarType, value: any): any {
   }
 
   if (type === 'number') {
-    if (typeof value === 'number') return value;
+    if (value === '' || value === null || value === undefined) return '';
+    if (typeof value === 'number') return Number.isNaN(value) ? '' : value;
     const num = Number(value);
-    return Number.isNaN(num) ? 0 : num;
+    return Number.isNaN(num) ? '' : num;
   }
 
   if (type === 'secret') {
@@ -124,6 +125,7 @@ function formatYamlScalar(val: any, type: VarType, isVault?: boolean): string {
   }
 
   if (type === 'number') {
+    if (val === '' || val === null || val === undefined) return '0';
     return String(val);
   }
 
@@ -374,6 +376,12 @@ export function parseYamlToVars(yamlContent: string): ParseResult {
  * Serializes a list of VarEntries into formatted Ansible YAML.
  */
 export function varsToYaml(vars: VarEntry[], options?: { header?: string }): string {
+  // Filter for variables with non-empty keys; return empty string if no variables
+  const validVars = vars.filter(v => v.key && v.key.trim());
+  if (validVars.length === 0) {
+    return '';
+  }
+
   const lines: string[] = ['---'];
 
   if (options?.header) {
@@ -384,8 +392,7 @@ export function varsToYaml(vars: VarEntry[], options?: { header?: string }): str
   const topLevelVars: VarEntry[] = [];
   const nestedGroups: Record<string, VarEntry[]> = {};
 
-  for (const v of vars) {
-    if (!v.key || !v.key.trim()) continue;
+  for (const v of validVars) {
     if (v.key.includes('.')) {
       const prefix = v.key.split('.')[0];
       nestedGroups[prefix] = nestedGroups[prefix] || [];
@@ -421,17 +428,19 @@ export function varsToYaml(vars: VarEntry[], options?: { header?: string }): str
 /**
  * Converts a JS Record into typed VarEntry array.
  */
-export function objectToVars(obj: Record<string, any>, prefix = ''): VarEntry[] {
+export function objectToVars(obj: Record<string, any>, prefix = '', existingVars?: VarEntry[]): VarEntry[] {
+  const existingMap = new Map(existingVars?.map(v => [v.key, v.id]));
   const vars: VarEntry[] = [];
 
   for (const [k, v] of Object.entries(obj)) {
     const fullKey = prefix ? `${prefix}.${k}` : k;
     if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
-      vars.push(...objectToVars(v, fullKey));
+      vars.push(...objectToVars(v, fullKey, existingVars));
     } else {
       const type = detectVarType(fullKey, v);
+      const stableId = existingMap.get(fullKey) || `var_${fullKey.replace(/[^a-zA-Z0-9_]/g, '_')}`;
       vars.push({
-        id: generateVarId(),
+        id: stableId,
         key: fullKey,
         type,
         value: v,
@@ -457,7 +466,8 @@ export function varsToObject(vars: VarEntry[]): Record<string, any> {
       target[parts[i]] = target[parts[i]] || {};
       target = target[parts[i]];
     }
-    target[parts[parts.length - 1]] = coerceValueByType(v.type, v.value);
+    const val = coerceValueByType(v.type, v.value);
+    target[parts[parts.length - 1]] = (v.type === 'number' && val === '') ? 0 : val;
   }
 
   return obj;

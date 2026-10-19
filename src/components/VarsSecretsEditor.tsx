@@ -75,7 +75,7 @@ export const VarsSecretsEditor: React.FC<VarsSecretsEditorProps> = ({
   useEffect(() => {
     if (value !== undefined && value !== lastValuePropRef.current) {
       lastValuePropRef.current = value;
-      const converted = objectToVars(value);
+      const converted = objectToVars(value, '', vars);
       setVars(converted);
       setYamlText(varsToYaml(converted));
     }
@@ -88,16 +88,20 @@ export const VarsSecretsEditor: React.FC<VarsSecretsEditorProps> = ({
     setYamlText(newYaml);
     lastYamlPropRef.current = newYaml;
 
+    const newObj = varsToObject(newVars);
+    lastValuePropRef.current = newObj;
+
     if (onChangeYaml) {
       onChangeYaml(newYaml);
     }
     if (onChange) {
-      onChange(varsToObject(newVars));
+      onChange(newObj);
     }
   };
 
   const handleAddVariable = () => {
     if (readOnly) return;
+    setSearchQuery(''); // Clear filter to ensure the new variable is immediately visible
     const newVar: VarEntry = {
       id: generateVarId(),
       key: `var_${vars.length + 1}`,

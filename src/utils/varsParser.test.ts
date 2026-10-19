@@ -8,6 +8,7 @@ import {
   parseExtraVars,
   formatExtraVars,
   detectVarType,
+  coerceValueByType,
 } from './varsParser.ts';
 import type { VarEntry } from './varsParser.ts';
 
@@ -250,6 +251,22 @@ message: 'Hello, Homelab: Ready'
       assert.ok(yaml.includes('vault_creds: !vault |'));
       assert.ok(yaml.includes('  $ANSIBLE_VAULT;1.1;AES256'));
     });
+
+    it('returns empty string when vars list is empty or whitespace-only', () => {
+      assert.equal(varsToYaml([]), '');
+      assert.equal(varsToYaml([{ id: '1', key: '', type: 'string', value: '' }]), '');
+      assert.equal(varsToYaml([{ id: '2', key: '   ', type: 'number', value: 42 }]), '');
+    });
+  });
+
+  describe('coerceValueByType', () => {
+    it('allows empty string or null for numbers without premature 0 coercion', () => {
+      assert.equal(coerceValueByType('number', ''), '');
+      assert.equal(coerceValueByType('number', null), '');
+      assert.equal(coerceValueByType('number', undefined), '');
+      assert.equal(coerceValueByType('number', 42), 42);
+      assert.equal(coerceValueByType('number', '100'), 100);
+    });
   });
 
   describe('varsToObject & objectToVars', () => {
@@ -274,6 +291,19 @@ message: 'Hello, Homelab: Ready'
 
       const obj = varsToObject(vars);
       assert.deepEqual(obj, raw);
+    });
+
+    it('generates deterministic IDs and preserves existing IDs', () => {
+      const raw = { port: 22, host: 'localhost' };
+      const v1 = objectToVars(raw);
+      assert.equal(v1.find(v => v.key === 'port')?.id, 'var_port');
+      assert.equal(v1.find(v => v.key === 'host')?.id, 'var_host');
+
+      // Preserving existing IDs
+      const existing: VarEntry[] = [{ id: 'custom_id_123', key: 'port', type: 'number', value: 22 }];
+      const v2 = objectToVars(raw, '', existing);
+      assert.equal(v2.find(v => v.key === 'port')?.id, 'custom_id_123');
+      assert.equal(v2.find(v => v.key === 'host')?.id, 'var_host');
     });
   });
 
