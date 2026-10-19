@@ -324,8 +324,8 @@ export function parseZpoolStatus(raw?: string): Map<string, ZpoolStatusDetail> {
       }
 
       const lower = trimmedLine.toLowerCase();
-      if (['logs', 'cache', 'spares', 'spare', 'dedup', 'special'].includes(lower)) {
-        currentRole = lower.startsWith('spare') ? 'spare' : lower;
+      if (['logs', 'log', 'cache', 'spares', 'spare', 'dedup', 'special'].includes(lower)) {
+        currentRole = lower.startsWith('spare') ? 'spare' : lower.startsWith('log') ? 'logs' : lower;
         continue;
       }
 
@@ -337,7 +337,7 @@ export function parseZpoolStatus(raw?: string): Map<string, ZpoolStatusDetail> {
         continue;
       }
 
-      if (/^(mirror|raidz|draid)/i.test(name)) {
+      if (/^(mirror|raidz|draid|replacing|spare)/i.test(name)) {
         currentRole = name;
         continue;
       }

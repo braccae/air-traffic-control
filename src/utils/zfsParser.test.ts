@@ -195,3 +195,36 @@ test('parseZfsDatasets correctly parses zfs list output and skips headers and er
   assert.deepEqual(parseZfsDatasets('NO_ZFS'), []);
   assert.deepEqual(parseZfsDatasets('no datasets available'), []);
 });
+
+test('parseZpoolStatus handles singular log keyword and replacing-* vdev topology', () => {
+  const statusWithLogAndReplacing = `  pool: special-pool
+ state: ONLINE
+  scan: scrub repaired 0B in 00:01:00 with 0 errors on Sun Oct 18 10:00:00 2026
+config:
+
+	NAME              STATE     READ WRITE CKSUM
+	special-pool      ONLINE       0     0     0
+	  replacing-0     ONLINE       0     0     0
+	    sda           ONLINE       0     0     0
+	    sdb           ONLINE       0     0     0
+	log
+	  nvme0n1         ONLINE       0     0     0
+	spare
+	  sdc             AVAIL        0     0     0
+
+errors: No known data errors`;
+
+  const map = parseZpoolStatus(statusWithLogAndReplacing);
+  const pool = map.get('special-pool')!;
+  assert.ok(pool);
+  assert.match(pool.vdevType, /replacing-0/);
+  assert.match(pool.vdevType, /logs/);
+  assert.match(pool.vdevType, /spare/);
+
+  const logDev = pool.devices.find(d => d.name === 'nvme0n1');
+  assert.equal(logDev?.role, 'logs');
+
+  const replacingDevs = pool.devices.filter(d => d.role === 'replacing-0');
+  assert.equal(replacingDevs.length, 2);
+});
+

@@ -29,11 +29,15 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node }) =>
       const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/zfs/${encodeURIComponent(poolName)}/scrub`, {
         method: 'POST',
       });
-      if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success !== false) {
+        setNotice(`Scrub initiated successfully on pool ${poolName}.`);
         loadStorage(true);
+      } else {
+        setNotice(`Failed to start scrub on pool ${poolName}: ${data.error || 'HTTP ' + res.status}`);
       }
-    } catch {
-      // ignore
+    } catch (err: any) {
+      setNotice(`Failed to start scrub on pool ${poolName}: ${err?.message || 'Network error'}`);
     }
   };
 
@@ -213,45 +217,11 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node }) =>
         </div>
       )}
 
-      {/* ARC Cache Telemetry Card */}
-      {pools.length > 0 && (
-        <div className="bg-[#0a0d1f] p-3 rounded-lg border border-[#26293c]">
-          <div className="flex items-center justify-between pb-2 border-b border-[#26293c]">
-            <span className="font-mono text-xs font-bold text-[#b0c9ff] flex items-center gap-1.5">
-              <span className="material-symbols-outlined text-[16px] text-[#8cd6cb]">memory</span>
-              Adaptive Replacement Cache (ARC) Telemetry
-            </span>
-            <span className="px-2 py-0.5 bg-[#8cd6cb]/20 text-[#8cd6cb] font-mono text-[10px] font-bold rounded border border-[#8cd6cb]/40">
-              HIT RATE: 98.4%
-            </span>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2 font-mono text-xs">
-            <div className="bg-[#171a2d] p-2 rounded border border-[#26293c]">
-              <span className="text-[#8d909b] text-[10px] block">ARC SIZE / TARGET</span>
-              <span className="text-[#dfe1fa] font-bold">12.3 GiB / 16.0 GiB</span>
-            </div>
-            <div className="bg-[#171a2d] p-2 rounded border border-[#26293c]">
-              <span className="text-[#8d909b] text-[10px] block">MFU (MOST FREQUENT)</span>
-              <span className="text-[#8cd6cb] font-bold">8.1 GiB (65.8%)</span>
-            </div>
-            <div className="bg-[#171a2d] p-2 rounded border border-[#26293c]">
-              <span className="text-[#8d909b] text-[10px] block">MRU (MOST RECENT)</span>
-              <span className="text-[#b0c9ff] font-bold">4.2 GiB (34.2%)</span>
-            </div>
-            <div className="bg-[#171a2d] p-2 rounded border border-[#26293c]">
-              <span className="text-[#8d909b] text-[10px] block">L2ARC / CACHE DEV</span>
-              <span className="text-[#c3c6d2] font-bold">Direct NVMe Passthrough</span>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* ZFS Datasets Table */}
       {datasets.length > 0 && (
         <div>
           <h4 className="font-mono text-xs text-[#8d909b] font-bold uppercase pb-1 flex items-center justify-between">
             <span>ZFS Datasets &amp; Mountpoints ({datasets.length} datasets)</span>
-            <span className="text-[10px] text-[#8cd6cb]">Compression: LZ4 • Recordsize: 128K</span>
           </h4>
           <div className="overflow-x-auto font-mono text-xs rounded border border-[#26293c]">
             <table className="w-full text-left">
