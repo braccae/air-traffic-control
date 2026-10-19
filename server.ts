@@ -49,6 +49,11 @@ import {
   buildConnectNetworkCommand,
   parseFirewallListAll,
 } from './src/utils/firewallRules.ts';
+import {
+  registerPackageRoutes,
+  type PackageManager,
+  type PackageCheckResult,
+} from './src/utils/packageManager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1659,6 +1664,19 @@ app.post('/api/nodes/:id/reboot', (req, res) => {
     });
 
   res.json({ success: true, message: `Reboot command sent to ${targetNode.name}`, task: rebootTask });
+});
+
+// ==========================================
+// Category D.5: Package & Update Management
+// ==========================================
+
+registerPackageRoutes(app, {
+  findNode,
+  hostCache,
+  runNodeCommand,
+  runNodeElevatedCommand,
+  broadcast,
+  tasks,
 });
 
 // ==========================================

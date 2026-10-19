@@ -73,6 +73,22 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
               </span>
               <span className="font-mono text-[10px] text-[#8cd6cb]">PCP/Glances</span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => onSelectItem('updates')}
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+                activeItem === 'updates'
+                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold'
+                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+              }`}
+            >
+              <span className="flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[14px]">system_update</span>
+                <span>Software Updates</span>
+              </span>
+              <span className="font-mono text-[10px] text-[#8cd6cb]">pkg/ostree</span>
+            </button>
           </nav>
         </div>
 

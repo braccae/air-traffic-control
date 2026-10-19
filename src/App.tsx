@@ -18,6 +18,7 @@ import { ZfsManagementView } from './components/ZfsManagementView.tsx';
 import { NetworkSharesView } from './components/NetworkSharesView.tsx';
 import { DisksSmartView } from './components/DisksSmartView.tsx';
 import { SystemLogsView } from './components/SystemLogsView.tsx';
+import { PackageUpdatesView } from './components/PackageUpdatesView.tsx';
 import { ToastNotification, type ToastItem } from './components/ToastNotification.tsx';
 
 // Modals
@@ -1244,6 +1245,15 @@ export default function App() {
                 {/* Specific dedicated Views when selected from Menu */}
                 {(activeOpTab === 'logs' || activeCockpitItem === 'logs') && (
                   <SystemLogsView node={selectedNode} />
+                )}
+
+                {(activeOpTab === 'updates' || activeCockpitItem === 'updates') && (
+                  <PackageUpdatesView
+                    node={selectedNode}
+                    onOpenTask={taskId => {
+                      setLogsTarget(taskId);
+                    }}
+                  />
                 )}
 
                 {activeOpTab === 'interfaces' && (
