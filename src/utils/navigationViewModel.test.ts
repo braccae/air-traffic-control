@@ -595,7 +595,6 @@ test('formatTaskQueueTabLabel formats staged task count correctly', async () => 
 
 test('buildInventoryTree partitions nodes into Tailscale tag groups and Non-Tailscale standalone & folders matching operator sketch', async () => {
   const { buildInventoryTree } = await import('./navigationViewModel.ts');
-  const typeImport = await import('../types/index.ts');
 
   const chunks = [
     { id: 'chunk-worker', tag: 'tag:worker', authMethod: 'tailscale-ssh' as const, createdAt: 100 },

@@ -351,6 +351,13 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                     ) {
                       return null;
                     }
+                    if (
+                      selectedHostGroup !== 'all' &&
+                      tagGroup.tag !== selectedHostGroup &&
+                      tagGroup.nodes.length === 0
+                    ) {
+                      return null;
+                    }
 
                     return (
                       <div key={tagGroup.tag} className="space-y-0.5">
