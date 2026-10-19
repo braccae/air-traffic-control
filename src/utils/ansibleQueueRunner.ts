@@ -145,6 +145,15 @@ export function initQueueStore(dbOrPath?: DatabaseSync | string): DatabaseSync {
     CREATE INDEX IF NOT EXISTS idx_ansible_queue_status ON ansible_queue_tasks(status, created_at ASC);
   `);
 
+  // Recover running tasks from previous crash / server restart in SQLite
+  dbInstance.exec(`
+    UPDATE ansible_queue_tasks
+    SET status = 'failed',
+        error = 'Task execution interrupted by server restart',
+        updated_at = ${Date.now()}
+    WHERE status = 'running'
+  `);
+
   // Load existing tasks into memoryQueue
   const stmt = dbInstance.prepare('SELECT task_json, status, error FROM ansible_queue_tasks ORDER BY created_at ASC');
   const rows = stmt.all() as Array<{ task_json: string; status: string; error?: string }>;
@@ -154,10 +163,6 @@ export function initQueueStore(dbOrPath?: DatabaseSync | string): DatabaseSync {
       const task = JSON.parse(r.task_json) as QueuedAnsibleTask;
       task.status = r.status as any;
       if (r.error) task.error = r.error;
-      if (task.status === 'running') {
-        task.status = 'failed';
-        task.error = 'Task execution interrupted by server restart';
-      }
       return task;
     } catch {
       return null;
@@ -323,7 +328,8 @@ export async function executeQueueTaskOneByOne(
     fs.mkdirSync(playbooksDir, { recursive: true });
   }
 
-  const ephemeralFile = path.join(playbooksDir, `.queue-${task.id}.yml`);
+  const safeId = task.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const ephemeralFile = path.join(playbooksDir, `.queue-${safeId}.yml`);
   const playbookYaml = compileOnTheFlyPlaybook(task);
   fs.writeFileSync(ephemeralFile, playbookYaml, 'utf-8');
 

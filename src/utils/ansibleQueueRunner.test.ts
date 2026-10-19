@@ -260,9 +260,49 @@ describe('ansibleQueueRunner', () => {
       const state = getQueue();
       expect(state.tasks.length).toBe(0);
     });
+
+    it('recovers running tasks upon initQueueStore by marking failed in memory and SQLite', () => {
+      const db = initQueueStore(':memory:');
+      enqueueTask(sampleTask1);
+      db.exec(`UPDATE ansible_queue_tasks SET status = 'running' WHERE id = 'task-restart-caddy'`);
+
+      const preCheck = db.prepare(`SELECT status FROM ansible_queue_tasks WHERE id = 'task-restart-caddy'`).get() as { status: string };
+      expect(preCheck.status).toBe('running');
+
+      // Simulate server reboot by calling initQueueStore with the same db instance
+      initQueueStore(db);
+
+      // Verify both in-memory and SQLite states are 'failed'
+      const state = getQueue();
+      const task = state.tasks.find(t => t.id === 'task-restart-caddy');
+      expect(task?.status).toBe('failed');
+      expect(task?.error).toBe('Task execution interrupted by server restart');
+
+      const sqliteRow = db.prepare(`SELECT status, error FROM ansible_queue_tasks WHERE id = 'task-restart-caddy'`).get() as { status: string; error: string };
+      expect(sqliteRow.status).toBe('failed');
+      expect(sqliteRow.error).toBe('Task execution interrupted by server restart');
+    });
   });
 
   describe('executeQueueTaskOneByOne', () => {
+    it('sanitizes unsafe characters in task.id for ephemeral playbook filename', async () => {
+      const unsafeTask: QueuedAnsibleTask = {
+        ...sampleTask1,
+        id: 'task/../../../etc:passwd!@#$%',
+      };
+
+      let executedPlaybookPath = '';
+      await executeQueueTaskOneByOne(unsafeTask, undefined, {
+        execCommand: async (_cmd, args) => {
+          executedPlaybookPath = args[args.length - 1];
+          return { stdout: mockAnsibleSuccessOutput, stderr: '', exitCode: 0 };
+        },
+      });
+
+      const basename = path.basename(executedPlaybookPath);
+      expect(basename).toBe('.queue-task__________etc_passwd_____.yml');
+      expect(fs.existsSync(executedPlaybookPath)).toBe(false);
+    });
     it('writes ephemeral playbook, executes via runner, parses JSON, and cleans up playbook', async () => {
       let executedCommand = '';
       let executedArgs: string[] = [];
