@@ -17,6 +17,7 @@ const (
 	ElevationNone ElevationMethod = "none"
 	ElevationRun0 ElevationMethod = "run0"
 	ElevationSudo ElevationMethod = "sudo"
+	ElevationDoas ElevationMethod = "doas"
 )
 
 // PrivilegeStatus describes remote host privilege elevation status
@@ -60,7 +61,7 @@ type ServiceStatus struct {
 	SubState    string `json:"subState"`
 }
 
-// StripLeadingPrivilege strips existing sudo or run0 prefix from a command
+// StripLeadingPrivilege strips existing sudo, run0, or doas prefix from a command
 func StripLeadingPrivilege(cmd string) string {
 	trimmed := strings.TrimSpace(cmd)
 	if strings.HasPrefix(trimmed, "sudo -n ") {
@@ -75,10 +76,16 @@ func StripLeadingPrivilege(cmd string) string {
 	if strings.HasPrefix(trimmed, "run0 ") {
 		return strings.TrimSpace(strings.TrimPrefix(trimmed, "run0 "))
 	}
+	if strings.HasPrefix(trimmed, "doas -n ") {
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, "doas -n "))
+	}
+	if strings.HasPrefix(trimmed, "doas ") {
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, "doas "))
+	}
 	return trimmed
 }
 
-// WrapElevatedCommand wraps command using run0 (preferred) or sudo
+// WrapElevatedCommand wraps command using run0 (preferred), sudo, or doas
 func WrapElevatedCommand(cmd string, method ElevationMethod, user string) string {
 	cleanCmd := StripLeadingPrivilege(cmd)
 	if cleanCmd == "" {
@@ -92,6 +99,8 @@ func WrapElevatedCommand(cmd string, method ElevationMethod, user string) string
 		return fmt.Sprintf("run0 --background=no %s", cleanCmd)
 	case ElevationSudo:
 		return fmt.Sprintf("sudo -n %s", cleanCmd)
+	case ElevationDoas:
+		return fmt.Sprintf("doas -n %s", cleanCmd)
 	default:
 		return cleanCmd
 	}
@@ -128,7 +137,7 @@ func (b *BridgeSession) WrapElevated(cmd string) string {
 	return WrapElevatedCommand(cmd, method, b.cfg.User)
 }
 
-// DetectElevation probes remote host for run0 and sudo support, preferring run0
+// DetectElevation probes remote host for run0, sudo, and doas support, preferring run0 -> sudo -> doas -> none
 func (b *BridgeSession) DetectElevation() (PrivilegeStatus, error) {
 	if b.cfg.User == "root" {
 		b.SetElevationMethod(ElevationNone)
@@ -140,7 +149,7 @@ func (b *BridgeSession) DetectElevation() (PrivilegeStatus, error) {
 		}, nil
 	}
 
-	// Probe run0 first
+	// Probe run0 first (systemd 256+ polkit session)
 	run0Check := "which run0 >/dev/null 2>&1 && run0 --background=no id -u"
 	out, err := b.sshMgr.RunCommand(b.cfg, run0Check)
 	if err == nil && strings.TrimSpace(out) == "0" {
@@ -153,13 +162,26 @@ func (b *BridgeSession) DetectElevation() (PrivilegeStatus, error) {
 		}, nil
 	}
 
-	// Probe sudo fallback
+	// Probe sudo fallback (passwordless sudo -n)
 	sudoCheck := "sudo -n id -u"
 	out, err = b.sshMgr.RunCommand(b.cfg, sudoCheck)
 	if err == nil && strings.TrimSpace(out) == "0" {
 		b.SetElevationMethod(ElevationSudo)
 		return PrivilegeStatus{
 			Method:     ElevationSudo,
+			Active:     true,
+			User:       b.cfg.User,
+			CanElevate: true,
+		}, nil
+	}
+
+	// Probe doas fallback (OpenBSD / Alpine / custom Linux)
+	doasCheck := "which doas >/dev/null 2>&1 && doas -n id -u"
+	out, err = b.sshMgr.RunCommand(b.cfg, doasCheck)
+	if err == nil && strings.TrimSpace(out) == "0" {
+		b.SetElevationMethod(ElevationDoas)
+		return PrivilegeStatus{
+			Method:     ElevationDoas,
 			Active:     true,
 			User:       b.cfg.User,
 			CanElevate: true,
@@ -173,6 +195,16 @@ func (b *BridgeSession) DetectElevation() (PrivilegeStatus, error) {
 		User:       b.cfg.User,
 		CanElevate: false,
 	}, nil
+}
+
+// HasCockpitBridge checks if the optional cockpit-bridge binary is available on the remote host.
+// The system operates fully agentless over SSH; cockpit-bridge is never a mandatory requirement.
+func (b *BridgeSession) HasCockpitBridge() bool {
+	out, err := b.sshMgr.RunCommand(b.cfg, "which cockpit-bridge 2>/dev/null || echo NO_BRIDGE")
+	if err != nil {
+		return false
+	}
+	return !strings.Contains(out, "NO_BRIDGE") && strings.TrimSpace(out) != ""
 }
 
 // FetchRecentLogs fetches recent system journal logs via journalctl/cockpit-bridge

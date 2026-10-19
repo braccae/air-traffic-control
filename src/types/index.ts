@@ -45,11 +45,11 @@ export interface NodeItem {
     secureBoot: string;
     iommu: string;
   };
-  privilegeMethod?: 'run0' | 'sudo' | 'none';
+  privilegeMethod?: 'run0' | 'sudo' | 'doas' | 'none';
   privilegeActive?: boolean;
 }
 
-export type PrivilegeMethod = 'run0' | 'sudo' | 'none';
+export type PrivilegeMethod = 'run0' | 'sudo' | 'doas' | 'none';
 
 export interface PrivilegeStatus {
   method: PrivilegeMethod;
@@ -62,6 +62,8 @@ export interface PrivilegeStatus {
     run0Active?: boolean;
     hasSudo?: boolean;
     sudoActive?: boolean;
+    hasDoas?: boolean;
+    doasActive?: boolean;
   };
 }
 

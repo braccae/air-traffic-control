@@ -27,6 +27,11 @@ describe('Privilege Escalation Helper - Command Wrapping', () => {
     assert.strictEqual(wrapped, 'sudo -n ip link set eth0 up');
   });
 
+  it('wraps command with doas -n when method is doas', () => {
+    const wrapped = wrapElevatedCommand('ip link set eth0 up', 'doas', 'core');
+    assert.strictEqual(wrapped, 'doas -n ip link set eth0 up');
+  });
+
   it('does not wrap command when method is none', () => {
     const wrapped = wrapElevatedCommand('uname -a', 'none', 'core');
     assert.strictEqual(wrapped, 'uname -a');
@@ -38,6 +43,9 @@ describe('Privilege Escalation Helper - Command Wrapping', () => {
 
     const wrappedSudo = wrapElevatedCommand('ip link set eth0 up', 'sudo', 'root');
     assert.strictEqual(wrappedSudo, 'ip link set eth0 up');
+
+    const wrappedDoas = wrapElevatedCommand('ip link set eth0 up', 'doas', 'root');
+    assert.strictEqual(wrappedDoas, 'ip link set eth0 up');
   });
 
   it('strips existing sudo prefix when wrapping with run0', () => {
@@ -56,6 +64,14 @@ describe('Privilege Escalation Helper - Command Wrapping', () => {
     assert.strictEqual(wrappedShort, 'sudo -n smartctl -a /dev/sda');
   });
 
+  it('strips existing doas prefix when wrapping with run0 or sudo', () => {
+    const wrappedRun0 = wrapElevatedCommand('doas -n reboot', 'run0', 'core');
+    assert.strictEqual(wrappedRun0, 'run0 --background=no reboot');
+
+    const wrappedSudo = wrapElevatedCommand('doas reboot', 'sudo', 'core');
+    assert.strictEqual(wrappedSudo, 'sudo -n reboot');
+  });
+
   it('strips existing sudo prefix when user is root', () => {
     const wrapped = wrapElevatedCommand('sudo systemctl reboot', 'none', 'root');
     assert.strictEqual(wrapped, 'systemctl reboot');
@@ -64,6 +80,7 @@ describe('Privilege Escalation Helper - Command Wrapping', () => {
   it('handles empty or whitespace-only commands safely', () => {
     assert.strictEqual(wrapElevatedCommand('', 'run0', 'core'), '');
     assert.strictEqual(wrapElevatedCommand('   ', 'sudo', 'core'), '');
+    assert.strictEqual(wrapElevatedCommand('   ', 'doas', 'core'), '');
   });
 
   it('stripLeadingPrivilege correctly strips prefixes', () => {
@@ -71,6 +88,8 @@ describe('Privilege Escalation Helper - Command Wrapping', () => {
     assert.strictEqual(stripLeadingPrivilege('sudo -n cat /etc/shadow'), 'cat /etc/shadow');
     assert.strictEqual(stripLeadingPrivilege('run0 --background=no id -u'), 'id -u');
     assert.strictEqual(stripLeadingPrivilege('run0 whoami'), 'whoami');
+    assert.strictEqual(stripLeadingPrivilege('doas -n zpool list'), 'zpool list');
+    assert.strictEqual(stripLeadingPrivilege('doas apk upgrade'), 'apk upgrade');
     assert.strictEqual(stripLeadingPrivilege('uptime'), 'uptime');
   });
 });
@@ -133,6 +152,38 @@ describe('Privilege Escalation Helper - Privilege Evaluation', () => {
     assert.strictEqual(status.canElevate, true);
   });
 
+  it('falls back to doas when run0 and sudo are not active but doas is active', () => {
+    const status = evaluatePrivilege({
+      user: 'alpine-user',
+      run0Success: false,
+      run0Available: false,
+      sudoSuccess: false,
+      sudoAvailable: false,
+      doasSuccess: true,
+      doasAvailable: true,
+    });
+
+    assert.strictEqual(status.method, 'doas');
+    assert.strictEqual(status.active, true);
+    assert.strictEqual(status.canElevate, true);
+  });
+
+  it('uses doas when only doas is available (inactive)', () => {
+    const status = evaluatePrivilege({
+      user: 'alpine-user',
+      run0Success: false,
+      run0Available: false,
+      sudoSuccess: false,
+      sudoAvailable: false,
+      doasSuccess: false,
+      doasAvailable: true,
+    });
+
+    assert.strictEqual(status.method, 'doas');
+    assert.strictEqual(status.active, false);
+    assert.strictEqual(status.canElevate, true);
+  });
+
   it('returns none when neither run0 nor sudo is available', () => {
     const status = evaluatePrivilege({
       user: 'guest',
@@ -140,6 +191,8 @@ describe('Privilege Escalation Helper - Privilege Evaluation', () => {
       run0Available: false,
       sudoSuccess: false,
       sudoAvailable: false,
+      doasSuccess: false,
+      doasAvailable: false,
     });
 
     assert.strictEqual(status.method, 'none');
@@ -218,6 +271,21 @@ describe('Privilege Escalation Helper - Output Parsing', () => {
     assert.strictEqual(status.canElevate, false);
   });
 
+  it('parses probe output with active doas when run0 and sudo are unavailable', () => {
+    const output = [
+      'USER:alpine',
+      'RUN0:NONE',
+      'SUDO:NONE',
+      'DOAS:ACTIVE',
+    ].join('\n');
+
+    const status = parsePrivilegeProbeOutput(output, 'alpine');
+    assert.strictEqual(status.method, 'doas');
+    assert.strictEqual(status.active, true);
+    assert.strictEqual(status.canElevate, true);
+    assert.strictEqual(status.user, 'alpine');
+  });
+
   it('parses root user correctly from probe output', () => {
     const output = [
       'USER:root',
@@ -243,6 +311,18 @@ describe('Privilege Escalation Helper - Badge Formatting', () => {
     const badge = formatPrivilegeBadge(status);
     assert.strictEqual(badge.label, 'root');
     assert.strictEqual(badge.icon, 'verified_user');
+  });
+
+  it('formats badge for active doas', () => {
+    const status: PrivilegeStatus = {
+      method: 'doas',
+      active: true,
+      user: 'alpine',
+      canElevate: true,
+    };
+    const badge = formatPrivilegeBadge(status);
+    assert.strictEqual(badge.label, 'doas (Active)');
+    assert.strictEqual(badge.icon, 'bolt');
   });
 
   it('formats badge for active run0', () => {

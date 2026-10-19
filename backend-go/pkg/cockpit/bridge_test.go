@@ -160,6 +160,63 @@ func TestDetectElevation_FallsBackToSudo(t *testing.T) {
 	}
 }
 
+func TestWrapElevatedCommand_DoasFallback(t *testing.T) {
+	wrapped := WrapElevatedCommand("systemctl stop podman", ElevationDoas, "apps")
+	expected := "doas -n systemctl stop podman"
+	if wrapped != expected {
+		t.Errorf("expected %q, got %q", expected, wrapped)
+	}
+
+	// Strips existing doas
+	wrappedFromDoas := WrapElevatedCommand("doas -n systemctl restart caddy", ElevationRun0, "core")
+	expectedRun0 := "run0 --background=no systemctl restart caddy"
+	if wrappedFromDoas != expectedRun0 {
+		t.Errorf("expected %q, got %q", expectedRun0, wrappedFromDoas)
+	}
+}
+
+func TestControlService_WithDoasElevation(t *testing.T) {
+	runner := &mockSSHRunner{}
+	session := NewBridgeSession(runner, ssh.Config{Host: "192.168.1.150", Port: 22, User: "core"})
+	session.SetElevationMethod(ElevationDoas)
+
+	if err := session.ControlService("nginx.service", "reload"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := "doas -n systemctl reload nginx.service"
+	if runner.lastCmd != expected {
+		t.Errorf("expected %q, got %q", expected, runner.lastCmd)
+	}
+}
+
+func TestDetectElevation_FallsBackToDoas(t *testing.T) {
+	runner := &mockSSHRunner{
+		cmdFunc: func(cmd string) (string, error) {
+			if strings.Contains(cmd, "run0") {
+				return "", errors.New("command not found")
+			}
+			if strings.Contains(cmd, "sudo") {
+				return "", errors.New("command not found")
+			}
+			if strings.Contains(cmd, "doas") {
+				return "0\n", nil
+			}
+			return "", errors.New("unknown command")
+		},
+	}
+	session := NewBridgeSession(runner, ssh.Config{Host: "192.168.1.150", Port: 22, User: "alpine-user"})
+	status, err := session.DetectElevation()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Method != ElevationDoas || !status.Active {
+		t.Errorf("expected ElevationDoas active, got %+v", status)
+	}
+	if session.GetElevationMethod() != ElevationDoas {
+		t.Errorf("expected session elevation to be ElevationDoas, got %s", session.GetElevationMethod())
+	}
+}
+
 func TestDetectElevation_Unprivileged(t *testing.T) {
 	runner := &mockSSHRunner{
 		cmdFunc: func(cmd string) (string, error) {
@@ -173,5 +230,23 @@ func TestDetectElevation_Unprivileged(t *testing.T) {
 	}
 	if status.Method != ElevationNone || status.Active {
 		t.Errorf("expected ElevationNone inactive, got %+v", status)
+	}
+}
+
+func TestHasCockpitBridge(t *testing.T) {
+	presentRunner := &mockSSHRunner{
+		output: "/usr/bin/cockpit-bridge\n",
+	}
+	session := NewBridgeSession(presentRunner, ssh.Config{Host: "192.168.1.150", Port: 22, User: "core"})
+	if !session.HasCockpitBridge() {
+		t.Errorf("expected HasCockpitBridge to be true when binary is found")
+	}
+
+	missingRunner := &mockSSHRunner{
+		output: "NO_BRIDGE\n",
+	}
+	missingSession := NewBridgeSession(missingRunner, ssh.Config{Host: "192.168.1.150", Port: 22, User: "core"})
+	if missingSession.HasCockpitBridge() {
+		t.Errorf("expected HasCockpitBridge to be false when binary is missing")
 	}
 }

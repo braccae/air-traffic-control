@@ -322,10 +322,12 @@ export const LIVE_TAILNET_NODES: NodeItem[] = [
 ];
 
 export async function runNodeCommand(node: NodeItem, command: string, timeoutMs = 6000): Promise<string> {
-  // If node prefers run0 and command attempts sudo, transparently wrap with run0
+  // If node prefers run0 or doas and command attempts sudo, transparently wrap with the preferred method
   let effectiveCommand = command;
   if (node.privilegeMethod === 'run0' && (command.startsWith('sudo ') || command.startsWith('sudo -n '))) {
     effectiveCommand = wrapElevatedCommand(command, 'run0', node.sshUser || 'core');
+  } else if (node.privilegeMethod === 'doas' && (command.startsWith('sudo ') || command.startsWith('sudo -n '))) {
+    effectiveCommand = wrapElevatedCommand(command, 'doas', node.sshUser || 'core');
   }
 
   const isLocal =
@@ -421,7 +423,9 @@ export async function testNodePrivilege(
       ? 'run0 --background=no id -u'
       : method === 'sudo'
         ? 'sudo -n id -u'
-        : 'id -u';
+        : method === 'doas'
+          ? 'doas -n id -u'
+          : 'id -u';
 
   try {
     const stdout = await runNodeCommand(node, testCmd, 6000);

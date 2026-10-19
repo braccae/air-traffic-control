@@ -8,19 +8,22 @@ export interface ProbeEvaluationInput {
   run0Available?: boolean;
   sudoSuccess?: boolean;
   sudoAvailable?: boolean;
+  doasSuccess?: boolean;
+  doasAvailable?: boolean;
 }
 
 /**
- * Strips existing sudo or run0 prefixes from a command string.
+ * Strips existing sudo, run0, or doas prefixes from a command string.
  */
 export function stripLeadingPrivilege(command: string): string {
-  return command.replace(/^(sudo(\s+-n)?|run0(\s+--background=no)?)\s+/, '').trim();
+  return command.replace(/^(sudo(\s+-n)?|run0(\s+--background=no)?|doas(\s+-n)?)\s+/, '').trim();
 }
 
 /**
- * Wraps a shell command with the appropriate privilege escalation tool (run0 or sudo).
+ * Wraps a shell command with the appropriate privilege escalation tool (run0, sudo, or doas).
  * When run0 is available and active: run0 --background=no <cmd>
  * When sudo is available and active: sudo -n <cmd>
+ * When doas is available and active: doas -n <cmd>
  * When method is none or user is already root: executes <cmd> directly.
  */
 export function wrapElevatedCommand(
@@ -46,6 +49,8 @@ export function wrapElevatedCommand(
       return `run0 --background=no ${cleanCmd}`;
     case 'sudo':
       return `sudo -n ${cleanCmd}`;
+    case 'doas':
+      return `doas -n ${cleanCmd}`;
     case 'none':
     default:
       return cleanCmd;
@@ -54,7 +59,7 @@ export function wrapElevatedCommand(
 
 /**
  * Resolves the privilege status given probe indicators.
- * Prefers run0 when both run0 and sudo are available.
+ * Hierarchy: run0 -> sudo -> doas -> none.
  */
 export function evaluatePrivilege(input: ProbeEvaluationInput): PrivilegeStatus {
   const user = input.user || 'core';
@@ -69,6 +74,8 @@ export function evaluatePrivilege(input: ProbeEvaluationInput): PrivilegeStatus 
         run0Active: true,
         hasSudo: !!input.sudoAvailable,
         sudoActive: true,
+        hasDoas: !!input.doasAvailable,
+        doasActive: true,
       },
     };
   }
@@ -85,6 +92,8 @@ export function evaluatePrivilege(input: ProbeEvaluationInput): PrivilegeStatus 
         run0Active: true,
         hasSudo: input.sudoAvailable ?? input.sudoSuccess,
         sudoActive: !!input.sudoSuccess,
+        hasDoas: input.doasAvailable ?? input.doasSuccess,
+        doasActive: !!input.doasSuccess,
       },
     };
   }
@@ -101,6 +110,26 @@ export function evaluatePrivilege(input: ProbeEvaluationInput): PrivilegeStatus 
         run0Active: false,
         hasSudo: true,
         sudoActive: true,
+        hasDoas: input.doasAvailable ?? input.doasSuccess,
+        doasActive: !!input.doasSuccess,
+      },
+    };
+  }
+
+  // Active doas has third priority
+  if (input.doasSuccess) {
+    return {
+      method: 'doas',
+      active: true,
+      user,
+      canElevate: true,
+      details: {
+        hasRun0: !!input.run0Available,
+        run0Active: false,
+        hasSudo: !!input.sudoAvailable,
+        sudoActive: false,
+        hasDoas: true,
+        doasActive: true,
       },
     };
   }
@@ -117,6 +146,8 @@ export function evaluatePrivilege(input: ProbeEvaluationInput): PrivilegeStatus 
         run0Active: false,
         hasSudo: !!input.sudoAvailable,
         sudoActive: false,
+        hasDoas: !!input.doasAvailable,
+        doasActive: false,
       },
     };
   }
@@ -132,6 +163,25 @@ export function evaluatePrivilege(input: ProbeEvaluationInput): PrivilegeStatus 
         run0Active: false,
         hasSudo: true,
         sudoActive: false,
+        hasDoas: !!input.doasAvailable,
+        doasActive: false,
+      },
+    };
+  }
+
+  if (input.doasAvailable) {
+    return {
+      method: 'doas',
+      active: false,
+      user,
+      canElevate: true,
+      details: {
+        hasRun0: false,
+        run0Active: false,
+        hasSudo: false,
+        sudoActive: false,
+        hasDoas: true,
+        doasActive: false,
       },
     };
   }
@@ -146,18 +196,21 @@ export function evaluatePrivilege(input: ProbeEvaluationInput): PrivilegeStatus 
       run0Active: false,
       hasSudo: false,
       sudoActive: false,
+      hasDoas: false,
+      doasActive: false,
     },
   };
 }
 
 /**
- * Generates a non-interactive shell command to probe run0 and sudo status on a host.
+ * Generates a non-interactive shell command to probe run0, sudo, and doas status on a host.
  */
 export function buildPrivilegeProbeCommand(): string {
   return [
     'u=$(whoami 2>/dev/null || id -un); echo "USER:$u"',
     'if command -v run0 >/dev/null 2>&1; then if run0 --background=no id -u 2>/dev/null | grep -q "^0$"; then echo "RUN0:ACTIVE"; else echo "RUN0:AVAILABLE"; fi; else echo "RUN0:NONE"; fi',
     'if command -v sudo >/dev/null 2>&1; then if sudo -n id -u 2>/dev/null | grep -q "^0$"; then echo "SUDO:ACTIVE"; else echo "SUDO:AVAILABLE"; fi; else echo "SUDO:NONE"; fi',
+    'if command -v doas >/dev/null 2>&1; then if doas -n id -u 2>/dev/null | grep -q "^0$"; then echo "DOAS:ACTIVE"; else echo "DOAS:AVAILABLE"; fi; else echo "DOAS:NONE"; fi',
   ].join(' && ');
 }
 
@@ -170,6 +223,8 @@ export function parsePrivilegeProbeOutput(rawOutput: string, defaultUser = 'core
   let run0Available = false;
   let sudoSuccess = false;
   let sudoAvailable = false;
+  let doasSuccess = false;
+  let doasAvailable = false;
 
   const lines = rawOutput.split('\n').map((l) => l.trim());
   for (const line of lines) {
@@ -194,6 +249,15 @@ export function parsePrivilegeProbeOutput(rawOutput: string, defaultUser = 'core
     } else if (line === 'SUDO:NONE') {
       sudoAvailable = false;
       sudoSuccess = false;
+    } else if (line === 'DOAS:ACTIVE') {
+      doasSuccess = true;
+      doasAvailable = true;
+    } else if (line === 'DOAS:AVAILABLE') {
+      doasAvailable = true;
+      doasSuccess = false;
+    } else if (line === 'DOAS:NONE') {
+      doasAvailable = false;
+      doasSuccess = false;
     }
   }
 
@@ -203,6 +267,8 @@ export function parsePrivilegeProbeOutput(rawOutput: string, defaultUser = 'core
     run0Available,
     sudoSuccess,
     sudoAvailable,
+    doasSuccess,
+    doasAvailable,
   });
 }
 
@@ -233,6 +299,14 @@ export function formatPrivilegeBadge(status: PrivilegeStatus): {
         description: 'Privileged execution enabled via systemd run0 polkit session',
       };
     }
+    if (status.method === 'doas') {
+      return {
+        label: 'doas (Active)',
+        badgeColor: 'bg-[#ffd97d]/20 text-[#ffd97d] border-[#ffd97d]/40',
+        icon: 'bolt',
+        description: 'Privileged execution enabled via passwordless doas (-n)',
+      };
+    }
     return {
       label: 'sudo (Active)',
       badgeColor: 'bg-[#b0c9ff]/20 text-[#b0c9ff] border-[#b0c9ff]/40',
@@ -254,7 +328,7 @@ export function formatPrivilegeBadge(status: PrivilegeStatus): {
     label: `Unprivileged (${status.user})`,
     badgeColor: 'bg-[#313447] text-[#8d909b] border-[#434750]/50',
     icon: 'lock',
-    description: `Running as unprivileged user ${status.user}; neither run0 nor sudo available`,
+    description: `Running as unprivileged user ${status.user}; neither run0, sudo, nor doas available`,
   };
 }
 

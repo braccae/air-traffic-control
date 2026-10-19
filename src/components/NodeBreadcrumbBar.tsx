@@ -214,6 +214,20 @@ export const NodeBreadcrumbBar: React.FC<NodeBreadcrumbBarProps> = ({
                   <span className="text-[10px] text-[#8d909b]">sudo -n id -u</span>
                 </button>
 
+                <button
+                  type="button"
+                  id="test-doas-btn"
+                  disabled={testingElevation}
+                  onClick={() => handleTestElevation('doas')}
+                  className="w-full text-left px-2 py-1.5 hover:bg-[#26293c] rounded text-[#ffd97d] flex items-center justify-between transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[14px]">key</span>
+                    <span>Test doas (-n)</span>
+                  </span>
+                  <span className="text-[10px] text-[#8d909b]">doas -n id -u</span>
+                </button>
+
                 <div className="h-[1px] bg-[#26293c] my-0.5"></div>
 
                 <button
