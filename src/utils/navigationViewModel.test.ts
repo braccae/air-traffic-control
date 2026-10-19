@@ -269,3 +269,40 @@ test('groupNodesByDynamicCluster groups arbitrary Tailscale tag groups (e.g. tag
   assert.equal(updated.specs.ramGiB, 32);
 });
 
+test('getSubSidebarWrapperClasses generates static sticky positioning and independent scrollbar classes for all widths', async () => {
+  const { getSubSidebarWrapperClasses, getWorkspaceWrapperClasses } = await import('./navigationViewModel.ts');
+
+  // Verify sticky pinned positioning and independent scroll properties across all widths
+  for (const width of ['compact', 'normal', 'wide'] as const) {
+    const classes = getSubSidebarWrapperClasses(width);
+    assert.ok(classes.includes('sticky top-2'), `Expected sticky top-2 for ${width}`);
+    assert.ok(classes.includes('h-[calc(100vh-140px)]'), `Expected fixed viewport height calculation for ${width}`);
+    assert.ok(classes.includes('overflow-y-auto'), `Expected overflow-y-auto for ${width}`);
+    assert.ok(classes.includes('shrink-0'), `Expected shrink-0 for ${width}`);
+    assert.ok(classes.includes('pr-1'), `Expected pr-1 for ${width}`);
+    assert.ok(classes.includes('scrollbar-thin'), `Expected scrollbar-thin for ${width}`);
+  }
+
+  // Verify responsive width column allocations
+  const compactSidebar = getSubSidebarWrapperClasses('compact');
+  assert.ok(compactSidebar.includes('col-span-12 lg:col-span-2 xl:col-span-2'));
+
+  const normalSidebar = getSubSidebarWrapperClasses('normal');
+  assert.ok(normalSidebar.includes('col-span-12 lg:col-span-3 xl:col-span-2'));
+
+  const wideSidebar = getSubSidebarWrapperClasses('wide');
+  assert.ok(wideSidebar.includes('col-span-12 lg:col-span-4 xl:col-span-3'));
+
+  // Verify complementary workspace column allocations
+  const compactWorkspace = getWorkspaceWrapperClasses('compact');
+  assert.ok(compactWorkspace.includes('col-span-12 lg:col-span-10 xl:col-span-10'));
+  assert.ok(compactWorkspace.includes('flex flex-col gap-2'));
+
+  const normalWorkspace = getWorkspaceWrapperClasses('normal');
+  assert.ok(normalWorkspace.includes('col-span-12 lg:col-span-9 xl:col-span-10'));
+
+  const wideWorkspace = getWorkspaceWrapperClasses('wide');
+  assert.ok(wideWorkspace.includes('col-span-12 lg:col-span-8 xl:col-span-9'));
+});
+
+

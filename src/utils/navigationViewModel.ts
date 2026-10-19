@@ -154,3 +154,25 @@ export function resolveNodeIcon(node: NodeItem): string {
   if (node.group === 'noodle' || node.group === 'tag:pve') return 'router';
   return 'dns';
 }
+
+export type SubSidebarWidth = 'compact' | 'normal' | 'wide';
+
+export function getSubSidebarWrapperClasses(width: SubSidebarWidth): string {
+  const columnClasses =
+    width === 'wide'
+      ? 'col-span-12 lg:col-span-4 xl:col-span-3'
+      : width === 'compact'
+      ? 'col-span-12 lg:col-span-2 xl:col-span-2'
+      : 'col-span-12 lg:col-span-3 xl:col-span-2';
+
+  return `${columnClasses} sticky top-2 h-[calc(100vh-140px)] overflow-y-auto shrink-0 pr-1 scrollbar-thin`;
+}
+
+export function getWorkspaceWrapperClasses(width: SubSidebarWidth): string {
+  return width === 'wide'
+    ? 'col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-2'
+    : width === 'compact'
+    ? 'col-span-12 lg:col-span-10 xl:col-span-10 flex flex-col gap-2'
+    : 'col-span-12 lg:col-span-9 xl:col-span-10 flex flex-col gap-2';
+}
+

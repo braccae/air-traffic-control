@@ -6,6 +6,7 @@ interface CockpitSubSidebarProps {
   activeItem: string;
   onSelectItem: (item: string) => void;
   onEditNode?: () => void;
+  className?: string;
 }
 
 export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
@@ -13,9 +14,10 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
   activeItem,
   onSelectItem,
   onEditNode,
+  className = '',
 }) => {
   return (
-    <aside className="col-span-12 lg:col-span-3 xl:col-span-2 flex flex-col gap-2">
+    <aside className={`flex flex-col gap-2 w-full scrollbar-thin ${className}`.trim()}>
       {/* Cockpit Tree Groupings */}
       <div className="bg-[#171a2d] rounded p-2 flex flex-col gap-2 border border-[#26293c]">
         {/* SYSTEM */}

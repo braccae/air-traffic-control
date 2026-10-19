@@ -68,6 +68,26 @@
   background: #434750;
 }
 
+/* Custom thin scrollbar utility */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #26293c #0a0d1f;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: #0a0d1f;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #26293c;
+  border-radius: 3px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #434750;
+}
+
 .material-symbols-outlined {
   font-family: 'Material Symbols Outlined';
   font-weight: normal;

@@ -27,7 +27,11 @@ import { ContainerLogsModal } from './components/modals/ContainerLogsModal.tsx';
 import { RebootConfirmModal } from './components/modals/RebootConfirmModal.tsx';
 import { SearchModal } from './components/modals/SearchModal.tsx';
 import { GroupVarsModal } from './components/modals/GroupVarsModal.tsx';
-import { updateNodeSettings } from './utils/navigationViewModel.ts';
+import {
+  updateNodeSettings,
+  getSubSidebarWrapperClasses,
+  getWorkspaceWrapperClasses,
+} from './utils/navigationViewModel.ts';
 
 const initialNodes: NodeItem[] = [
   {
@@ -796,13 +800,7 @@ export default function App() {
             {/* Cockpit Nested Split Layout: Sub-Sidebar + Main Control Workspace */}
             <div className="grid grid-cols-12 gap-2 mt-2 w-full">
               {/* Cockpit Sub-Sidebar with Resizable Width */}
-              <div className={
-                subSidebarWidth === 'wide'
-                  ? 'col-span-12 lg:col-span-4 xl:col-span-3'
-                  : subSidebarWidth === 'compact'
-                  ? 'col-span-12 lg:col-span-2 xl:col-span-2'
-                  : 'col-span-12 lg:col-span-3 xl:col-span-2'
-              }>
+              <div className={getSubSidebarWrapperClasses(subSidebarWidth)}>
                 <CockpitSubSidebar
                   node={selectedNode}
                   activeItem={activeCockpitItem}
@@ -816,13 +814,7 @@ export default function App() {
               </div>
 
               {/* Main Operational Workspace Grid */}
-              <div className={
-                subSidebarWidth === 'wide'
-                  ? 'col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-2'
-                  : subSidebarWidth === 'compact'
-                  ? 'col-span-12 lg:col-span-10 xl:col-span-10 flex flex-col gap-2'
-                  : 'col-span-12 lg:col-span-9 xl:col-span-10 flex flex-col gap-2'
-              }>
+              <div className={getWorkspaceWrapperClasses(subSidebarWidth)}>
                 {/* Specific dedicated Views when selected from Menu */}
                 {activeOpTab === 'interfaces' && (
                   <NetworkInterfacesView node={selectedNode} />
