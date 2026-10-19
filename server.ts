@@ -18,7 +18,7 @@ import {
   testNodePrivilege,
 } from './src/utils/liveCluster.ts';
 import { updateNodeSettings } from './src/utils/navigationViewModel.ts';
-import { createHostCacheStore } from './src/utils/hostCacheDb.ts';
+import { createHostCacheStore, registerInventoryRoutes } from './src/utils/hostCacheDb.ts';
 import { fetchNodeTelemetryMultiTier } from './src/utils/telemetryCollector.ts';
 import { registerPrivilegeRoutes } from './src/utils/privilegeEscalation.ts';
 import { buildJournalctlCommand, sanitizeLogFilter } from './src/utils/systemLogs.ts';
@@ -339,6 +339,11 @@ app.post('/api/nodes', (req, res) => {
       secureBoot: 'Enabled',
       iommu: 'Enabled',
     },
+    connectionProtocol: req.body.connectionProtocol,
+    vaultSecretId: req.body.vaultSecretId,
+    folder: req.body.folder,
+    isDynamicTagMember: req.body.isDynamicTagMember,
+    followedTag: req.body.followedTag,
   };
   nodes.push(newNode);
   hostCache.upsertHost(newNode);
@@ -485,6 +490,16 @@ app.delete('/api/nodes/:id', (req, res) => {
   hostCache.deleteHost(removed.id);
   broadcast({ type: 'node_deleted', nodeId: removed.id });
   res.json({ success: true, removed });
+});
+
+// Dynamic Tag Chunks & Custom Folders Inventory Routes
+registerInventoryRoutes(app, {
+  hostCache,
+  broadcast,
+  getNodes: () => nodes,
+  setNodes: (newNodes) => {
+    nodes = newNodes;
+  },
 });
 
 app.get('/api/telemetry', async (req, res) => {
