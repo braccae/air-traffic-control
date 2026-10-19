@@ -21,4 +21,36 @@ import (
 
 	// System service plugins
 	_ "air-traffic-control/backend/plugins/system/service"
+
+	// Storage plugins
+	_ "air-traffic-control/backend/plugins/storage/btrfs"
+	_ "air-traffic-control/backend/plugins/storage/lvm"
+	_ "air-traffic-control/backend/plugins/storage/zfs"
+
+	// Share plugins
+	_ "air-traffic-control/backend/plugins/share/nfs"
+	_ "air-traffic-control/backend/plugins/share/smb"
+
+	// Container plugin
+	_ "air-traffic-control/backend/plugins/container/podman"
+
+	// Backup plugin
+	_ "air-traffic-control/backend/plugins/backup/restic"
+
+	// Logs plugin
+	_ "air-traffic-control/backend/plugins/logs/journald"
+
+	// Disk & SMART plugin
+	_ "air-traffic-control/backend/plugins/disk/smart"
+
+	// Virtual machine plugin
+	_ "air-traffic-control/backend/plugins/vm/libvirt"
+
+	// Telemetry plugin
+	_ "air-traffic-control/backend/plugins/telemetry/glances"
+
+	// Network & Firewall plugins
+	_ "air-traffic-control/backend/plugins/firewall/firewalld"
+	_ "air-traffic-control/backend/plugins/network/interfaces"
+	_ "air-traffic-control/backend/plugins/network/tailscale"
 )
