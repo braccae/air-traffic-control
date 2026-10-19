@@ -25,6 +25,7 @@ import { TerminalModal } from './components/modals/TerminalModal.tsx';
 import type { ManagedWindow } from './utils/windowManager.ts';
 import { TailscaleExplorerView } from './components/TailscaleExplorerView.tsx';
 import { AddNodeModal } from './components/modals/AddNodeModal.tsx';
+import { CreateVmModal } from './components/modals/CreateVmModal.tsx';
 import { EditNodeModal } from './components/modals/EditNodeModal.tsx';
 import { RunPlaybookModal } from './components/modals/RunPlaybookModal.tsx';
 import { PlaybookEditorModal } from './components/modals/PlaybookEditorModal.tsx';
@@ -430,6 +431,7 @@ export default function App() {
   // Modals state
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [addNodeOpen, setAddNodeOpen] = useState(false);
+  const [createVmOpen, setCreateVmOpen] = useState(false);
   const [editNodeTarget, setEditNodeTarget] = useState<NodeItem | null>(null);
   const [playbookOpen, setPlaybookOpen] = useState(false);
   const [playbookEditorOpen, setPlaybookEditorOpen] = useState(false);
@@ -580,6 +582,9 @@ export default function App() {
     } else if (id === 'modal-add-node') {
       setAddNodeOpen(false);
       setMinimizedModals(prev => ({ ...prev, [id]: false }));
+    } else if (id === 'modal-create-vm') {
+      setCreateVmOpen(false);
+      setMinimizedModals(prev => ({ ...prev, [id]: false }));
     } else if (id === 'modal-edit-node') {
       setEditNodeTarget(null);
       setMinimizedModals(prev => ({ ...prev, [id]: false }));
@@ -617,6 +622,18 @@ export default function App() {
             type: 'modal' as const,
             isMinimized: Boolean(minimizedModals['modal-add-node']),
             isOpen: addNodeOpen,
+          },
+        ]
+      : []),
+    ...(createVmOpen
+      ? [
+          {
+            id: 'modal-create-vm',
+            title: 'Create VM',
+            icon: 'desktop_windows',
+            type: 'modal' as const,
+            isMinimized: Boolean(minimizedModals['modal-create-vm']),
+            isOpen: createVmOpen,
           },
         ]
       : []),
@@ -687,6 +704,8 @@ export default function App() {
       ? activeSessionId
       : addNodeOpen && !minimizedModals['modal-add-node']
       ? 'modal-add-node'
+      : createVmOpen && !minimizedModals['modal-create-vm']
+      ? 'modal-create-vm'
       : editNodeTarget && !minimizedModals['modal-edit-node']
       ? 'modal-edit-node'
       : playbookOpen && !minimizedModals['modal-run-playbook']
@@ -1222,7 +1241,7 @@ export default function App() {
                   <VirtualMachinesKVM
                     node={selectedNode}
                     onOpenConsole={() => setTerminalOpen(true)}
-                    onNewVM={() => setAddNodeOpen(true)}
+                    onNewVM={() => setCreateVmOpen(true)}
                   />
                 )}
 
@@ -1401,7 +1420,7 @@ export default function App() {
                               <VirtualMachinesKVM
                                 node={selectedNode}
                                 onOpenConsole={() => setTerminalOpen(true)}
-                                onNewVM={() => setAddNodeOpen(true)}
+                                onNewVM={() => setCreateVmOpen(true)}
                               />
                               <ResticBackupPolicy
                                 nodeName={selectedNode.name}
@@ -1515,6 +1534,25 @@ export default function App() {
           setMinimizedModals(prev => ({ ...prev, 'modal-add-node': false }));
         }}
         onAddNode={handleAddNode}
+      />
+
+      <CreateVmModal
+        node={selectedNode}
+        nodes={nodesList}
+        isOpen={createVmOpen}
+        isMinimized={Boolean(minimizedModals['modal-create-vm'])}
+        onMinimize={() => setMinimizedModals(prev => ({ ...prev, 'modal-create-vm': true }))}
+        onClose={() => {
+          setCreateVmOpen(false);
+          setMinimizedModals(prev => ({ ...prev, 'modal-create-vm': false }));
+        }}
+        onCreated={(newVm) => {
+          addToast({
+            type: 'success',
+            title: 'Virtual Machine Created',
+            message: `VM ${newVm.name} successfully provisioned on ${selectedNode.name}`,
+          });
+        }}
       />
 
       <EditNodeModal

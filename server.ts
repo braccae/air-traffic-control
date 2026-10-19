@@ -28,7 +28,8 @@ import {
   updatePlaybook,
   deletePlaybook,
 } from './src/utils/playbookManager.ts';
-import type { NodeItem, TelemetryData, GlobalTaskItem, ServiceUser } from './src/types/index.ts';
+import type { NodeItem, TelemetryData, GlobalTaskItem, ServiceUser, VMItem } from './src/types/index.ts';
+import { getHardwareProbeCommand, parseHardwareProbeOutput } from './src/utils/hardwareProbe.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -296,6 +297,76 @@ app.post('/api/nodes', (req, res) => {
   hostCache.upsertHost(newNode);
   broadcast({ type: 'node_added', node: newNode });
   res.json({ success: true, node: newNode });
+});
+
+app.post('/api/nodes/probe-host', async (req, res) => {
+  const { host, port = 22, sshUser = 'core', authMethod = 'ssh-ed25519 (ssh-agent)' } = req.body;
+  if (!host) {
+    res.status(400).json({ success: false, error: 'host is required' });
+    return;
+  }
+
+  const existing = nodes.find(
+    n =>
+      n.id.toLowerCase() === host.toLowerCase() ||
+      n.name.toLowerCase() === host.toLowerCase() ||
+      n.shortName.toLowerCase() === host.toLowerCase() ||
+      n.ip === host ||
+      n.tailscaleIp === host ||
+      n.tailscaleHost.toLowerCase() === host.toLowerCase()
+  );
+
+  const targetNode: NodeItem = existing
+    ? {
+        ...existing,
+        port: Number(port) || existing.port,
+        sshUser: sshUser || existing.sshUser,
+        authMethod: authMethod || existing.authMethod,
+      }
+    : {
+        id: `probe-${Date.now()}`,
+        name: host,
+        shortName: host.split('.')[0],
+        group: 'tag:host',
+        datacenter: 'leo-banjo.ts.net',
+        nodeType: 'linux',
+        ip: host,
+        port: Number(port) || 22,
+        sshUser: sshUser || 'core',
+        authMethod: authMethod || 'ssh-ed25519 (ssh-agent)',
+        tailscaleIp: host.startsWith('100.') ? host : '',
+        tailscaleHost: host.includes('.') ? host : `${host}.leo-banjo.ts.net`,
+        osDescription: 'Probing...',
+        status: 'online',
+        uptime: 'unknown',
+        hasGlances: false,
+        hasCockpit: true,
+        hasPodman: true,
+        hasRestic: true,
+        specs: {
+          cpu: '',
+          vcpus: 1,
+          ramGiB: 1,
+          motherboard: '',
+          bios: '',
+          ipmi: 'DHCP',
+          ecc: 'Active',
+          secureBoot: 'Enabled',
+          iommu: 'Enabled',
+        },
+      };
+
+  try {
+    const probeCmd = getHardwareProbeCommand();
+    const out = await runNodeCommand(targetNode, probeCmd, 8000);
+    const hardware = parseHardwareProbeOutput(out);
+    res.json({ success: true, hardware, rawOutput: out });
+  } catch (err: any) {
+    res.status(502).json({
+      success: false,
+      error: err?.message || `Failed to probe hardware on ${host}`,
+    });
+  }
 });
 
 app.put('/api/nodes/:id', async (req, res) => {
@@ -1318,6 +1389,76 @@ app.post('/api/nodes/:id/vms/:name/action', async (req, res) => {
     res.json({ success: true, vm: vmName, action, output: out.trim() });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err?.message || `Failed to execute ${action} on VM ${vmName}` });
+  }
+});
+
+app.post('/api/nodes/:id/vms/create', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  const {
+    name,
+    osTemplate = 'Ubuntu 24.04',
+    vcpus = 2,
+    ramGiB = 4,
+    diskGb = 20,
+    bridge = 'virbr0',
+    autostart = false,
+  } = req.body;
+
+  if (!name || typeof name !== 'string') {
+    res.status(400).json({ success: false, error: 'VM name is required' });
+    return;
+  }
+
+  const cleanName = name.trim().replace(/[^a-zA-Z0-9_-]/g, '-');
+  const ramMb = Number(ramGiB) * 1024;
+  const numCpus = Number(vcpus) || 2;
+  const diskSize = Number(diskGb) || 20;
+
+  try {
+    const cmd = [
+      `virt-install --name "${cleanName}" --vcpus ${numCpus} --memory ${ramMb} --disk size=${diskSize} --network bridge=${bridge} --noautoconsole --import --check path_in_use=off 2>&1 || virsh define /dev/stdin << 'EOF'\n<domain type='kvm'><name>${cleanName}</name><memory unit='MiB'>${ramMb}</memory><vcpu>${numCpus}</vcpu><os><type arch='x86_64'>hvm</type></os></domain>\nEOF 2>&1`,
+      autostart ? `virsh autostart "${cleanName}" 2>&1 || true` : 'true',
+    ].join(' && ');
+
+    const out = await runNodeCommand(targetNode, cmd, 10000);
+    hostCache.invalidateHostSections(targetNode.id);
+
+    const newVm: VMItem = {
+      vmid: 200 + Math.floor(Math.random() * 700),
+      name: cleanName,
+      subtext: `${osTemplate} (${bridge})`,
+      status: 'STOPPED',
+      vcpus: numCpus,
+      ramGiB: Number(ramGiB) || 4,
+      type: osTemplate.toLowerCase().includes('windows') ? 'windows' : 'linux',
+    };
+
+    const vmTask: GlobalTaskItem = {
+      id: `task-${Date.now()}`,
+      startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      nodeTarget: targetNode.tailscaleHost || targetNode.name,
+      user: `${targetNode.sshUser || 'core'}@ssh-agent`,
+      description: `virt-install create VM: ${cleanName} (${numCpus} vCPUs, ${ramGiB} GiB, ${diskSize} GB)`,
+      progress: 100,
+      progressEta: 'VM created via KVM/QEMU',
+      status: 'OK',
+      category: 'active',
+      logs: [out.trim()],
+    };
+    hostCache.saveTask(vmTask);
+    tasks = [vmTask, ...tasks.filter(t => t.id !== vmTask.id)];
+    broadcast({ type: 'task_started', task: vmTask });
+
+    res.json({
+      success: true,
+      vm: newVm,
+      output: out.trim(),
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: err?.message || `Failed to create VM ${cleanName} on ${targetNode.name}`,
+    });
   }
 });
 
