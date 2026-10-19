@@ -771,7 +771,7 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
                   </label>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-3 gap-2">
                   <div>
                     <label className="block text-[#8d909b] mb-1">WINRM USER</label>
                     <input
@@ -792,6 +792,19 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
                       <option value="ntlm">NTLM (Standard / Default)</option>
                       <option value="basic">Basic (Testing / Insecure)</option>
                       <option value="kerberos">Kerberos (Active Directory)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[#8d909b] mb-1">GROUP / TAG</label>
+                    <select
+                      value={group}
+                      onChange={e => setGroup(e.target.value)}
+                      className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#ffd580] outline-none"
+                    >
+                      <option value="tag:host">tag:host (Container Hosts)</option>
+                      <option value="tag:pve">tag:pve (Proxmox Hypervisors)</option>
+                      <option value="tag:service">tag:service (Mesh Services)</option>
+                      <option value="tag:admin">tag:admin (Workstations)</option>
                     </select>
                   </div>
                 </div>

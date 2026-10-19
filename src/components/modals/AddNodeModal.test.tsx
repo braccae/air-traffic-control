@@ -98,6 +98,7 @@ test('AddNodeModal WinRM tab renders WinRM port 5985, transport NTLM, and Admini
   assert.ok(html.includes('NTLM') || html.includes('ntlm'), 'Default WinRM transport should be NTLM');
   assert.ok(html.includes('WinRM'), 'Must mention WinRM');
   assert.ok(html.includes('Ansible Vault') || html.includes('Vault Encryption'), 'Must indicate Vault encryption for credentials');
+  assert.ok(html.includes('GROUP / TAG') || html.includes('tag:host'), 'WinRM tab must include group / tag selector');
 });
 
 test('AddNodeModal Follow Tag tab renders tag input, live peer count preview, and Follow Tag & Sync Nodes action', () => {
