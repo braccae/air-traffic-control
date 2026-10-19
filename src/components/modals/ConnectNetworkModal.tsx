@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../../types/index.ts';
 import { validateInterfaceName, validateCidrOrIp } from '../../utils/firewallRules.ts';
+import { getDriver, networkDriver, stageTaskInQueue } from '../../utils/drivers/index.ts';
 
 interface ConnectNetworkModalProps {
   node?: NodeItem;
@@ -157,6 +158,81 @@ export const ConnectNetworkModal: React.FC<ConnectNetworkModalProps> = ({
       setError(err?.message || 'Error occurred while provisioning network interface');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const [staging, setStaging] = useState(false);
+
+  const handleStageNetwork = async () => {
+    setError(null);
+
+    const resolvedNode = nodes.find(n => n.id === targetNodeId) || node || nodes[0];
+    if (!resolvedNode) {
+      setError('A target host node must be selected');
+      return;
+    }
+
+    const ifaceVal = validateInterfaceName(interfaceName);
+    if (!ifaceVal.valid) {
+      setError(ifaceVal.error || 'Invalid interface name');
+      return;
+    }
+
+    if (networkType === 'vlan' && !parentInterface.trim()) {
+      setError('Parent interface is required for 802.1Q VLAN');
+      return;
+    }
+
+    if (networkType === 'static' && !cidr.trim()) {
+      setError('IP Address / CIDR is required for static network configuration');
+      return;
+    }
+
+    if (cidr.trim()) {
+      const cidrVal = validateCidrOrIp(cidr);
+      if (!cidrVal.valid) {
+        setError(cidrVal.error || 'Invalid IP address / CIDR');
+        return;
+      }
+    }
+
+    if (gateway.trim()) {
+      const gwVal = validateCidrOrIp(gateway);
+      if (!gwVal.valid) {
+        setError(gwVal.error || 'Invalid gateway IP address');
+        return;
+      }
+    }
+
+    const dnsList = dnsServers
+      .split(/[,;\s]+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    setStaging(true);
+    try {
+      const driver = getDriver('network', resolvedNode) || networkDriver;
+      const task = driver.compileMutation(resolvedNode, 'connect_interface', {
+        type: networkType,
+        name: interfaceName.trim(),
+        parent: parentInterface.trim() || undefined,
+        vlanId: networkType === 'vlan' ? Number(vlanId) : undefined,
+        cidr: cidr.trim() || undefined,
+        gateway: gateway.trim() || undefined,
+        dns: dnsList.length > 0 ? dnsList : undefined,
+      });
+
+      const res = await stageTaskInQueue(task);
+      if (res.success) {
+        if (onConnected) onConnected();
+        onClose();
+      } else {
+        setError(res.error || 'Failed to stage network task');
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Failed to stage network task');
+    } finally {
+      setStaging(false);
     }
   };
 
@@ -359,14 +435,24 @@ export const ConnectNetworkModal: React.FC<ConnectNetworkModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              disabled={loading}
-              className="px-3 py-1.5 bg-[#171a2d] hover:bg-[#26293c] text-[#c3c6d2] rounded font-mono text-xs transition-colors cursor-pointer"
+              disabled={loading || staging}
+              className="px-3 py-1.5 bg-[#171a2d] hover:bg-[#26293c] text-[#c3c6d2] rounded font-mono text-xs transition-colors cursor-pointer disabled:opacity-50"
             >
               Cancel
             </button>
             <button
+              type="button"
+              disabled={loading || staging}
+              onClick={handleStageNetwork}
+              className="px-3 py-1.5 bg-[#171a2d] hover:bg-[#26293c] text-[#ffd97d] border border-[#ffd97d]/40 rounded font-mono text-xs cursor-pointer font-bold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+              title="Stage network interface configuration into Ansible Mutation Queue without immediate execution"
+            >
+              <span className="material-symbols-outlined text-[15px]">queue</span>
+              <span>{staging ? 'Staging...' : 'Stage in Queue'}</span>
+            </button>
+            <button
               type="submit"
-              disabled={loading}
+              disabled={loading || staging}
               className="px-4 py-1.5 bg-[#8cd6cb] hover:bg-[#a0ebe0] text-[#002e68] font-bold rounded font-mono text-xs transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
               {loading && <span className="material-symbols-outlined text-[16px] animate-spin">sync</span>}

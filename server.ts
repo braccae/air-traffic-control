@@ -1846,6 +1846,38 @@ app.get('/api/ansible/inventory', (_req, res) => {
   }
 });
 
+app.post('/api/ansible/collections/install', (req, res) => {
+  const { collection } = req.body || {};
+  if (
+    !collection ||
+    typeof collection !== 'string' ||
+    !/^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$/.test(collection)
+  ) {
+    res.status(400).json({
+      success: false,
+      error: 'Invalid collection name. Format must be <namespace>.<collection> (e.g. ansible.posix)',
+    });
+    return;
+  }
+
+  try {
+    const output = execSync(`ansible-galaxy collection install ${collection}`, {
+      encoding: 'utf-8',
+      timeout: 120000,
+    });
+    res.json({
+      success: true,
+      message: `Collection ${collection} installed successfully`,
+      output,
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: err?.message || `Failed to install collection ${collection}`,
+    });
+  }
+});
+
 app.post('/api/playbook/run', (req, res) => {
   const { playbook = 'site.yml', target = 'all', checkMode = false, tags, extraVars } = req.body;
 

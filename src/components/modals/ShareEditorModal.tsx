@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../../types/index.ts';
+import { getDriver, storageDriver, stageTaskInQueue } from '../../utils/drivers/index.ts';
 
 interface ShareEditorModalProps {
   node: NodeItem;
@@ -146,6 +147,60 @@ export const ShareEditorModal: React.FC<ShareEditorModalProps> = ({
       setError(err?.message || 'Failed to save network share');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const [staging, setStaging] = useState(false);
+
+  const handleStageShare = async () => {
+    setError(null);
+    setSuccessMsg(null);
+
+    const trimmedPath = path.trim();
+    if (!trimmedPath) {
+      setError('Directory path is required.');
+      return;
+    }
+    if (!trimmedPath.startsWith('/')) {
+      setError('Directory path must be absolute (starting with "/").');
+      return;
+    }
+    if (shareType === 'smb' && !name.trim()) {
+      setError('SMB Share Name is required.');
+      return;
+    }
+
+    setStaging(true);
+    try {
+      const driver = getDriver('storage', node) || storageDriver;
+      const task =
+        shareType === 'smb'
+          ? driver.compileMutation(node, 'smb', {
+              name: name.trim(),
+              path: trimmedPath,
+              comment: comment.trim() || undefined,
+              readOnly,
+              validUsers: validUsers.trim() || undefined,
+              guestOk,
+            })
+          : driver.compileMutation(node, 'nfs', {
+              name: name.trim() || undefined,
+              path: trimmedPath,
+              client: nfsClient.trim() || '*',
+              options: nfsOptions.trim() || undefined,
+            });
+
+      const res = await stageTaskInQueue(task);
+      if (res.success) {
+        if (onSaved) onSaved();
+        onClose();
+      } else {
+        setError(res.error || 'Failed to stage share in queue');
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Failed to stage share in queue');
+    } finally {
+      setStaging(false);
     }
   };
 
@@ -406,14 +461,24 @@ export const ShareEditorModal: React.FC<ShareEditorModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              disabled={loading}
+              disabled={loading || staging}
               className="px-3 py-1.5 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] rounded border border-[#434750]/40 cursor-pointer disabled:opacity-50"
             >
               Cancel
             </button>
             <button
+              type="button"
+              disabled={loading || staging}
+              onClick={handleStageShare}
+              className="px-3 py-1.5 bg-[#171a2d] hover:bg-[#26293c] text-[#ffd97d] border border-[#ffd97d]/40 rounded cursor-pointer font-bold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+              title="Stage share mutation into Ansible Mutation Queue without immediate execution"
+            >
+              <span className="material-symbols-outlined text-[15px]">queue</span>
+              <span>{staging ? 'Staging...' : 'Stage in Queue'}</span>
+            </button>
+            <button
               type="submit"
-              disabled={loading}
+              disabled={loading || staging}
               className="px-4 py-1.5 bg-[#b0c9ff] hover:bg-[#82aaff] text-[#0a0d1f] font-bold rounded cursor-pointer flex items-center gap-1.5 disabled:opacity-50 transition-colors"
             >
               {loading && <span className="material-symbols-outlined text-[14px] animate-spin">refresh</span>}

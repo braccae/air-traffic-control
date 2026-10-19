@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { NodeItem } from '../../types/index.ts';
+import { getDriver, systemDriver, stageTaskInQueue } from '../../utils/drivers/index.ts';
 
 interface RebootConfirmModalProps {
   node: NodeItem;
@@ -15,8 +16,26 @@ export const RebootConfirmModal: React.FC<RebootConfirmModalProps> = ({
   onConfirmReboot,
 }) => {
   const [mode, setMode] = useState('graceful');
+  const [isStaging, setIsStaging] = useState(false);
 
   if (!isOpen) return null;
+
+  const handleStageReboot = async () => {
+    setIsStaging(true);
+    try {
+      const driver = getDriver('system', node) || systemDriver;
+      const task = driver.compileMutation(node, 'reboot', {
+        mode,
+        message: `Safety reboot (${mode}) staged from Cockpit`,
+      });
+      await stageTaskInQueue(task);
+      onClose();
+    } catch (err) {
+      console.error('Failed to stage reboot task:', err);
+    } finally {
+      setIsStaging(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
@@ -94,6 +113,16 @@ export const RebootConfirmModal: React.FC<RebootConfirmModalProps> = ({
               className="px-3 py-1.5 bg-[#1b1e31] hover:bg-[#26293c] text-[#c3c6d2] rounded cursor-pointer"
             >
               Cancel
+            </button>
+            <button
+              type="button"
+              disabled={isStaging}
+              onClick={handleStageReboot}
+              className="px-3 py-1.5 bg-[#171a2d] hover:bg-[#26293c] text-[#ffd97d] border border-[#ffd97d]/40 rounded cursor-pointer font-bold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+              title="Stage reboot task into Ansible Mutation Queue without immediate execution"
+            >
+              <span className="material-symbols-outlined text-[15px]">queue</span>
+              <span>{isStaging ? 'Staging...' : 'Stage in Queue'}</span>
             </button>
             <button
               type="button"

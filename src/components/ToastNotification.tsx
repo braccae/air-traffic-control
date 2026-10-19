@@ -6,6 +6,8 @@ export interface ToastItem {
   title: string;
   message?: string;
   timestamp?: number;
+  actionText?: string;
+  onAction?: () => void;
 }
 
 interface ToastNotificationProps {
@@ -54,6 +56,18 @@ export const ToastNotification: React.FC<ToastNotificationProps> = ({ toasts, on
             <div className="flex-1 font-mono text-xs">
               <div className="font-bold text-[#dfe1fa]">{toast.title}</div>
               {toast.message && <div className="text-[11px] text-[#c3c6d2] mt-0.5">{toast.message}</div>}
+              {toast.actionText && toast.onAction && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    toast.onAction?.();
+                    onDismiss(toast.id);
+                  }}
+                  className="mt-1.5 text-[11px] underline text-[#8cd6cb] hover:text-[#a0e4d9] cursor-pointer font-bold block"
+                >
+                  {toast.actionText}
+                </button>
+              )}
             </div>
             <button
               type="button"

@@ -7,6 +7,8 @@ import {
   isKernelOrSystemUpdate,
 } from '../utils/packageManager.ts';
 import { safeFetchJson } from '../utils/apiDefensive.ts';
+import { compilePackageTask } from '../utils/ansibleQueueCompiler.ts';
+import { stageTaskInQueue } from '../utils/drivers/index.ts';
 
 interface PackageUpdatesViewProps {
   node: NodeItem;
@@ -77,6 +79,28 @@ export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, on
       setError(err?.message || 'Network error applying updates');
     } finally {
       setApplying(false);
+    }
+  };
+
+  const [queueing, setQueueing] = useState<boolean>(false);
+
+  const handleQueueUpdates = async () => {
+    setQueueing(true);
+    setError(null);
+    try {
+      const pkgName = updates.length === 1 ? updates[0].name : '*';
+      const task = compilePackageTask(node, pkgName, 'latest');
+      task.title = `Apply ${updates.length} package update(s) on ${node.shortName || node.name}`;
+      const res = await stageTaskInQueue(task);
+      if (res.success) {
+        setStatusMessage(`Package updates task staged in Ansible Mutation Queue`);
+      } else {
+        setError(res.error || 'Failed to queue package updates');
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Error queueing package updates');
+    } finally {
+      setQueueing(false);
     }
   };
 
@@ -163,15 +187,27 @@ export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, on
           </button>
 
           {updates.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setShowConfirmModal(true)}
-              disabled={loading || applying}
-              className="flex items-center gap-1.5 bg-[#8cd6cb] hover:bg-[#a0e4d9] text-[#121528] font-bold px-3 py-1 rounded transition-colors shadow-sm cursor-pointer disabled:opacity-50"
-            >
-              <span className="material-symbols-outlined text-[15px]">upgrade</span>
-              <span>Apply All Updates ({updates.length})</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={handleQueueUpdates}
+                disabled={loading || applying || queueing}
+                className="flex items-center gap-1.5 bg-[#171a2d] hover:bg-[#26293c] text-[#ffd97d] border border-[#ffd97d]/40 font-bold px-3 py-1 rounded transition-colors shadow-sm cursor-pointer disabled:opacity-50"
+                title="Stage package update task into Ansible Mutation Queue"
+              >
+                <span className="material-symbols-outlined text-[15px]">queue</span>
+                <span>{queueing ? 'Queueing...' : `Queue Updates (${updates.length})`}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowConfirmModal(true)}
+                disabled={loading || applying || queueing}
+                className="flex items-center gap-1.5 bg-[#8cd6cb] hover:bg-[#a0e4d9] text-[#121528] font-bold px-3 py-1 rounded transition-colors shadow-sm cursor-pointer disabled:opacity-50"
+              >
+                <span className="material-symbols-outlined text-[15px]">upgrade</span>
+                <span>Apply All Updates ({updates.length})</span>
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -467,6 +503,18 @@ export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, on
                 className="px-3 py-1.5 rounded bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] text-xs transition-colors cursor-pointer"
               >
                 Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowConfirmModal(false);
+                  handleQueueUpdates();
+                }}
+                disabled={queueing}
+                className="px-3 py-1.5 rounded bg-[#171a2d] hover:bg-[#26293c] text-[#ffd97d] border border-[#ffd97d]/40 font-bold text-xs transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <span className="material-symbols-outlined text-[14px]">queue</span>
+                <span>Stage in Queue</span>
               </button>
               <button
                 type="button"

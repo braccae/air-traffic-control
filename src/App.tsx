@@ -507,6 +507,17 @@ export default function App() {
   const handleDismissToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
+
+  useEffect(() => {
+    const handleCustomToast = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && typeof detail === 'object') {
+        addToast(detail);
+      }
+    };
+    window.addEventListener('prox_orch_toast', handleCustomToast);
+    return () => window.removeEventListener('prox_orch_toast', handleCustomToast);
+  }, [addToast]);
   useEffect(() => {
     if (typeof window !== 'undefined') {
       try {

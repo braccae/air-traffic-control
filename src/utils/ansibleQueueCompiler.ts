@@ -19,7 +19,7 @@ export function resolveBecomeMethod(node: NodeItem): 'run0' | 'sudo' | 'doas' {
 /**
  * Resolves network connection target, SSH user, and port for a node.
  */
-function resolveNodeConnection(node: NodeItem): {
+export function resolveNodeConnection(node: NodeItem): {
   hostRoute: string;
   sshUser: string;
   sshPort: number;

@@ -47,6 +47,7 @@ export interface NodeItem {
   };
   privilegeMethod?: 'run0' | 'sudo' | 'doas' | 'none';
   privilegeActive?: boolean;
+  initSystem?: 'systemd' | 'openrc' | 'sysvinit' | 'runit' | 's6' | string;
 }
 
 export type PrivilegeMethod = 'run0' | 'sudo' | 'doas' | 'none';
