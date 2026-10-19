@@ -75,6 +75,12 @@ import {
   ensureAnsibleVenv,
   REQUIRED_VENV_PACKAGES,
 } from './src/utils/ansibleVenvManager.ts';
+import {
+  registerVaultRoutes,
+  resolveVaultPasswordSource,
+  encryptVaultString,
+  decryptVaultString,
+} from './src/utils/vaultManager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1775,6 +1781,7 @@ const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
 registerPlaybookRoutes(app, playbookDir, {
   inventoryScriptPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
 });
+registerVaultRoutes(app);
 
 app.get('/api/ansible/config', async (_req, res) => {
   try {
