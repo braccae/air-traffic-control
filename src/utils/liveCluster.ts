@@ -591,7 +591,7 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
       metricsWarning = 'Glances not installed on host. Sourcing metrics directly from /proc & sysfs.';
     }
 
-    const cpuUsage = glancesPayload && glancesPayload.cpu.total > 0
+    const cpuUsage = glancesPayload && typeof glancesPayload.cpu.total === 'number' && glancesPayload.cpu.total >= 0
       ? glancesPayload.cpu.total
       : Math.max(0.5, Math.min(99.0, +((load1 / Math.max(1, vCpus)) * 100).toFixed(1)));
 
