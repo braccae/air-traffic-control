@@ -170,4 +170,18 @@ describe('SQLite Host Cache Store (hostCacheDb)', () => {
     const allVars = store.getAllGroupVars();
     assert.equal(allVars['group_vars/all.yml'], 'datacenter_name: updated.ts.net\n');
   });
+
+  it('caches and retrieves arbitrary host sections (disks, storage, shares, firewall)', () => {
+    const store = createHostCacheStore(':memory:');
+    assert.equal(store.getHostSection('node-likes-it-cold', 'disks'), null);
+
+    const disksData = [{ name: 'sda', size: '5.5T', model: 'ST6000DM003' }];
+    store.upsertHostSection('node-likes-it-cold', 'disks', disksData);
+
+    const cached = store.getHostSection<typeof disksData>('node-likes-it-cold', 'disks');
+    assert.ok(cached);
+    assert.equal(cached.data[0].name, 'sda');
+    assert.equal(cached.data[0].size, '5.5T');
+    assert.ok(cached.updatedAt > 0);
+  });
 });

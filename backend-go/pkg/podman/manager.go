@@ -343,6 +343,12 @@ func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContai
 			status = rc.State
 		}
 
+		nameLower := strings.ToLower(name)
+		imgLower := strings.ToLower(rc.Image)
+		if strings.Contains(nameLower, "pause") || strings.HasSuffix(nameLower, "-infra") || strings.Contains(imgLower, "pause") || strings.Contains(imgLower, "podman-pause") {
+			continue
+		}
+
 		containers = append(containers, types.PodmanContainer{
 			ID:       rc.ID,
 			PodID:    rc.Pod,

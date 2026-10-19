@@ -65,6 +65,11 @@ function extractContainersFromConmonProcesses(
     if (!cid && !cname) continue;
     if (!cid) cid = cname;
     if (!cname) cname = cid;
+    const cidLower = cid.toLowerCase();
+    const cnameLower = cname.toLowerCase();
+    if (cidLower.includes('pause') || cnameLower.includes('pause') || cnameLower.endsWith('-infra')) {
+      continue;
+    }
     if (seen.has(cid)) continue;
     seen.add(cid);
     containers.push({

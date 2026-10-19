@@ -59,6 +59,7 @@ export interface TelemetryData {
   sparkline: number[];
   metricsSource?: 'glances' | 'pcp' | 'cockpit-bridge' | 'kernel';
   metricsWarning?: string;
+  buffCacheGiB?: number;
 }
 
 export interface ContainerItem {

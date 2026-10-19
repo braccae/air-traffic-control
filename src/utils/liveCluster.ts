@@ -28,21 +28,21 @@ export const LIVE_TAILNET_NODES: NodeItem[] = [
     tailscaleHost: 'likes-it-cold.leo-banjo.ts.net',
     osDescription: 'AlmaLinux 10.2 (Lavender Lion)',
     status: 'online',
-    uptime: '2d 18h',
-    hasGlances: true,
+    uptime: '3d 14h',
+    hasGlances: false,
     hasCockpit: true,
     hasPodman: true,
     hasRestic: true,
     specs: {
-      cpu: 'AMD EPYC / x86_64 Host',
+      cpu: 'AMD Ryzen 5 PRO 2400G with Radeon Vega Graphics',
       vcpus: 8,
-      ramGiB: 16,
-      motherboard: 'Proxmox / KVM Guest (QEMU Standard PC)',
-      bios: 'OVMF UEFI',
-      ipmi: 'Proxmox API',
-      ecc: 'Active',
+      ramGiB: 32,
+      motherboard: 'Lenovo 3141 (ThinkCentre M725s)',
+      bios: 'Lenovo M25KT2FA (2019-04-23)',
+      ipmi: 'N/A (Desktop SFF)',
+      ecc: 'Non-ECC DDR4',
       secureBoot: 'Enabled',
-      iommu: 'Enabled',
+      iommu: 'Enabled (AMD-Vi)',
     },
   },
   {
@@ -65,8 +65,8 @@ export const LIVE_TAILNET_NODES: NodeItem[] = [
     tailscaleHost: 'ping.leo-banjo.ts.net',
     osDescription: 'AlmaLinux 10.2 (Lavender Lion)',
     status: 'online',
-    uptime: '3d 18h',
-    hasGlances: true,
+    uptime: '4d 14h',
+    hasGlances: false,
     hasCockpit: true,
     hasPodman: true,
     hasRestic: true,
@@ -74,10 +74,10 @@ export const LIVE_TAILNET_NODES: NodeItem[] = [
       cpu: 'Intel(R) Core(TM) i5-6500 CPU @ 3.20GHz',
       vcpus: 4,
       ramGiB: 8,
-      motherboard: 'Dell Inc. OptiPlex / Skylake',
-      bios: 'UEFI 2.7',
+      motherboard: 'Dell 0Y7WYT (OptiPlex 7040)',
+      bios: 'Dell 1.24.0 (2022-07-14)',
       ipmi: 'Intel AMT',
-      ecc: 'Non-ECC',
+      ecc: 'Non-ECC DDR4',
       secureBoot: 'Enabled',
       iommu: 'Enabled (VT-d)',
     },
@@ -111,8 +111,8 @@ export const LIVE_TAILNET_NODES: NodeItem[] = [
       cpu: 'AMD Ryzen 5 5600X 6-Core Processor',
       vcpus: 12,
       ramGiB: 32,
-      motherboard: 'AM4 Workstation',
-      bios: 'AGESA ComboV2',
+      motherboard: 'ASUS ROG STRIX B450-F GAMING',
+      bios: 'ASUS 4801',
       ipmi: 'Local Bus',
       ecc: 'Non-ECC',
       secureBoot: 'Disabled',
@@ -170,27 +170,27 @@ export const LIVE_TAILNET_NODES: NodeItem[] = [
     sshUser: 'core',
     authMethod: 'ssh-ed25519 (ssh-agent)',
     tags: ['tag:host', 'tag:manager'],
-    sshConnected: false,
+    sshConnected: true,
     rttMs: '1.5ms',
     tailscaleIp: '100.115.75.78',
     tailscaleHost: 'the-freezer.leo-banjo.ts.net',
-    osDescription: 'Linux (Tailscale Mesh Node)',
+    osDescription: 'AlmaLinux 10.2 (Lavender Lion)',
     status: 'online',
     uptime: '14d 08h',
-    hasGlances: true,
+    hasGlances: false,
     hasCockpit: true,
     hasPodman: true,
     hasRestic: true,
     specs: {
-      cpu: 'x86_64 Server Platform',
-      vcpus: 8,
-      ramGiB: 16,
-      motherboard: 'Homelab Manager Node',
-      bios: 'UEFI',
-      ipmi: '192.168.8.3',
-      ecc: 'Active',
+      cpu: 'AMD Ryzen 7 5700X 8-Core Processor',
+      vcpus: 16,
+      ramGiB: 64,
+      motherboard: 'ASUS PRIME B550-PLUS',
+      bios: 'ASUS UEFI 3607 (2024-03-22)',
+      ipmi: 'N/A (Tower ATX)',
+      ecc: 'Non-ECC DDR4',
       secureBoot: 'Enabled',
-      iommu: 'Enabled',
+      iommu: 'Enabled (AMD-Vi)',
     },
   },
   {
@@ -322,12 +322,14 @@ export async function runNodeCommand(node: NodeItem, command: string, timeoutMs 
   }
 
   const sshUser = node.sshUser || 'core';
-  const targetHost = node.tailscaleHost || node.tailscaleIp || node.ip;
+  const targetHost = node.tailscaleIp || node.ip || node.tailscaleHost;
   const port = String(node.port || 22);
 
   const { stdout } = await execFileAsync(
     'ssh',
     [
+      '-F',
+      '/dev/null',
       '-o',
       'BatchMode=yes',
       '-o',
@@ -406,6 +408,8 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
       'which glances 2>/dev/null || echo "NO_GLANCES"',
       'which pcp 2>/dev/null || echo "NO_PCP"',
       'which cockpit-bridge 2>/dev/null || echo "NO_COCKPIT"',
+      'cat /proc/spl/kstat/zfs/arcstats 2>/dev/null | awk \'/^size/ {print $3}\' || echo "NO_ARC"',
+      'zpool list -H -o name,size,alloc,free,cap,health 2>/dev/null | head -n 1 || echo "NO_POOL"',
     ].join(' && echo "---SPLIT---" && ');
 
     const out = await runNodeCommand(node, script, 5000);
@@ -426,13 +430,34 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
     const uptimeRaw = (sections[4] || '').replace(/^up\s+/i, '').trim() || node.uptime;
     const osPretty = sections[5] || node.osDescription;
 
-    const dfParts = (sections[6] || '').split(/\s+/);
-    const rootTotalGb = Number.parseFloat(dfParts[0]) || 64;
-    const rootUsedGb = Number.parseFloat(dfParts[1]) || 18;
-
     const hasGlances = sections[7] && !sections[7].includes('NO_GLANCES');
     const hasPcp = sections[8] && !sections[8].includes('NO_PCP');
     const hasCockpit = sections[9] && !sections[9].includes('NO_COCKPIT');
+
+    // Real ZFS ARC vs Linux Page Cache
+    const arcBytes = Number.parseInt(sections[10] || '', 10);
+    const hasArc = !Number.isNaN(arcBytes) && arcBytes > 0;
+    const arcCacheGiB = hasArc ? +(arcBytes / (1024 * 1024 * 1024)).toFixed(1) : 0;
+    const buffCacheGiB = +(memCacheMb / 1024).toFixed(1);
+
+    // Real ZFS Pool vs Btrfs / XFS
+    const poolLine = sections[11] || '';
+    const poolParts = poolLine.split(/\s+/);
+    let zfsTankTotalTb = 0;
+    let zfsTankUsedTb = 0;
+    let zfsRaidType = node.shortName === 'likes-it-cold' ? 'Btrfs / LVM Cache' : 'XFS / LVM Root';
+    let zfsScrubStatus = node.shortName === 'likes-it-cold' ? 'Btrfs: 3 Active Subvolumes' : `Host: ${node.shortName}`;
+
+    if (poolParts.length >= 6 && poolParts[0] !== 'NO_POOL' && !poolParts[0].includes('no pools')) {
+      const pName = poolParts[0];
+      const pSize = Number.parseFloat(poolParts[1].replace(/[TG]/i, '')) || 7.27;
+      const pAlloc = Number.parseFloat(poolParts[2].replace(/[TG]/i, '')) || 4.22;
+      const pHealth = poolParts[5];
+      zfsTankTotalTb = pSize;
+      zfsTankUsedTb = pAlloc;
+      zfsRaidType = `ZFS Pool (${pName})`;
+      zfsScrubStatus = `ZFS: ${pHealth} (${poolParts[4]} allocated)`;
+    }
 
     let metricsSource: 'glances' | 'pcp' | 'cockpit-bridge' | 'kernel' = 'kernel';
     let metricsWarning: string | undefined;
@@ -458,11 +483,12 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
       vCpus,
       memoryTotalGiB: +(memTotalMb / 1024).toFixed(1),
       memoryUsedGiB: +(memUsedMb / 1024).toFixed(1),
-      arcCacheGiB: +(memCacheMb / 1024).toFixed(1),
-      zfsTankTotalTb: +(rootTotalGb / 1000).toFixed(2),
-      zfsTankUsedTb: +(rootUsedGb / 1000).toFixed(2),
-      zfsRaidType: 'XFS / RootFS',
-      zfsScrubStatus: `Host: ${node.shortName}`,
+      arcCacheGiB,
+      buffCacheGiB,
+      zfsTankTotalTb,
+      zfsTankUsedTb,
+      zfsRaidType,
+      zfsScrubStatus,
       loadAvg1m: load1,
       loadAvg5m: load5,
       loadAvg15m: load15,
@@ -505,11 +531,17 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<{
         if (Array.isArray(data)) {
           goProbed = data.map((u: any) => ({
             ...u,
-            containers: (u.containers || []).map((c: any) => ({
-              ...c,
-              cpu: c.cpu || '0.4%',
-              memory: c.memory || '64 MiB',
-            })),
+            containers: (u.containers || [])
+              .filter((c: any) => {
+                const n = (c.name || '').toLowerCase();
+                const img = (c.image || '').toLowerCase();
+                return !n.includes('pause') && !n.endsWith('-infra') && !img.includes('pause');
+              })
+              .map((c: any) => ({
+                ...c,
+                cpu: c.cpu || '0.4%',
+                memory: c.memory || '64 MiB',
+              })),
           }));
         }
       }
@@ -584,6 +616,17 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<{
         if (Array.isArray(parsedRoot)) {
           for (const rc of parsedRoot) {
             const cName = Array.isArray(rc.Names) && rc.Names.length > 0 ? rc.Names[0] : rc.Names || rc.Id;
+            const cNameLower = String(cName).toLowerCase();
+            const imgLower = String(rc.Image || '').toLowerCase();
+            if (
+              rc.IsInfra ||
+              cNameLower.includes('pause') ||
+              cNameLower.endsWith('-infra') ||
+              imgLower.includes('pause') ||
+              imgLower.includes('podman-pause')
+            ) {
+              continue;
+            }
             rootContainers.push({
               id: String(rc.Id || cName).slice(0, 12),
               name: String(cName),
@@ -604,6 +647,16 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<{
         if (!line.includes(':::')) continue;
         const [id, name, image, status] = line.split(':::');
         if (!id || id.includes('{{')) continue;
+        const nameLower = name.toLowerCase();
+        const imgLower = image.toLowerCase();
+        if (
+          nameLower.includes('pause') ||
+          nameLower.endsWith('-infra') ||
+          imgLower.includes('pause') ||
+          imgLower.includes('podman-pause')
+        ) {
+          continue;
+        }
         rootContainers.push({
           id,
           name,

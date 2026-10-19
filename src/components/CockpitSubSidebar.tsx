@@ -147,9 +147,9 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
             >
               <span className="flex items-center gap-1.5">
                 <span className="material-symbols-outlined text-[14px]">cable</span>
-                <span>Interfaces (bond0)</span>
+                <span>Network Interfaces</span>
               </span>
-              <span className="font-mono text-[10px] text-[#b0c9ff]">10GbE</span>
+              <span className="font-mono text-[10px] text-[#b0c9ff]">Active</span>
             </button>
 
             <button

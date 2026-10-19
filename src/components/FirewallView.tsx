@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../types/index.ts';
 
 interface FirewallViewProps {
@@ -6,63 +6,45 @@ interface FirewallViewProps {
 }
 
 export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
-  const [rules, setRules] = useState([
-    {
-      id: 'fw-1',
-      chain: 'INPUT',
-      policy: 'ACCEPT',
-      proto: 'tcp',
-      port: '22',
-      source: '100.64.0.0/10 (Tailscale CGNAT)',
-      comment: 'Tailscale SSH & OpenSSH Bastion',
-      enabled: true,
-    },
-    {
-      id: 'fw-2',
-      chain: 'INPUT',
-      policy: 'ACCEPT',
-      proto: 'udp',
-      port: '41641',
-      source: 'any',
-      comment: 'Tailscale WireGuard encrypted peer endpoint',
-      enabled: true,
-    },
-    {
-      id: 'fw-3',
-      chain: 'INPUT',
-      policy: 'ACCEPT',
-      proto: 'tcp',
-      port: '9090',
-      source: '192.168.8.0/24, 100.64.0.0/10',
-      comment: 'Cockpit Web Console Gateway',
-      enabled: true,
-    },
-    {
-      id: 'fw-4',
-      chain: 'INPUT',
-      policy: 'ACCEPT',
-      proto: 'tcp',
-      port: '80, 443',
-      source: 'any',
-      comment: 'Caddy Reverse Proxy & Nextcloud Ingress',
-      enabled: true,
-    },
-    {
-      id: 'fw-5',
-      chain: 'INPUT',
-      policy: 'DROP',
-      proto: 'all',
-      port: 'all',
-      source: 'any (WAN)',
-      comment: 'Default drop unauthorized external packets',
-      enabled: true,
-    },
-  ]);
+  const [rules, setRules] = useState<Array<{
+    id: string;
+    chain: string;
+    policy: string;
+    proto: string;
+    port: string;
+    source: string;
+    comment: string;
+    enabled: boolean;
+  }>>([]);
+  const [status, setStatus] = useState<string>('running');
+  const [nftActive, setNftActive] = useState<boolean>(true);
+  const [zones, setZones] = useState<Record<string, { interfaces: string[]; sources: string[] }>>({});
+  const [loading, setLoading] = useState(false);
 
   const [showAddForm, setShowAddForm] = useState(false);
   const [newPort, setNewPort] = useState('');
   const [newProto, setNewProto] = useState('tcp');
   const [newComment, setNewComment] = useState('');
+
+  const fetchFirewall = (refresh = false) => {
+    setLoading(true);
+    fetch(`/api/nodes/${encodeURIComponent(node.id)}/firewall${refresh ? '?refresh=true' : ''}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          if (Array.isArray(data.rules)) setRules(data.rules);
+          if (data.status) setStatus(data.status);
+          if (typeof data.nftablesActive === 'boolean') setNftActive(data.nftablesActive);
+          if (data.zones) setZones(data.zones);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchFirewall(false);
+  }, [node.id, node.shortName]);
 
   const handleAddRule = (e: React.FormEvent) => {
     e.preventDefault();
@@ -105,8 +87,17 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
         </div>
         <div className="flex items-center gap-2">
           <span className="px-2 py-0.5 bg-[#8cd6cb]/15 text-[#8cd6cb] font-mono text-xs rounded border border-[#8cd6cb]/30">
-            nftables: ACTIVE (Enforcing)
+            firewalld: {status.toUpperCase()} ({nftActive ? 'nftables ENFORCING' : 'ACTIVE'})
           </span>
+          <button
+            type="button"
+            onClick={() => fetchFirewall(true)}
+            disabled={loading}
+            className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded transition-colors border border-[#434750]/40 font-mono text-xs cursor-pointer disabled:opacity-50"
+          >
+            <span className={`material-symbols-outlined text-[14px] ${loading ? 'animate-spin' : ''}`}>sync</span>
+            <span>Refresh</span>
+          </button>
           <button
             type="button"
             onClick={() => setShowAddForm(prev => !prev)}
@@ -117,6 +108,22 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
           </button>
         </div>
       </div>
+
+      {/* Active Zones Pill Bar */}
+      {Object.keys(zones).length > 0 && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-2 font-mono text-xs bg-[#0a0d1f] p-2 rounded border border-[#26293c]">
+          <span className="text-[#8d909b] text-[11px] font-bold">ACTIVE ZONES:</span>
+          {Object.entries(zones).map(([zoneName, zInfo]) => (
+            <span
+              key={zoneName}
+              className="px-2 py-0.5 rounded bg-[#26293c] text-[#dfe1fa] border border-[#434750]/40 flex items-center gap-1.5"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-[#8cd6cb]"></span>
+              <strong className="text-[#b0c9ff]">{zoneName}</strong>: {zInfo.interfaces.join(', ') || zInfo.sources.join(', ') || '(default)'}
+            </span>
+          ))}
+        </div>
+      )}
 
       {showAddForm && (
         <form

@@ -19,9 +19,9 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
   const [sambaConfig, setSambaConfig] = useState<string>('');
   const [notice, setNotice] = useState<string>('');
 
-  useEffect(() => {
+  const fetchShares = (refresh = false) => {
     setLoading(true);
-    fetch(`/api/nodes/${encodeURIComponent(node.id)}/shares`)
+    fetch(`/api/nodes/${encodeURIComponent(node.id)}/shares${refresh ? '?refresh=true' : ''}`)
       .then(res => res.json())
       .then(data => {
         if (!data.success) {
@@ -31,6 +31,8 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
 
         const nfsRaw = data.nfs || '';
         const sambaRaw = data.samba || '';
+        const zfsSharesRaw = data.zfsShares || '';
+        const netConfRaw = data.netConf || '';
         const servicesRaw = data.services || '';
 
         const detectedShares: Array<{
@@ -42,30 +44,72 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
           clientsCount: number;
           status: string;
         }> = [];
+        const seenNames = new Set<string>();
 
-        // Parse Samba shares from testparm/smb.conf
+        const parseSambaSection = (sec: string, source: string) => {
+          const headerMatch = sec.match(/^\[([^\]]+)\]/);
+          if (!headerMatch) return;
+          const name = headerMatch[1].trim();
+          if (name === 'global' || name === 'printers' || name === 'print$' || name === 'homes') return;
+          if (seenNames.has(name.toLowerCase())) return;
+          seenNames.add(name.toLowerCase());
+
+          const pathMatch = sec.match(/path\s*=\s*(.+)/i);
+          const path = pathMatch ? pathMatch[1].trim() : '(dynamic/homes)';
+          const isReadonly = /read only\s*=\s*yes/i.test(sec);
+
+          detectedShares.push({
+            id: `smb-${name}`,
+            name,
+            protocol: source,
+            path,
+            permissions: isReadonly ? 'Read-only' : 'Read/Write',
+            clientsCount: 0,
+            status: servicesRaw.includes('active') ? 'Active (smbd)' : 'Exported',
+          });
+        };
+
         if (sambaRaw && !sambaRaw.includes('NO_SAMBA')) {
           setSambaConfig(sambaRaw);
           const sections = sambaRaw.split(/(?=\[[^\]]+\])/);
-          for (const sec of sections) {
-            const headerMatch = sec.match(/^\[([^\]]+)\]/);
-            if (!headerMatch) continue;
-            const name = headerMatch[1].trim();
-            if (name === 'global' || name === 'printers' || name === 'print$') continue;
+          for (const sec of sections) parseSambaSection(sec, 'Samba / SMB');
+        }
 
-            const pathMatch = sec.match(/path\s*=\s*(.+)/);
-            const path = pathMatch ? pathMatch[1].trim() : '(dynamic/homes)';
-            const isReadonly = /read only\s*=\s*yes/i.test(sec);
+        if (zfsSharesRaw && !zfsSharesRaw.includes('NO_ZFS_SHARES')) {
+          if (!sambaConfig) setSambaConfig(zfsSharesRaw);
+          const sections = zfsSharesRaw.split(/(?=\[[^\]]+\])/);
+          for (const sec of sections) parseSambaSection(sec, 'Cockpit ZFS (Samba)');
+        }
 
-            detectedShares.push({
-              id: `smb-${name}`,
-              name,
-              protocol: 'Samba / SMB',
-              path,
-              permissions: isReadonly ? 'Read-only' : 'Read/Write',
-              clientsCount: 0,
-              status: servicesRaw.includes('active') ? 'Active (smbd)' : 'Exported',
-            });
+        if (netConfRaw && !netConfRaw.includes('NO_NET_CONF')) {
+          if (!sambaConfig) setSambaConfig(netConfRaw);
+          const sections = netConfRaw.split(/(?=\[[^\]]+\])/);
+          for (const sec of sections) parseSambaSection(sec, 'Samba Registry');
+        }
+
+        if (nfsRaw && !nfsRaw.includes('NO_NFS')) {
+          const lines = nfsRaw.split('\n');
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            const parts = trimmed.split(/\s+/);
+            if (parts.length >= 2) {
+              const exportPath = parts[0];
+              const client = parts.slice(1).join(' ');
+              const name = exportPath.split('/').pop() || exportPath;
+              if (!seenNames.has(name.toLowerCase())) {
+                seenNames.add(name.toLowerCase());
+                detectedShares.push({
+                  id: `nfs-${name}`,
+                  name,
+                  protocol: 'NFS Export',
+                  path: exportPath,
+                  permissions: client.includes('ro') ? 'Read-only' : 'Read/Write',
+                  clientsCount: 1,
+                  status: servicesRaw.includes('active') ? 'Active (nfs-server)' : 'Exported',
+                });
+              }
+            }
           }
         }
 
@@ -81,6 +125,10 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
         setNotice(`Failed to connect to ${node.shortName} for shares probe.`);
       })
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchShares(false);
   }, [node.id, node.shortName]);
 
   return (
@@ -96,6 +144,17 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
               Real-time exported shares, Cockpit file-sharing mounts, and smbd services
             </p>
           </div>
+        </div>
+        <div className="flex items-center gap-2 font-mono text-xs">
+          <button
+            type="button"
+            onClick={() => fetchShares(true)}
+            disabled={loading}
+            className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded transition-colors border border-[#434750]/40 cursor-pointer disabled:opacity-50"
+          >
+            <span className={`material-symbols-outlined text-[14px] ${loading ? 'animate-spin' : ''}`}>sync</span>
+            <span>Refresh Shares</span>
+          </button>
         </div>
       </div>
 

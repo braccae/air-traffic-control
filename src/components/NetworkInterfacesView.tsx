@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../types/index.ts';
 
 interface NetworkInterfacesViewProps {
@@ -7,54 +7,36 @@ interface NetworkInterfacesViewProps {
 }
 
 export const NetworkInterfacesView: React.FC<NetworkInterfacesViewProps> = ({ node }) => {
-  const [interfaces, setInterfaces] = useState([
-    {
-      name: 'tailscale0',
-      type: 'WireGuard Tunnel',
-      ip: `${node.tailscaleIp}/32`,
-      mac: 'N/A (point-to-point)',
-      speed: '10 Gbps (Mesh)',
-      rx: '1.42 GiB',
-      tx: '890 MiB',
-      status: 'UP / CARRIER',
-      mtu: 1280,
-    },
-    {
-      name: 'bond0 (eth0 + eth1)',
-      type: 'LACP 802.3ad Bond',
-      ip: `${node.ip}/24`,
-      mac: 'bc:24:11:89:a4:20',
-      speed: '2x 10 Gbps (Full Duplex)',
-      rx: '14.8 GiB',
-      tx: '11.2 GiB',
-      status: 'UP / CARRIER',
-      mtu: 9000,
-    },
-    {
-      name: 'podman0',
-      type: 'Container Bridge',
-      ip: '10.88.0.1/16',
-      mac: '52:54:00:12:34:56',
-      speed: 'Virtual',
-      rx: '6.1 GiB',
-      tx: '5.9 GiB',
-      status: 'UP / ACTIVE',
-      mtu: 1500,
-    },
-    {
-      name: 'virbr0',
-      type: 'KVM/QEMU Bridge',
-      ip: '192.168.122.1/24',
-      mac: '52:54:00:8c:1d:99',
-      speed: 'Virtual',
-      rx: '820 MiB',
-      tx: '650 MiB',
-      status: 'UP / ACTIVE',
-      mtu: 1500,
-    },
-  ]);
-
+  const [interfaces, setInterfaces] = useState<Array<{
+    name: string;
+    type: string;
+    ip: string;
+    mac: string;
+    speed: string;
+    rx: string;
+    tx: string;
+    status: string;
+    mtu: number;
+  }>>([]);
+  const [loading, setLoading] = useState(false);
   const [toggling, setToggling] = useState<string | null>(null);
+
+  const fetchInterfaces = (refresh = false) => {
+    setLoading(true);
+    fetch(`/api/nodes/${encodeURIComponent(node.id)}/interfaces${refresh ? '?refresh=true' : ''}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.success && Array.isArray(data.interfaces)) {
+          setInterfaces(data.interfaces);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchInterfaces(false);
+  }, [node.id, node.shortName]);
 
   const toggleInterface = (name: string) => {
     setToggling(name);
@@ -88,12 +70,15 @@ export const NetworkInterfacesView: React.FC<NetworkInterfacesViewProps> = ({ no
           </div>
         </div>
         <div className="flex items-center gap-2 font-mono text-xs">
-          <span className="px-2 py-0.5 bg-[#8cd6cb]/15 text-[#8cd6cb] rounded border border-[#8cd6cb]/30">
-            LACP active-backup
-          </span>
-          <span className="px-2 py-0.5 bg-[#b0c9ff]/15 text-[#b0c9ff] rounded border border-[#b0c9ff]/30">
-            Jumbo Frames (MTU 9000)
-          </span>
+          <button
+            type="button"
+            onClick={() => fetchInterfaces(true)}
+            disabled={loading}
+            className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded transition-colors border border-[#434750]/40 cursor-pointer disabled:opacity-50"
+          >
+            <span className={`material-symbols-outlined text-[14px] ${loading ? 'animate-spin' : ''}`}>sync</span>
+            <span>Refresh Interfaces</span>
+          </button>
         </div>
       </div>
 

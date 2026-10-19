@@ -46,6 +46,8 @@ export interface HostCacheStore {
   ): void;
   addCustomIdentity(hostId: string, identity: ServiceUser): void;
   getHostContainers(hostId: string): CachedHostContainers | null;
+  getHostSection<T = any>(hostId: string, section: string): { data: T; updatedAt: number } | null;
+  upsertHostSection<T = any>(hostId: string, section: string, data: T): void;
   seedGroupVarsIfEmpty(defaults: Record<string, string>): Record<string, string>;
   upsertGroupVar(file: string, content: string): void;
   getAllGroupVars(): Record<string, string>;
@@ -102,6 +104,14 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
       content TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS host_section_cache (
+      host_id TEXT NOT NULL,
+      section TEXT NOT NULL,
+      data_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (host_id, section)
+    );
   `);
 
   const stmtCountHosts = db.prepare('SELECT COUNT(*) as cnt FROM hosts');
@@ -128,6 +138,18 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
   const stmtDeleteHost = db.prepare('DELETE FROM hosts WHERE id = ?');
   const stmtDeleteTelemetry = db.prepare('DELETE FROM host_telemetry_cache WHERE host_id = ?');
   const stmtDeleteContainers = db.prepare('DELETE FROM host_containers_cache WHERE host_id = ?');
+  const stmtDeleteSections = db.prepare('DELETE FROM host_section_cache WHERE host_id = ?');
+
+  const stmtSelectSection = db.prepare(
+    'SELECT data_json, updated_at FROM host_section_cache WHERE host_id = ? AND section = ?'
+  );
+  const stmtUpsertSection = db.prepare(`
+    INSERT INTO host_section_cache (host_id, section, data_json, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(host_id, section) DO UPDATE SET
+      data_json = excluded.data_json,
+      updated_at = excluded.updated_at
+  `);
 
   const stmtUpsertTelemetry = db.prepare(`
     INSERT INTO host_telemetry_cache (host_id, telemetry_json, updated_at)
@@ -217,8 +239,28 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
     deleteHost(id: string): boolean {
       stmtDeleteTelemetry.run(id);
       stmtDeleteContainers.run(id);
+      stmtDeleteSections.run(id);
       const res = stmtDeleteHost.run(id);
       return Number(res.changes) > 0;
+    },
+
+    getHostSection<T = any>(hostId: string, section: string): { data: T; updatedAt: number } | null {
+      const row = stmtSelectSection.get(hostId, section) as
+        | { data_json: string; updated_at: number }
+        | undefined;
+      if (!row) return null;
+      try {
+        return {
+          data: JSON.parse(row.data_json) as T,
+          updatedAt: Number(row.updated_at),
+        };
+      } catch {
+        return null;
+      }
+    },
+
+    upsertHostSection<T = any>(hostId: string, section: string, data: T): void {
+      stmtUpsertSection.run(hostId, section, JSON.stringify(data), Date.now());
     },
 
     upsertHostTelemetry(

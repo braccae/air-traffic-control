@@ -50,6 +50,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
 
   return (
     <section
+      id="global-tasks-drawer"
       className={`fixed bottom-0 left-0 right-0 bg-[#0a0d1f] z-50 flex flex-col shadow-[0_-2px_10px_rgba(0,0,0,0.6)] border-t border-[#26293c] transition-all duration-300 ${
         isCollapsed ? 'h-7' : isExpanded ? 'h-96' : 'h-44'
       }`}

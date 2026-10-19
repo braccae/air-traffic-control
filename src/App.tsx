@@ -16,6 +16,7 @@ import { NetworkInterfacesView } from './components/NetworkInterfacesView.tsx';
 import { FirewallView } from './components/FirewallView.tsx';
 import { ZfsManagementView } from './components/ZfsManagementView.tsx';
 import { NetworkSharesView } from './components/NetworkSharesView.tsx';
+import { DisksSmartView } from './components/DisksSmartView.tsx';
 
 // Modals
 import { TerminalModal } from './components/modals/TerminalModal.tsx';
@@ -49,21 +50,21 @@ const initialNodes: NodeItem[] = [
     tailscaleHost: 'likes-it-cold.leo-banjo.ts.net',
     osDescription: 'AlmaLinux 10.2 (Lavender Lion)',
     status: 'online',
-    uptime: '2d 18h',
-    hasGlances: true,
+    uptime: '3d 14h',
+    hasGlances: false,
     hasCockpit: true,
     hasPodman: true,
     hasRestic: true,
     specs: {
-      cpu: 'AMD EPYC / x86_64 Host',
+      cpu: 'AMD Ryzen 5 PRO 2400G with Radeon Vega Graphics',
       vcpus: 8,
-      ramGiB: 16,
-      motherboard: 'Proxmox / KVM Guest (QEMU Standard PC)',
-      bios: 'OVMF UEFI',
-      ipmi: 'Proxmox API',
-      ecc: 'Active',
+      ramGiB: 32,
+      motherboard: 'Lenovo 3141 (ThinkCentre M725s)',
+      bios: 'Lenovo M25KT2FA (2019-04-23)',
+      ipmi: 'N/A (Desktop SFF)',
+      ecc: 'Non-ECC DDR4',
       secureBoot: 'Enabled',
-      iommu: 'Enabled',
+      iommu: 'Enabled (AMD-Vi)',
     },
   },
   {
@@ -86,8 +87,8 @@ const initialNodes: NodeItem[] = [
     tailscaleHost: 'ping.leo-banjo.ts.net',
     osDescription: 'AlmaLinux 10.2 (Lavender Lion)',
     status: 'online',
-    uptime: '3d 18h',
-    hasGlances: true,
+    uptime: '4d 14h',
+    hasGlances: false,
     hasCockpit: true,
     hasPodman: true,
     hasRestic: true,
@@ -95,10 +96,10 @@ const initialNodes: NodeItem[] = [
       cpu: 'Intel(R) Core(TM) i5-6500 CPU @ 3.20GHz',
       vcpus: 4,
       ramGiB: 8,
-      motherboard: 'Dell Inc. OptiPlex / Skylake',
-      bios: 'UEFI 2.7',
+      motherboard: 'Dell 0Y7WYT (OptiPlex 7040)',
+      bios: 'Dell 1.24.0 (2022-07-14)',
       ipmi: 'Intel AMT',
-      ecc: 'Non-ECC',
+      ecc: 'Non-ECC DDR4',
       secureBoot: 'Enabled',
       iommu: 'Enabled (VT-d)',
     },
@@ -132,8 +133,8 @@ const initialNodes: NodeItem[] = [
       cpu: 'AMD Ryzen 5 5600X 6-Core Processor',
       vcpus: 12,
       ramGiB: 32,
-      motherboard: 'AM4 Workstation',
-      bios: 'AGESA ComboV2',
+      motherboard: 'ASUS ROG STRIX B450-F GAMING',
+      bios: 'ASUS 4801',
       ipmi: 'Local Bus',
       ecc: 'Non-ECC',
       secureBoot: 'Disabled',
@@ -191,27 +192,27 @@ const initialNodes: NodeItem[] = [
     sshUser: 'core',
     authMethod: 'ssh-ed25519 (ssh-agent)',
     tags: ['tag:host', 'tag:manager'],
-    sshConnected: false,
+    sshConnected: true,
     rttMs: '1.5ms',
     tailscaleIp: '100.115.75.78',
     tailscaleHost: 'the-freezer.leo-banjo.ts.net',
-    osDescription: 'Linux (Tailscale Mesh Node)',
+    osDescription: 'AlmaLinux 10.2 (Lavender Lion)',
     status: 'online',
     uptime: '14d 08h',
-    hasGlances: true,
+    hasGlances: false,
     hasCockpit: true,
     hasPodman: true,
     hasRestic: true,
     specs: {
-      cpu: 'x86_64 Server Platform',
-      vcpus: 8,
-      ramGiB: 16,
-      motherboard: 'Homelab Manager Node',
-      bios: 'UEFI',
-      ipmi: '192.168.8.3',
-      ecc: 'Active',
+      cpu: 'AMD Ryzen 7 5700X 8-Core Processor',
+      vcpus: 16,
+      ramGiB: 64,
+      motherboard: 'ASUS PRIME B550-PLUS',
+      bios: 'ASUS UEFI 3607 (2024-03-22)',
+      ipmi: 'N/A (Tower ATX)',
+      ecc: 'Non-ECC DDR4',
       secureBoot: 'Enabled',
-      iommu: 'Enabled',
+      iommu: 'Enabled (AMD-Vi)',
     },
   },
   {
@@ -721,6 +722,14 @@ export default function App() {
           activeTopTab={activeTopTab}
           onSelectTopTab={tabId => {
             setActiveTopTab(tabId);
+            if (tabId === 'summary') {
+              setActiveOpTab('overview');
+              setActiveCockpitItem('overview');
+            }
+            if (tabId === 'mesh') {
+              setActiveOpTab('tailscale');
+              setActiveCockpitItem('tailscale');
+            }
             if (tabId === 'xterm_console') setTerminalOpen(true);
             if (tabId === 'playbooks') setPlaybookOpen(true);
             if (tabId === 'group_vars') setGroupVarsOpen(true);
@@ -832,7 +841,7 @@ export default function App() {
                 )}
 
                 {activeOpTab === 'smart' && (
-                  <ZfsManagementView node={selectedNode} />
+                  <DisksSmartView node={selectedNode} />
                 )}
 
                 {activeOpTab === 'tailscale' && (
@@ -848,7 +857,7 @@ export default function App() {
                   <SystemHealthTelemetry telemetry={telemetry} />
                 )}
 
-                {activeOpTab === 'containers' && (
+                {(activeOpTab === 'containers' || activeOpTab === 'pods') && (
                   <PodmanManager
                     selectedNode={selectedNode}
                     onOpenLogs={setLogsTarget}
@@ -859,6 +868,7 @@ export default function App() {
 
                 {activeOpTab === 'vms' && (
                   <VirtualMachinesKVM
+                    node={selectedNode}
                     onOpenConsole={() => setTerminalOpen(true)}
                     onNewVM={() => setAddNodeOpen(true)}
                   />
@@ -1035,6 +1045,7 @@ export default function App() {
                             </div>
                             <div className="grid grid-cols-1 md:grid-cols-12 gap-2 p-1">
                               <VirtualMachinesKVM
+                                node={selectedNode}
                                 onOpenConsole={() => setTerminalOpen(true)}
                                 onNewVM={() => setAddNodeOpen(true)}
                               />
