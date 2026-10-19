@@ -18,9 +18,7 @@ import (
 	"air-traffic-control/backend/pkg/tailscale"
 	"air-traffic-control/backend/pkg/types"
 	"air-traffic-control/backend/pkg/websocket"
-	_ "air-traffic-control/backend/plugins/connection/local"
-	_ "air-traffic-control/backend/plugins/connection/ssh"
-	_ "air-traffic-control/backend/plugins/connection/tailscale"
+	_ "air-traffic-control/backend/plugins/all"
 )
 
 type sshWithLocalFallbackRunner struct {
