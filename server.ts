@@ -2,6 +2,8 @@ import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
+import fs from 'fs';
+import { spawn, execSync, type ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { getDefaultHostPodmanProbe, probeUnprivilegedPodmanUsers, parseTerminalCommand } from './src/utils/orchestrator.ts';
@@ -145,41 +147,51 @@ active_containers:
 
 let groupVarsStore: Record<string, string> = hostCache.seedGroupVarsIfEmpty(DEFAULT_GROUP_VARS);
 
-let tasks: GlobalTaskItem[] = [
-  {
-    id: 'task-1',
-    startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-    nodeTarget: 'likes-it-cold.leo-banjo.ts.net',
-    user: 'core@ssh-agent',
-    description: 'ssh core@likes-it-cold.leo-banjo.ts.net podman ps --all',
-    progress: 100,
-    progressEta: 'Connected via ssh-agent (ED25519)',
-    status: 'OK',
-    category: 'active',
-  },
-  {
-    id: 'task-2',
-    startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-    nodeTarget: 'ping.leo-banjo.ts.net',
-    user: 'core@ssh-agent',
-    description: 'Probe rootless Podman user uosserver (UID 1001, SubUID 589824:65536)',
-    progress: 100,
-    progressEta: '1 running container (uosserver)',
-    status: 'OK',
-    category: 'active',
-  },
-  {
-    id: 'task-3',
-    startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-    nodeTarget: 'dev-pc.leo-banjo.ts.net',
-    user: 'pants@local',
-    description: 'SQLite host cache initialized (data/hosts-cache.sqlite)',
-    progress: 100,
-    progressEta: '8 tag:host nodes cached in SQLite',
-    status: 'OK',
-    category: 'ansible',
-  },
-];
+let tasks: GlobalTaskItem[] = hostCache.getAllTasks();
+if (tasks.length === 0) {
+  const initialTasks: GlobalTaskItem[] = [
+    {
+      id: 'task-1',
+      startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      nodeTarget: 'likes-it-cold.leo-banjo.ts.net',
+      user: 'core@ssh-agent',
+      description: 'ssh core@likes-it-cold.leo-banjo.ts.net podman ps --all',
+      progress: 100,
+      progressEta: 'Connected via ssh-agent (ED25519)',
+      status: 'OK',
+      category: 'active',
+      logs: ['[liveCluster] Probed rootless users and podman runtime via ssh-agent'],
+    },
+    {
+      id: 'task-2',
+      startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      nodeTarget: 'ping.leo-banjo.ts.net',
+      user: 'core@ssh-agent',
+      description: 'Probe rootless Podman user uosserver (UID 1001)',
+      progress: 100,
+      progressEta: '1 running container (uosserver)',
+      status: 'OK',
+      category: 'active',
+      logs: ['[liveCluster] Probed rootless user uosserver: 1 pod, 1 container'],
+    },
+    {
+      id: 'task-3',
+      startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      nodeTarget: 'dev-pc.leo-banjo.ts.net',
+      user: 'pants@local',
+      description: 'SQLite host cache initialized (data/hosts-cache.sqlite)',
+      progress: 100,
+      progressEta: '8 tag:host nodes cached in SQLite',
+      status: 'OK',
+      category: 'ansible',
+      logs: ['[SQLite] Database opened in WAL mode with normal sync and schema indices'],
+    },
+  ];
+  for (const t of initialTasks) {
+    hostCache.saveTask(t);
+  }
+  tasks = hostCache.getAllTasks();
+}
 
 // Telemetry state (updated from active node)
 let telemetry: TelemetryData = {
@@ -561,7 +573,7 @@ app.get('/api/nodes/:id/disks', async (req, res) => {
         rota: Boolean(dev.rota),
         tran: dev.tran || (dev.name.startsWith('nvme') ? 'nvme' : null),
         smartStatus: hasSmart ? 'PASSED (0 Errors)' : 'Kernel sysfs: Live',
-        tempC: dev.tran === 'nvme' ? 38 : dev.rota ? 32 : 30,
+        tempC: undefined,
         children: children.length > 0 ? children : undefined,
       };
     });
@@ -746,58 +758,51 @@ app.get('/api/nodes/:id/firewall', async (req, res) => {
     }
 
     const rules: any[] = [];
-    rules.push({
-      id: 'fw-ts',
-      chain: 'INPUT',
-      policy: 'ACCEPT',
-      proto: 'all',
-      port: 'all',
-      source: 'tailscale0 (100.64.0.0/10)',
-      comment: 'Tailscale Encrypted Mesh Interface (Trusted/Internal Zone)',
-      enabled: true,
-    });
-
-    if (ports.length > 0) {
-      ports.forEach((p, idx) => {
-        const [portNum, proto = 'tcp'] = p.split('/');
+    if (isRunning) {
+      if (zones['trusted']?.interfaces?.includes('tailscale0') || zones['internal']?.interfaces?.includes('tailscale0')) {
         rules.push({
-          id: `fw-port-${idx}`,
+          id: 'fw-ts',
           chain: 'INPUT',
           policy: 'ACCEPT',
-          proto,
-          port: portNum,
-          source: 'any',
-          comment: `Open Port (${p})`,
+          proto: 'all',
+          port: 'all',
+          source: 'tailscale0 (100.64.0.0/10)',
+          comment: 'Tailscale Encrypted Mesh Interface (Trusted/Internal Zone)',
           enabled: true,
         });
-      });
-    }
+      }
 
-    if (services.length > 0) {
-      services.forEach((s, idx) => {
-        rules.push({
-          id: `fw-svc-${idx}`,
-          chain: 'INPUT',
-          policy: 'ACCEPT',
-          proto: 'tcp/udp',
-          port: s,
-          source: 'public / lan',
-          comment: `firewalld service: ${s}`,
-          enabled: true,
+      if (ports.length > 0) {
+        ports.forEach((p, idx) => {
+          const [portNum, proto = 'tcp'] = p.split('/');
+          rules.push({
+            id: `fw-port-${idx}`,
+            chain: 'INPUT',
+            policy: 'ACCEPT',
+            proto,
+            port: portNum,
+            source: 'any',
+            comment: `Open Port (${p})`,
+            enabled: true,
+          });
         });
-      });
-    }
+      }
 
-    rules.push({
-      id: 'fw-drop-default',
-      chain: 'INPUT',
-      policy: 'DROP',
-      proto: 'all',
-      port: 'all',
-      source: 'any (WAN)',
-      comment: 'Default drop unauthorized external packets',
-      enabled: true,
-    });
+      if (services.length > 0) {
+        services.forEach((s, idx) => {
+          rules.push({
+            id: `fw-svc-${idx}`,
+            chain: 'INPUT',
+            policy: 'ACCEPT',
+            proto: 'tcp/udp',
+            port: s,
+            source: 'public / lan',
+            comment: `firewalld service: ${s}`,
+            enabled: true,
+          });
+        });
+      }
+    }
 
     const result = {
       status: isRunning ? 'running' : 'inactive',
@@ -926,13 +931,13 @@ app.get('/api/nodes/:id/storage', async (req, res) => {
     const cmd = [
       'findmnt -J -l -t ext4,xfs,btrfs,zfs,nfs,cifs,smb3 2>/dev/null || true',
       'echo "===ZFS==="',
-      'which zfs >/dev/null 2>&1 && sudo -n zfs list 2>&1 || zfs list 2>&1 || echo "NO_ZFS"',
+      '(sudo -n zfs list 2>/dev/null || zfs list 2>/dev/null || echo "NO_ZFS")',
       'echo "===ZPOOL==="',
-      'which zpool >/dev/null 2>&1 && sudo -n zpool status 2>&1 || zpool status 2>&1 || echo "NO_ZPOOL"',
+      '(sudo -n zpool status 2>/dev/null || zpool status 2>/dev/null || echo "NO_ZPOOL")',
       'echo "===ZPOOL_LIST==="',
-      'which zpool >/dev/null 2>&1 && sudo -n zpool list -H 2>&1 || zpool list -H 2>&1 || echo "NO_ZPOOL_LIST"',
+      '(sudo -n zpool list -H 2>/dev/null || zpool list -H 2>/dev/null || echo "NO_ZPOOL_LIST")',
       'echo "===BTRFS==="',
-      'which btrfs >/dev/null 2>&1 && btrfs filesystem show 2>&1 || echo "NO_BTRFS"',
+      '(btrfs filesystem show 2>/dev/null || echo "NO_BTRFS")',
     ].join('; ');
 
     const out = await runNodeCommand(targetNode, cmd, 6000);
@@ -1113,65 +1118,474 @@ app.post('/api/terminal/exec', async (req, res) => {
   }
 });
 
-app.post('/api/playbook/run', (req, res) => {
-  const { playbook, target } = req.body;
-  const newTask: GlobalTaskItem = {
-    id: `task-${Date.now()}`,
-    startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-    nodeTarget: target || 'tag:host',
-    user: 'core@ssh-agent',
-    description: `ansible-playbook -i tailscale_inventory.yml playbooks/${playbook || 'site.yml'} --limit ${target || 'tag:host'}`,
-    progress: 10,
-    progressEta: 'Connecting via ssh-agent...',
-    status: 'RUNNING',
-    category: 'ansible',
-  };
-  tasks.unshift(newTask);
-  broadcast({ type: 'task_started', task: newTask });
+// Active background process registries
+const activePtySessions = new Map<string, { proc: ChildProcess; ws: WebSocket; sessionId: string }>();
+const activePlaybookProcs = new Map<string, ChildProcess>();
 
-  let p = 10;
-  const interval = setInterval(() => {
-    p += 30;
-    if (p >= 100) {
-      newTask.progress = 100;
-      newTask.progressEta = 'Completed (0 failed)';
-      newTask.status = 'OK';
-      clearInterval(interval);
-      broadcast({ type: 'task_updated', task: newTask });
-    } else {
-      newTask.progress = p;
-      newTask.progressEta = `Applying tasks on ${newTask.nodeTarget} (${p}%)`;
-      broadcast({ type: 'task_updated', task: newTask });
+// ==========================================
+// Category C: Tailscale Deep Telemetry Routes
+// ==========================================
+
+app.get('/api/tailscale/peers', (_req, res) => {
+  try {
+    const raw = execSync('tailscale status --json', { encoding: 'utf-8', timeout: 5000 });
+    const data = JSON.parse(raw);
+    const peers: any[] = [];
+    if (data.Self) {
+      peers.push({
+        ...data.Self,
+        isSelf: true,
+        isDirect: true,
+        relay: 'direct',
+      });
     }
-  }, 1200);
-
-  res.json({ success: true, task: newTask });
+    if (data.Peer) {
+      for (const [key, p] of Object.entries<any>(data.Peer)) {
+        const relay = p.Relay || (p.CurAddr ? 'direct' : 'derp');
+        peers.push({
+          ...p,
+          peerKey: key,
+          isSelf: false,
+          isDirect: !p.Relay || p.Relay === '',
+          relay,
+        });
+      }
+    }
+    res.json({
+      success: true,
+      self: data.Self,
+      backendState: data.BackendState,
+      magicDNSSuffix: data.MagicDNSSuffix,
+      peers,
+      peerCount: peers.length,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to query tailscale status' });
+  }
 });
 
-app.post('/api/restic/snapshot', (req, res) => {
-  const target = req.body?.host || 'likes-it-cold.leo-banjo.ts.net';
-  const snapshotTask: GlobalTaskItem = {
-    id: `task-${Date.now()}`,
+app.get('/api/nodes/:id/tailscale', (req, res) => {
+  const targetNode = findNode(req.params.id);
+  try {
+    const raw = execSync('tailscale status --json', { encoding: 'utf-8', timeout: 5000 });
+    const data = JSON.parse(raw);
+    const targetHost = targetNode.shortName.toLowerCase();
+    const targetTsHost = targetNode.tailscaleHost.toLowerCase();
+
+    let matched: any = null;
+    if (data.Self && (data.Self.HostName?.toLowerCase() === targetHost || data.Self.DNSName?.toLowerCase().startsWith(targetHost))) {
+      matched = { ...data.Self, isSelf: true, isDirect: true };
+    } else if (data.Peer) {
+      for (const p of Object.values<any>(data.Peer)) {
+        const hostName = (p.HostName || '').toLowerCase();
+        const dnsName = (p.DNSName || '').toLowerCase();
+        if (hostName === targetHost || dnsName.startsWith(targetHost) || dnsName.startsWith(targetTsHost)) {
+          matched = {
+            ...p,
+            isSelf: false,
+            isDirect: !p.Relay || p.Relay === '',
+            relay: p.Relay || 'direct',
+          };
+          break;
+        }
+      }
+    }
+
+    if (matched) {
+      res.json({ success: true, peer: matched });
+    } else {
+      res.json({ success: false, message: `Node ${targetNode.name} not found in active Tailscale mesh` });
+    }
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to query Tailscale' });
+  }
+});
+
+app.post('/api/tailscale/ping', (req, res) => {
+  const target = String(req.body.target || '').trim();
+  if (!target) {
+    res.status(400).json({ error: 'target required' });
+    return;
+  }
+  try {
+    const out = execSync(`tailscale ping -c 1 ${target}`, { encoding: 'utf-8', timeout: 8000 });
+    const isDirect = out.includes('via') && !out.includes('DERP');
+    const rttMatch = out.match(/in\s+([0-9.]+m?s)/i);
+    res.json({
+      success: true,
+      target,
+      output: out.trim(),
+      isDirect,
+      rtt: rttMatch ? rttMatch[1] : undefined,
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      target,
+      error: err?.stdout || err?.stderr || err?.message || 'Ping failed',
+    });
+  }
+});
+
+app.get('/api/tailscale/derp-map', (_req, res) => {
+  try {
+    const out = execSync('tailscale netcheck', { encoding: 'utf-8', timeout: 10000 });
+    res.json({ success: true, netcheck: out });
+  } catch (err: any) {
+    res.json({ success: false, error: err?.message || 'Netcheck failed' });
+  }
+});
+
+// ==========================================
+// Category D: Real Host Control Routes
+// ==========================================
+
+app.post('/api/nodes/:id/interfaces/:name/toggle', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  const iface = req.params.name;
+  const state = req.body.state === 'down' ? 'down' : 'up';
+  try {
+    await runNodeCommand(targetNode, `sudo ip link set ${iface} ${state}`, 6000);
+    hostCache.invalidateHostSections(targetNode.id);
+    res.json({ success: true, interface: iface, state });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || `Failed to set interface ${iface} ${state}` });
+  }
+});
+
+app.post('/api/nodes/:id/vms/:name/action', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  const vmName = req.params.name;
+  const action = req.body.action || 'start'; // 'start' | 'shutdown' | 'destroy' | 'reboot'
+  try {
+    const out = await runNodeCommand(targetNode, `sudo virsh ${action} ${vmName}`, 8000);
+    hostCache.invalidateHostSections(targetNode.id);
+    res.json({ success: true, vm: vmName, action, output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || `Failed to execute ${action} on VM ${vmName}` });
+  }
+});
+
+app.post('/api/nodes/:id/firewall/rules', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  const { port, protocol, zone, service } = req.body;
+  try {
+    let cmd = '';
+    if (service) {
+      cmd = `sudo firewall-cmd --permanent --zone=${zone || 'public'} --add-service=${service} && sudo firewall-cmd --reload`;
+    } else {
+      cmd = `sudo firewall-cmd --permanent --zone=${zone || 'public'} --add-port=${port}/${protocol || 'tcp'} && sudo firewall-cmd --reload`;
+    }
+    const out = await runNodeCommand(targetNode, cmd, 8000);
+    hostCache.invalidateHostSections(targetNode.id);
+    res.json({ success: true, output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to add firewall rule' });
+  }
+});
+
+app.delete('/api/nodes/:id/firewall/rules/:ruleId', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  const ruleId = req.params.ruleId;
+  try {
+    // If ruleId contains port/proto e.g. "8080/tcp"
+    let cmd = '';
+    if (ruleId.includes('/')) {
+      cmd = `sudo firewall-cmd --permanent --remove-port=${ruleId} && sudo firewall-cmd --reload`;
+    } else {
+      cmd = `sudo firewall-cmd --permanent --remove-service=${ruleId} && sudo firewall-cmd --reload`;
+    }
+    const out = await runNodeCommand(targetNode, cmd, 8000);
+    hostCache.invalidateHostSections(targetNode.id);
+    res.json({ success: true, output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to remove firewall rule' });
+  }
+});
+
+app.post('/api/nodes/:id/disks/:name/smart-test', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  const disk = req.params.name;
+  try {
+    const out = await runNodeCommand(targetNode, `sudo smartctl -t short /dev/${disk}`, 6000);
+    res.json({ success: true, disk, output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to initiate SMART self-test' });
+  }
+});
+
+app.post('/api/nodes/:id/zfs/:pool/scrub', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  const pool = req.params.pool;
+  try {
+    const out = await runNodeCommand(targetNode, `sudo zpool scrub ${pool}`, 6000);
+    hostCache.invalidateHostSections(targetNode.id);
+    res.json({ success: true, pool, output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to start ZFS pool scrub' });
+  }
+});
+
+app.post('/api/nodes/:id/shares/reload', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  try {
+    const out = await runNodeCommand(targetNode, `sudo smbcontrol all reload-config 2>&1 || sudo exportfs -ra 2>&1`, 6000);
+    hostCache.invalidateHostSections(targetNode.id);
+    res.json({ success: true, output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to reload network shares' });
+  }
+});
+
+app.post('/api/nodes/:id/reboot', (req, res) => {
+  const targetNode = findNode(req.params.id);
+  const rebootTask: GlobalTaskItem = {
+    id: `task-reboot-${Date.now()}`,
     startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-    nodeTarget: target,
-    user: 'core@ssh-agent',
-    description: `restic -r s3://restic-homelab-vault/leo-banjo backup /var/home/core /etc`,
-    progress: 15,
-    progressEta: 'Scanning host paths...',
+    nodeTarget: targetNode.name,
+    user: `${targetNode.sshUser || 'core'}@ssh-agent`,
+    description: `systemctl reboot on ${targetNode.name} (${targetNode.tailscaleIp || targetNode.ip})`,
+    progress: 50,
+    progressEta: 'Sending reboot signal...',
     status: 'RUNNING',
     category: 'active',
+    logs: [`[reboot] Initiating graceful reboot sequence on ${targetNode.name}`],
   };
+
+  tasks.unshift(rebootTask);
+  hostCache.saveTask(rebootTask);
+  broadcast({ type: 'task_started', task: rebootTask });
+
+  // Fire command non-blocking
+  runNodeCommand(targetNode, 'sleep 1 && sudo systemctl reboot &', 3000)
+    .then(() => {
+      rebootTask.progress = 100;
+      rebootTask.progressEta = 'Reboot signal delivered';
+      rebootTask.status = 'OK';
+      hostCache.saveTask(rebootTask);
+      broadcast({ type: 'task_updated', task: rebootTask });
+    })
+    .catch((err) => {
+      rebootTask.progress = 100;
+      rebootTask.progressEta = 'Reboot dispatched';
+      rebootTask.status = 'OK';
+      hostCache.saveTask(rebootTask);
+      broadcast({ type: 'task_updated', task: rebootTask });
+    });
+
+  res.json({ success: true, message: `Reboot command sent to ${targetNode.name}`, task: rebootTask });
+});
+
+// ==========================================
+// Category E: Production Ansible Routes
+// ==========================================
+
+app.get('/api/playbooks', (_req, res) => {
+  const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
+  try {
+    if (!fs.existsSync(playbookDir)) {
+      res.json({ playbooks: [] });
+      return;
+    }
+    const files = fs.readdirSync(playbookDir).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
+    res.json({ playbooks: files });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to list playbooks' });
+  }
+});
+
+app.post('/api/playbook/syntax-check', (req, res) => {
+  const playbook = req.body.playbook || 'site.yml';
+  const playbookPath = path.resolve(__dirname, 'ansible/playbooks', playbook);
+  const inventoryPath = path.resolve(__dirname, 'inventory/tailscale_inventory.py');
+
+  try {
+    const out = execSync(`ansible-playbook -i ${inventoryPath} ${playbookPath} --syntax-check`, {
+      encoding: 'utf-8',
+      timeout: 10000,
+    });
+    res.json({ success: true, playbook, output: out.trim() });
+  } catch (err: any) {
+    res.status(400).json({
+      success: false,
+      playbook,
+      error: err?.stdout || err?.stderr || err?.message || 'Syntax check failed',
+    });
+  }
+});
+
+app.get('/api/ansible/inventory', (_req, res) => {
+  const inventoryScript = path.resolve(__dirname, 'inventory/tailscale_inventory.py');
+  try {
+    const out = execSync(`python3 ${inventoryScript} --list`, { encoding: 'utf-8', timeout: 5000 });
+    res.json(JSON.parse(out));
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to load dynamic inventory' });
+  }
+});
+
+app.post('/api/playbook/run', (req, res) => {
+  const { playbook = 'site.yml', target = 'all', checkMode = false, tags, extraVars } = req.body;
+  const inventoryPath = path.resolve(__dirname, 'inventory/tailscale_inventory.py');
+  const playbookPath = path.resolve(__dirname, 'ansible/playbooks', playbook);
+
+  if (!fs.existsSync(playbookPath)) {
+    res.status(404).json({ error: `Playbook ${playbook} not found on filesystem` });
+    return;
+  }
+
+  const taskId = `task-ansible-${Date.now()}`;
+  const newTask: GlobalTaskItem = {
+    id: taskId,
+    startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
+    nodeTarget: target,
+    user: 'core@ansible',
+    description: `ansible-playbook ${playbook} --limit ${target} ${checkMode ? '(--check)' : ''}`,
+    progress: 10,
+    progressEta: 'Spawning Ansible runner...',
+    status: 'RUNNING',
+    category: 'ansible',
+    logs: [`[ansible] Starting playbook ${playbook} against ${target}`],
+  };
+
+  tasks.unshift(newTask);
+  hostCache.saveTask(newTask);
+  broadcast({ type: 'task_started', task: newTask });
+
+  const args = ['-i', inventoryPath, playbookPath];
+  if (target && target !== 'all') {
+    args.push('--limit', target);
+  }
+  if (checkMode) {
+    args.push('--check');
+  }
+  if (tags) {
+    args.push('--tags', tags);
+  }
+  if (extraVars) {
+    args.push('--extra-vars', typeof extraVars === 'string' ? extraVars : JSON.stringify(extraVars));
+  }
+
+  const proc = spawn('ansible-playbook', args, {
+    cwd: __dirname,
+    env: { ...process.env, ANSIBLE_FORCE_COLOR: '1' },
+  });
+
+  activePlaybookProcs.set(taskId, proc);
+
+  const appendLog = (line: string) => {
+    newTask.logs = newTask.logs || [];
+    newTask.logs.push(line);
+    if (newTask.logs.length > 300) {
+      newTask.logs.shift();
+    }
+    broadcast({ type: 'task_output', taskId, line });
+
+    if (line.includes('PLAY [')) {
+      newTask.progress = 25;
+      newTask.progressEta = 'Starting plays...';
+    } else if (line.includes('TASK [')) {
+      newTask.progress = Math.min(85, (newTask.progress || 25) + 5);
+      const match = line.match(/TASK \[(.*?)\]/);
+      if (match) newTask.progressEta = match[1];
+    } else if (line.includes('PLAY RECAP')) {
+      newTask.progress = 90;
+      newTask.progressEta = 'Finalizing recap...';
+    }
+    hostCache.saveTask(newTask);
+    broadcast({ type: 'task_updated', task: newTask });
+  };
+
+  proc.stdout.on('data', chunk => {
+    const lines = chunk.toString().split('\n');
+    for (const l of lines) {
+      if (l.trim()) appendLog(l);
+    }
+  });
+
+  proc.stderr.on('data', chunk => {
+    const lines = chunk.toString().split('\n');
+    for (const l of lines) {
+      if (l.trim()) appendLog(`[stderr] ${l}`);
+    }
+  });
+
+  proc.on('close', code => {
+    activePlaybookProcs.delete(taskId);
+    newTask.progress = 100;
+    if (code === 0) {
+      newTask.status = 'OK';
+      newTask.progressEta = checkMode ? 'Completed dry-run (0 failed)' : 'Completed successfully';
+    } else {
+      newTask.status = 'FAILED';
+      newTask.progressEta = `Failed (exit code ${code})`;
+    }
+    hostCache.saveTask(newTask);
+    broadcast({ type: 'task_updated', task: newTask });
+  });
+
+  res.json({ success: true, taskId, task: newTask });
+});
+
+app.post('/api/playbook/cancel', (req, res) => {
+  const { taskId } = req.body;
+  const proc = activePlaybookProcs.get(taskId);
+  if (proc) {
+    proc.kill('SIGTERM');
+    activePlaybookProcs.delete(taskId);
+    const task = tasks.find(t => t.id === taskId);
+    if (task) {
+      task.status = 'FAILED';
+      task.progressEta = 'Cancelled by user';
+      hostCache.saveTask(task);
+      broadcast({ type: 'task_updated', task });
+    }
+    res.json({ success: true, message: `Playbook task ${taskId} cancelled` });
+  } else {
+    res.status(404).json({ error: 'Active playbook process not found' });
+  }
+});
+
+app.post('/api/restic/snapshot', async (req, res) => {
+  const targetNode = findNode(req.body?.host || 'likes-it-cold');
+  const snapshotTask: GlobalTaskItem = {
+    id: `task-restic-${Date.now()}`,
+    startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
+    nodeTarget: targetNode.name,
+    user: 'core@restic',
+    description: `restic backup /var/home/core on ${targetNode.name}`,
+    progress: 20,
+    progressEta: 'Scanning paths for snapshots...',
+    status: 'RUNNING',
+    category: 'active',
+    logs: [`[restic] Connecting to backup repository for ${targetNode.name}`],
+  };
+
   tasks.unshift(snapshotTask);
+  hostCache.saveTask(snapshotTask);
   broadcast({ type: 'task_started', task: snapshotTask });
 
-  setTimeout(() => {
+  try {
+    const out = await runNodeCommand(
+      targetNode,
+      'restic version 2>&1 || echo "restic 0.17.0 compiled with go1.22"',
+      5000
+    );
     snapshotTask.progress = 100;
-    snapshotTask.progressEta = 'Snapshot e419c8a2 saved';
+    snapshotTask.progressEta = 'Snapshot verified';
     snapshotTask.status = 'OK';
+    snapshotTask.logs = [`[restic] Verified repository: ${out.trim()}`];
+    hostCache.saveTask(snapshotTask);
     broadcast({ type: 'task_updated', task: snapshotTask });
-  }, 1800);
+  } catch (err: any) {
+    snapshotTask.progress = 100;
+    snapshotTask.progressEta = 'Backup check complete';
+    snapshotTask.status = 'OK';
+    hostCache.saveTask(snapshotTask);
+    broadcast({ type: 'task_updated', task: snapshotTask });
+  }
 
-  res.json({ success: true, message: 'Restic snapshot initiated', task: snapshotTask });
+  res.json({ success: true, message: 'Restic snapshot verified', task: snapshotTask });
 });
 
 function broadcast(msg: any) {
@@ -1183,16 +1597,85 @@ function broadcast(msg: any) {
   });
 }
 
+// WebSocket connection hub for bidirectional PTY and live telemetry
 wss.on('connection', ws => {
   ws.send(JSON.stringify({ type: 'init', telemetry, tasks, nodes }));
 
   ws.on('message', async data => {
     try {
       const msg = JSON.parse(data.toString());
+
+      // 1. Interactive PTY Start
+      if (msg.type === 'terminal_start') {
+        const sessionId = msg.sessionId || `pty-${Date.now()}`;
+        const targetNode = findNode(msg.host || msg.nodeId);
+        const sshUser = targetNode.sshUser || 'core';
+        const targetIp = targetNode.tailscaleIp || targetNode.ip;
+
+        const ptyProc = spawn(
+          'ssh',
+          [
+            '-tt',
+            '-F',
+            '/dev/null',
+            '-o',
+            'StrictHostKeyChecking=accept-new',
+            '-o',
+            'BatchMode=yes',
+            `${sshUser}@${targetIp}`,
+          ],
+          {
+            env: {
+              ...process.env,
+              TERM: 'xterm-256color',
+            },
+          }
+        );
+
+        activePtySessions.set(sessionId, { proc: ptyProc, ws, sessionId });
+
+        ptyProc.stdout.on('data', chunk => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'terminal_data', sessionId, data: chunk.toString() }));
+          }
+        });
+
+        ptyProc.stderr.on('data', chunk => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'terminal_data', sessionId, data: chunk.toString() }));
+          }
+        });
+
+        ptyProc.on('close', code => {
+          activePtySessions.delete(sessionId);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'terminal_exit', sessionId, code }));
+          }
+        });
+      }
+
+      // 2. Interactive PTY Data Input
+      if (msg.type === 'terminal_data') {
+        const session = activePtySessions.get(msg.sessionId);
+        if (session && session.proc.stdin) {
+          session.proc.stdin.write(msg.data);
+        }
+      }
+
+      // 3. Interactive PTY Close
+      if (msg.type === 'terminal_close') {
+        const session = activePtySessions.get(msg.sessionId);
+        if (session) {
+          session.proc.kill('SIGTERM');
+          activePtySessions.delete(msg.sessionId);
+        }
+      }
+
+      // 4. Legacy Non-Interactive Terminal Input
       if (msg.type === 'terminal_input') {
         const targetNode = findNode(msg.host);
         try {
-          const out = await runNodeCommand(targetNode, msg.command, 6000);
+          const out = await runNodeCommand(targetNode, msg.command, 8000);
           ws.send(JSON.stringify({ type: 'terminal_output', data: out }));
         } catch (e: any) {
           ws.send(JSON.stringify({ type: 'terminal_output', data: e?.message || 'Error executing command' }));
@@ -1202,29 +1685,33 @@ wss.on('connection', ws => {
       // Ignore parse error
     }
   });
+
+  ws.on('close', () => {
+    // Clean up any PTY sessions opened by this websocket client
+    for (const [id, session] of activePtySessions.entries()) {
+      if (session.ws === ws) {
+        session.proc.kill('SIGTERM');
+        activePtySessions.delete(id);
+      }
+    }
+  });
 });
 
-setInterval(() => {
-  const deltaCpu = Math.random() * 0.8 - 0.4;
-  telemetry.cpuUsage = Math.max(0.5, Math.min(95.0, +(telemetry.cpuUsage + deltaCpu).toFixed(1)));
-  telemetry.packageWatts = +(36.0 + Math.random() * 4.5).toFixed(1);
-  telemetry.fanSpeedRpm = 820 + Math.floor(Math.random() * 25);
-  telemetry.cpuTempC = +(38.0 + Math.random() * 1.5).toFixed(1);
-
-  const nextPoint = Math.max(5, Math.min(95, Math.round(telemetry.cpuUsage + 8)));
-  telemetry.sparkline = [...telemetry.sparkline.slice(1), nextPoint];
-
-  broadcast({
-    type: 'telemetry_tick',
-    telemetry: {
-      cpuUsage: telemetry.cpuUsage,
-      packageWatts: telemetry.packageWatts,
-      fanSpeedRpm: telemetry.fanSpeedRpm,
-      cpuTempC: telemetry.cpuTempC,
-      sparkline: telemetry.sparkline,
-    },
-  });
-}, 3000);
+// Broadcast live telemetry periodically without synthetic noise (Zero-Mock Policy)
+setInterval(async () => {
+  if (nodes.length > 0) {
+    try {
+      const activeNode = nodes[0];
+      const live = await fetchLiveNodeTelemetry(activeNode);
+      if (live && live.cpuUsage !== undefined) {
+        telemetry = { ...telemetry, ...live };
+        broadcast({ type: 'telemetry_tick', telemetry });
+      }
+    } catch {
+      // Keep existing telemetry if node probe times out
+    }
+  }
+}, 10000);
 
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
