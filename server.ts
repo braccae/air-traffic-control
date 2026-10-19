@@ -17,6 +17,17 @@ import {
 import { updateNodeSettings } from './src/utils/navigationViewModel.ts';
 import { createHostCacheStore } from './src/utils/hostCacheDb.ts';
 import { buildJournalctlCommand, sanitizeLogFilter } from './src/utils/systemLogs.ts';
+import {
+  registerPlaybookRoutes,
+  validatePlaybookName,
+  normalizePlaybookName,
+  isProtectedPlaybook,
+  listPlaybooks,
+  readPlaybook,
+  createPlaybook,
+  updatePlaybook,
+  deletePlaybook,
+} from './src/utils/playbookManager.ts';
 import type { NodeItem, TelemetryData, GlobalTaskItem, ServiceUser } from './src/types/index.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1424,38 +1435,9 @@ app.post('/api/nodes/:id/reboot', (req, res) => {
 // Category E: Production Ansible Routes
 // ==========================================
 
-app.get('/api/playbooks', (_req, res) => {
-  const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
-  try {
-    if (!fs.existsSync(playbookDir)) {
-      res.json({ playbooks: [] });
-      return;
-    }
-    const files = fs.readdirSync(playbookDir).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
-    res.json({ playbooks: files });
-  } catch (err: any) {
-    res.status(500).json({ error: err?.message || 'Failed to list playbooks' });
-  }
-});
-
-app.post('/api/playbook/syntax-check', (req, res) => {
-  const playbook = req.body.playbook || 'site.yml';
-  const playbookPath = path.resolve(__dirname, 'ansible/playbooks', playbook);
-  const inventoryPath = path.resolve(__dirname, 'inventory/tailscale_inventory.py');
-
-  try {
-    const out = execSync(`ansible-playbook -i ${inventoryPath} ${playbookPath} --syntax-check`, {
-      encoding: 'utf-8',
-      timeout: 10000,
-    });
-    res.json({ success: true, playbook, output: out.trim() });
-  } catch (err: any) {
-    res.status(400).json({
-      success: false,
-      playbook,
-      error: err?.stdout || err?.stderr || err?.message || 'Syntax check failed',
-    });
-  }
+const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
+registerPlaybookRoutes(app, playbookDir, {
+  inventoryScriptPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
 });
 
 app.get('/api/ansible/inventory', (_req, res) => {

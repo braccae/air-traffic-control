@@ -27,6 +27,7 @@ import { TailscaleExplorerView } from './components/TailscaleExplorerView.tsx';
 import { AddNodeModal } from './components/modals/AddNodeModal.tsx';
 import { EditNodeModal } from './components/modals/EditNodeModal.tsx';
 import { RunPlaybookModal } from './components/modals/RunPlaybookModal.tsx';
+import { PlaybookEditorModal } from './components/modals/PlaybookEditorModal.tsx';
 import { ContainerLogsModal } from './components/modals/ContainerLogsModal.tsx';
 import { RebootConfirmModal } from './components/modals/RebootConfirmModal.tsx';
 import { SearchModal } from './components/modals/SearchModal.tsx';
@@ -412,10 +413,17 @@ export default function App() {
   const [addNodeOpen, setAddNodeOpen] = useState(false);
   const [editNodeTarget, setEditNodeTarget] = useState<NodeItem | null>(null);
   const [playbookOpen, setPlaybookOpen] = useState(false);
+  const [playbookEditorOpen, setPlaybookEditorOpen] = useState(false);
+  const [selectedPlaybookForEdit, setSelectedPlaybookForEdit] = useState<string | undefined>(undefined);
   const [logsTarget, setLogsTarget] = useState<string | null>(null);
   const [rebootModalOpen, setRebootModalOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [groupVarsOpen, setGroupVarsOpen] = useState(false);
+
+  const handleOpenPlaybookEditor = (playbookName?: string) => {
+    setSelectedPlaybookForEdit(playbookName);
+    setPlaybookEditorOpen(true);
+  };
 
   // Floating & Draggable Terminal Sessions State
   const [sessions, setSessions] = useState<TerminalSession[]>(() => {
@@ -870,6 +878,7 @@ export default function App() {
       <Header
         onOpenAddNode={() => setAddNodeOpen(true)}
         onOpenPlaybook={() => setPlaybookOpen(true)}
+        onOpenPlaybookEditor={() => handleOpenPlaybookEditor()}
         onOpenTerminal={() => handleOpenTerminal()}
         onOpenSearch={() => setSearchOpen(true)}
         onOpenGroupVars={() => setGroupVarsOpen(true)}
@@ -1292,7 +1301,10 @@ export default function App() {
       </div>
 
       {/* Fixed Bottom Global Tasks & Execution Log */}
-      <GlobalTasksExecutionLog tasks={tasks} />
+      <GlobalTasksExecutionLog
+        tasks={tasks}
+        onOpenPlaybookEditor={() => handleOpenPlaybookEditor()}
+      />
 
       {/* Interactive Modals */}
       <TerminalModal
@@ -1344,8 +1356,24 @@ export default function App() {
 
       <RunPlaybookModal
         isOpen={playbookOpen}
+        initialPlaybook={selectedPlaybookForEdit}
         onClose={() => setPlaybookOpen(false)}
         onRunPlaybook={handleRunPlaybook}
+        onOpenEditor={(playbook) => {
+          setPlaybookOpen(false);
+          handleOpenPlaybookEditor(playbook);
+        }}
+      />
+
+      <PlaybookEditorModal
+        isOpen={playbookEditorOpen}
+        initialPlaybook={selectedPlaybookForEdit}
+        onClose={() => setPlaybookEditorOpen(false)}
+        onRunPlaybook={(playbook) => {
+          setPlaybookEditorOpen(false);
+          setSelectedPlaybookForEdit(playbook);
+          setPlaybookOpen(true);
+        }}
       />
 
       <ContainerLogsModal
@@ -1368,6 +1396,7 @@ export default function App() {
         nodes={nodesList}
         onSelectNode={handleSelectNode}
         onOpenPlaybook={() => setPlaybookOpen(true)}
+        onOpenPlaybookEditor={() => handleOpenPlaybookEditor()}
         onOpenTerminal={() => setTerminalOpen(true)}
       />
 

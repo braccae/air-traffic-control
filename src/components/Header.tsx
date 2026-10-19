@@ -3,21 +3,27 @@ import React from 'react';
 interface HeaderProps {
   onOpenAddNode: () => void;
   onOpenPlaybook: () => void;
+  onOpenPlaybookEditor?: () => void;
   onOpenTerminal: () => void;
   onOpenSearch: () => void;
   onOpenGroupVars: () => void;
   onToggleSidebar?: () => void;
   isSidebarOpen?: boolean;
+  onlineCount?: number;
+  totalCount?: number;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   onOpenAddNode,
   onOpenPlaybook,
+  onOpenPlaybookEditor,
   onOpenTerminal,
   onOpenSearch,
   onOpenGroupVars,
   onToggleSidebar,
   isSidebarOpen,
+  onlineCount,
+  totalCount,
 }) => {
   return (
     <header className="fixed top-0 left-0 right-0 z-50 h-10 bg-[#0a0d1f] flex items-center justify-between px-3 shadow-[0_1px_8px_rgba(0,0,0,0.5)] border-b border-[#26293c]">
@@ -84,6 +90,18 @@ export const Header: React.FC<HeaderProps> = ({
             <span>Run Playbook</span>
           </button>
 
+          {onOpenPlaybookEditor && (
+            <button
+              type="button"
+              onClick={onOpenPlaybookEditor}
+              className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
+              title="Add, edit, or remove Ansible playbooks"
+            >
+              <span className="material-symbols-outlined text-[14px] text-[#b0c9ff]">menu_book</span>
+              <span>Playbooks</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={onOpenGroupVars}
@@ -108,8 +126,10 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Nodes Health & User Profile */}
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1 bg-[#171a2d] px-2 py-0.5 rounded border border-[#26293c]">
-            <span className="w-2 h-2 rounded-full bg-[#8cd6cb]"></span>
-            <span className="font-mono text-xs text-[#c3c6d2]">8/8 Up</span>
+            <span className="w-2 h-2 rounded-full bg-[#8cd6cb] animate-pulse shadow-[0_0_6px_rgba(140,214,203,0.8)]"></span>
+            <span className="font-mono text-xs text-[#c3c6d2]">
+              {onlineCount ?? 8}/{totalCount ?? 8} Up
+            </span>
           </div>
 
           <div className="flex items-center gap-1.5 text-[#dfe1fa] pl-1">

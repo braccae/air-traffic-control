@@ -4,19 +4,26 @@ import type { GlobalTaskItem } from '../types/index.ts';
 interface GlobalTasksExecutionLogProps {
   tasks: GlobalTaskItem[];
   onOpenTaskDetails?: (taskId: string) => void;
+  onOpenPlaybookEditor?: () => void;
 }
 
 export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = ({
   tasks,
   onOpenTaskDetails,
+  onOpenPlaybookEditor,
 }) => {
   const [activeTab, setActiveTab] = useState<'active' | 'ansible' | 'syslog' | 'vault'>('active');
   const [isExpanded, setIsExpanded] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
 
-  const activeCount = tasks.filter(t => t.status === 'RUNNING').length || 4;
+  const activeCount = tasks.filter(t => t.status === 'RUNNING').length;
 
-  const ansibleLogs = [
+  const runningOrRecentAnsible = tasks.find(t => t.category === 'ansible' && t.logs && t.logs.length > 0);
+  const liveAnsibleLogs = runningOrRecentAnsible?.logs && runningOrRecentAnsible.logs.length > 0
+    ? runningOrRecentAnsible.logs
+    : tasks.find(t => t.logs && t.logs.length > 0)?.logs || null;
+
+  const fallbackAnsibleLogs = [
     'PLAY [Setup Homelab Cluster Services & Podman Engine] ****************************************',
     'TASK [Gathering Facts] **********************************************************************',
     'ok: [likes-it-cold.leo-banjo.ts.net]',
@@ -143,6 +150,18 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             <span>Ansible Stream</span>
           </button>
 
+          {onOpenPlaybookEditor && (
+            <button
+              type="button"
+              onClick={onOpenPlaybookEditor}
+              className="px-2 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] rounded font-mono text-[10px] cursor-pointer border border-[#434750]/30 hidden md:inline-flex items-center gap-1"
+              title="Open Ansible Playbook Editor"
+            >
+              <span className="material-symbols-outlined text-[13px] text-[#b0c9ff]">menu_book</span>
+              <span>Manage Playbooks</span>
+            </button>
+          )}
+
           {/* Expand / Minimize buttons */}
           <button
             type="button"
@@ -179,70 +198,101 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#26293c]/50">
-                {tasks.map(task => (
-                  <tr
-                    key={task.id}
-                    onClick={() => onOpenTaskDetails?.(task.id)}
-                    className="h-7 bg-[#0a0d1f] hover:bg-[#26293c]/60 transition-colors cursor-pointer"
-                  >
-                    <td className="px-3 py-0.5 text-[#c3c6d2] whitespace-nowrap">{task.startTime}</td>
-                    <td className="px-3 py-0.5 text-[#d9b9ff] whitespace-nowrap">
-                      {task.nodeTarget}
-                    </td>
-                    <td className="px-3 py-0.5 text-[#dfe1fa] whitespace-nowrap">{task.user}</td>
-                    <td className="px-3 py-0.5 text-[#dfe1fa] font-mono truncate max-w-md">
-                      {task.description}
-                    </td>
-                    <td className="px-3 py-0.5">
-                      {task.status === 'RUNNING' ? (
-                        <div className="flex items-center gap-2">
-                          <div className="w-36 bg-[#26293c] h-2 rounded overflow-hidden">
-                            <div
-                              className="bg-[#b0c9ff] h-full transition-all duration-300"
-                              style={{ width: `${task.progress}%` }}
-                            ></div>
-                          </div>
-                          <span className="text-[10px] text-[#8d909b]">{task.progressEta}</span>
-                        </div>
-                      ) : (
-                        <span className="text-[#8d909b]">{task.progressEta}</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-0.5 text-right">
-                      {task.status === 'RUNNING' ? (
-                        <span className="px-1.5 py-0.5 bg-[#b0c9ff]/20 text-[#b0c9ff] font-bold rounded text-[10px] border border-[#b0c9ff]/30">
-                          RUNNING
-                        </span>
-                      ) : (
-                        <span className="px-1.5 py-0.5 bg-[#8cd6cb]/20 text-[#8cd6cb] font-bold rounded text-[10px] border border-[#8cd6cb]/30">
-                          OK
-                        </span>
-                      )}
+                {tasks.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-6 text-center text-[#8d909b]">
+                      No active or historical tasks queued. Run a playbook or execute a node action to see real execution telemetry.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  tasks.map(task => (
+                    <tr
+                      key={task.id}
+                      onClick={() => onOpenTaskDetails?.(task.id)}
+                      className="h-7 bg-[#0a0d1f] hover:bg-[#26293c]/60 transition-colors cursor-pointer"
+                    >
+                      <td className="px-3 py-0.5 text-[#c3c6d2] whitespace-nowrap">{task.startTime}</td>
+                      <td className="px-3 py-0.5 text-[#d9b9ff] whitespace-nowrap">
+                        {task.nodeTarget}
+                      </td>
+                      <td className="px-3 py-0.5 text-[#dfe1fa] whitespace-nowrap">{task.user}</td>
+                      <td className="px-3 py-0.5 text-[#dfe1fa] font-mono truncate max-w-md">
+                        {task.description}
+                      </td>
+                      <td className="px-3 py-0.5">
+                        {task.status === 'RUNNING' ? (
+                          <div className="flex items-center gap-2">
+                            <div className="w-36 bg-[#26293c] h-2 rounded overflow-hidden">
+                              <div
+                                className="bg-[#b0c9ff] h-full transition-all duration-300"
+                                style={{ width: `${task.progress}%` }}
+                              ></div>
+                            </div>
+                            <span className="text-[10px] text-[#8d909b]">{task.progressEta}</span>
+                          </div>
+                        ) : (
+                          <span className="text-[#8d909b]">{task.progressEta}</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-0.5 text-right">
+                        {task.status === 'RUNNING' ? (
+                          <span className="px-1.5 py-0.5 bg-[#b0c9ff]/20 text-[#b0c9ff] font-bold rounded text-[10px] border border-[#b0c9ff]/30">
+                            RUNNING
+                          </span>
+                        ) : task.status === 'FAILED' ? (
+                          <span className="px-1.5 py-0.5 bg-[#ffb4ab]/20 text-[#ffb4ab] font-bold rounded text-[10px] border border-[#ffb4ab]/30">
+                            FAILED
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 bg-[#8cd6cb]/20 text-[#8cd6cb] font-bold rounded text-[10px] border border-[#8cd6cb]/30">
+                            OK
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           )}
 
           {activeTab === 'ansible' && (
             <div className="p-3 font-mono text-xs space-y-1 text-[#dfe1fa] bg-[#0a0d1f]">
-              {ansibleLogs.map((line, idx) => (
-                <div
-                  key={idx}
-                  className={
-                    line.startsWith('PLAY') || line.startsWith('TASK')
-                      ? 'text-[#b0c9ff] font-bold'
-                      : line.includes('changed')
-                      ? 'text-[#d9b9ff]'
-                      : line.includes('failed')
-                      ? 'text-[#ffb4ab]'
-                      : 'text-[#8cd6cb]'
-                  }
-                >
-                  {line}
-                </div>
-              ))}
+              {liveAnsibleLogs ? (
+                liveAnsibleLogs.map((line, idx) => (
+                  <div
+                    key={idx}
+                    className={
+                      line.startsWith('PLAY') || line.startsWith('TASK') || line.includes('ansible-playbook')
+                        ? 'text-[#b0c9ff] font-bold'
+                        : line.includes('changed')
+                        ? 'text-[#d9b9ff]'
+                        : line.includes('failed') || line.includes('fatal') || line.includes('[stderr]')
+                        ? 'text-[#ffb4ab]'
+                        : 'text-[#8cd6cb]'
+                    }
+                  >
+                    {line}
+                  </div>
+                ))
+              ) : (
+                fallbackAnsibleLogs.map((line, idx) => (
+                  <div
+                    key={idx}
+                    className={
+                      line.startsWith('PLAY') || line.startsWith('TASK')
+                        ? 'text-[#b0c9ff] font-bold'
+                        : line.includes('changed')
+                        ? 'text-[#d9b9ff]'
+                        : line.includes('failed')
+                        ? 'text-[#ffb4ab]'
+                        : 'text-[#8cd6cb]'
+                    }
+                  >
+                    {line}
+                  </div>
+                ))
+              )}
             </div>
           )}
 

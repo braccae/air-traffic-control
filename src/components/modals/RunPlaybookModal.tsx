@@ -1,36 +1,85 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 interface RunPlaybookModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onRunPlaybook: (playbook: string, target: string) => void;
+  initialPlaybook?: string;
+  onRunPlaybook: (
+    playbook: string,
+    target: string,
+    checkMode?: boolean,
+    tags?: string,
+    extraVars?: string
+  ) => void;
+  onOpenEditor?: (playbook: string) => void;
 }
 
 export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
   isOpen,
   onClose,
+  initialPlaybook,
   onRunPlaybook,
+  onOpenEditor,
 }) => {
-  const [playbook, setPlaybook] = useState('site.yml');
-  const [target, setTarget] = useState('all (14 hosts)');
+  const [playbook, setPlaybook] = useState(initialPlaybook || 'site.yml');
+  const [availablePlaybooks, setAvailablePlaybooks] = useState<string[]>([
+    'site.yml',
+    'security-hardening.yml',
+    'tailscale-status.yml',
+    'podman-update.yml',
+  ]);
+  const [target, setTarget] = useState('tag:host');
   const [checkMode, setCheckMode] = useState(false);
-  const [vaultPassword, setVaultPassword] = useState('••••••••••••');
+  const [tags, setTags] = useState('');
+  const [extraVars, setExtraVars] = useState('');
+  const [syntaxStatus, setSyntaxStatus] = useState<string | null>(null);
+  const [checkingSyntax, setCheckingSyntax] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      if (initialPlaybook) {
+        setPlaybook(initialPlaybook);
+      }
+      fetch('/api/playbooks')
+        .then(res => res.json())
+        .then(data => {
+          if (Array.isArray(data?.playbooks) && data.playbooks.length > 0) {
+            setAvailablePlaybooks(data.playbooks);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [isOpen, initialPlaybook]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    onRunPlaybook(playbook, target);
-    onClose();
+  const handleSyntaxCheck = async () => {
+    setCheckingSyntax(true);
+    setSyntaxStatus(null);
+    try {
+      const res = await fetch('/api/playbook/syntax-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playbook }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setSyntaxStatus('Syntax OK: Playbook structure verified');
+      } else {
+        setSyntaxStatus(`Syntax Error: ${data.error || 'Failed validation'}`);
+      }
+    } catch (err: any) {
+      setSyntaxStatus(`Check Failed: ${err?.message || 'Connection error'}`);
+    } finally {
+      setCheckingSyntax(false);
+    }
   };
 
-  const playbooks = [
-    { id: 'site.yml', name: 'site.yml', desc: 'Full datacenter orchestration and service stack deployment' },
-    { id: 'update-all.yml', name: 'update-all.yml', desc: 'Rolling OS package updates and kernel verification' },
-    { id: 'security-hardening.yml', name: 'security-hardening.yml', desc: 'NFTables firewall, SSH strict MFA, rootless podman policies' },
-    { id: 'restic-snapshot.yml', name: 'restic-snapshot.yml', desc: 'Run datacenter-wide restic immutable snapshots and deduplication' },
-    { id: 'deploy-containers.yml', name: 'deploy-containers.yml', desc: 'Podman compose / pod specification rollout' },
-  ];
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onRunPlaybook(playbook, target, checkMode, tags.trim() || undefined, extraVars.trim() || undefined);
+    onClose();
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
@@ -39,7 +88,7 @@ export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-[#b0c9ff] text-[18px]">play_arrow</span>
             <span className="font-mono text-xs text-[#dfe1fa] font-bold">
-              Ansible Playbook Orchestration Runner
+              Ansible Production Playbook Runner
             </span>
           </div>
           <button
@@ -53,13 +102,40 @@ export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
 
         <form onSubmit={handleSubmit} className="p-4 space-y-3 font-mono text-xs">
           <div>
-            <label className="block text-[#8d909b] mb-1">SELECT TARGET PLAYBOOK</label>
-            <div className="space-y-1.5">
-              {playbooks.map(p => (
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[#8d909b]">SELECT TARGET PLAYBOOK</label>
+              <div className="flex items-center gap-2">
+                {onOpenEditor && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenEditor(playbook)}
+                    className="text-[10px] text-[#b0c9ff] hover:underline cursor-pointer flex items-center gap-0.5"
+                    title="Open in Playbook Editor"
+                  >
+                    <span className="material-symbols-outlined text-[12px]">edit_note</span>
+                    <span>Edit / Manage Playbooks</span>
+                  </button>
+                )}
+                {onOpenEditor && <span className="text-[#313447]">|</span>}
+                <button
+                  type="button"
+                  onClick={handleSyntaxCheck}
+                  disabled={checkingSyntax}
+                  className="text-[10px] text-[#8cd6cb] hover:underline cursor-pointer flex items-center gap-1"
+                >
+                  <span className={`material-symbols-outlined text-[12px] ${checkingSyntax ? 'animate-spin' : ''}`}>
+                    check_circle
+                  </span>
+                  <span>{checkingSyntax ? 'Checking...' : 'Check Syntax (--syntax-check)'}</span>
+                </button>
+              </div>
+            </div>
+            <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+              {availablePlaybooks.map(p => (
                 <label
-                  key={p.id}
+                  key={p}
                   className={`flex items-start gap-2 p-2 rounded border cursor-pointer transition-colors ${
-                    playbook === p.id
+                    playbook === p
                       ? 'bg-[#26293c] border-[#b0c9ff] text-[#dfe1fa]'
                       : 'bg-[#1b1e31] border-[#26293c] text-[#c3c6d2] hover:bg-[#1f2238]'
                   }`}
@@ -67,18 +143,27 @@ export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
                   <input
                     type="radio"
                     name="playbook"
-                    value={p.id}
-                    checked={playbook === p.id}
-                    onChange={() => setPlaybook(p.id)}
+                    value={p}
+                    checked={playbook === p}
+                    onChange={() => {
+                      setPlaybook(p);
+                      setSyntaxStatus(null);
+                    }}
                     className="mt-0.5"
                   />
                   <div>
-                    <span className="font-bold text-[#b0c9ff]">{p.name}</span>
-                    <p className="text-[10px] text-[#8d909b] mt-0.5">{p.desc}</p>
+                    <span className="font-bold text-[#b0c9ff]">{p}</span>
                   </div>
                 </label>
               ))}
             </div>
+            {syntaxStatus && (
+              <p className={`text-[10px] mt-1.5 p-1 rounded ${
+                syntaxStatus.startsWith('Syntax OK') ? 'bg-[#8cd6cb]/15 text-[#8cd6cb]' : 'bg-[#ffb4ab]/15 text-[#ffb4ab]'
+              }`}>
+                {syntaxStatus}
+              </p>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-2">
@@ -89,27 +174,40 @@ export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
                 onChange={e => setTarget(e.target.value)}
                 className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] outline-none"
               >
-                <option value="tag:host (8 nodes)">tag:host (8 nodes)</option>
-                <option value="likes-it-cold.leo-banjo.ts.net">likes-it-cold.leo-banjo.ts.net</option>
-                <option value="ping.leo-banjo.ts.net">ping.leo-banjo.ts.net</option>
-                <option value="dev-pc.leo-banjo.ts.net">dev-pc.leo-banjo.ts.net</option>
-                <option value="fred.leo-banjo.ts.net">fred.leo-banjo.ts.net</option>
-                <option value="the-freezer.leo-banjo.ts.net">the-freezer.leo-banjo.ts.net</option>
-                <option value="chuck.leo-banjo.ts.net">chuck.leo-banjo.ts.net</option>
-                <option value="larry.leo-banjo.ts.net">larry.leo-banjo.ts.net</option>
-                <option value="orangepizero3.leo-banjo.ts.net">orangepizero3.leo-banjo.ts.net</option>
+                <option value="tag:host">tag:host (Cluster Nodes)</option>
+                <option value="likes-it-cold">likes-it-cold.leo-banjo.ts.net</option>
+                <option value="ping">ping.leo-banjo.ts.net</option>
+                <option value="dev-pc">dev-pc.leo-banjo.ts.net</option>
+                <option value="fred">fred.leo-banjo.ts.net</option>
+                <option value="the-freezer">the-freezer.leo-banjo.ts.net</option>
+                <option value="chuck">chuck.leo-banjo.ts.net</option>
+                <option value="larry">larry.leo-banjo.ts.net</option>
+                <option value="orangepizero3">orangepizero3.leo-banjo.ts.net</option>
+                <option value="all">all (Full Tailnet)</option>
               </select>
             </div>
 
             <div>
-              <label className="block text-[#8d909b] mb-1">ANSIBLE VAULT SECRET</label>
+              <label className="block text-[#8d909b] mb-1">TAGS (--tags)</label>
               <input
-                type="password"
-                value={vaultPassword}
-                onChange={e => setVaultPassword(e.target.value)}
+                type="text"
+                placeholder="e.g. security, firewall"
+                value={tags}
+                onChange={e => setTags(e.target.value)}
                 className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] outline-none"
               />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-[#8d909b] mb-1">EXTRA VARIABLES JSON / YAML (--extra-vars)</label>
+            <input
+              type="text"
+              placeholder='e.g. {"force_reload": true}'
+              value={extraVars}
+              onChange={e => setExtraVars(e.target.value)}
+              className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] outline-none font-mono"
+            />
           </div>
 
           <div className="flex items-center gap-2 pt-1">
