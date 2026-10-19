@@ -121,7 +121,7 @@ describe('ansibleVenvManager', () => {
 
       const env = getAnsibleExecutionEnv({});
       assert.equal(env.VIRTUAL_ENV, venvPath);
-      assert.equal(env.PATH, `${venvBin}:`);
+      assert.equal(env.PATH, venvBin);
     });
   });
 

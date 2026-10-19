@@ -180,7 +180,7 @@ export function getAnsibleExecutionEnv(baseEnv?: NodeJS.ProcessEnv): Record<stri
 
   return {
     ...cleanEnv,
-    PATH: `${venvBin}:${basePath}`,
+    PATH: basePath ? `${venvBin}:${basePath}` : venvBin,
     VIRTUAL_ENV: venvPath,
   };
 }
