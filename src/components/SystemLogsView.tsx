@@ -19,10 +19,14 @@ const TIME_RANGES = [
 ];
 const PRIORITIES = [
   { label: 'All Levels', value: 'all' },
-  { label: 'Error & Higher', value: 'err' },
-  { label: 'Warning & Higher', value: 'warning' },
-  { label: 'Info & Higher', value: 'info' },
-  { label: 'Debug Only', value: 'debug' },
+  { label: 'Emergency (emerg)', value: 'emerg' },
+  { label: 'Alert (alert)', value: 'alert' },
+  { label: 'Critical (crit)', value: 'crit' },
+  { label: 'Error (err)', value: 'err' },
+  { label: 'Warning (warning)', value: 'warning' },
+  { label: 'Notice (notice)', value: 'notice' },
+  { label: 'Info (info)', value: 'info' },
+  { label: 'Debug (debug)', value: 'debug' },
 ];
 const LINE_LIMITS = [50, 100, 250, 500, 1000];
 
@@ -60,6 +64,7 @@ export const SystemLogsView: React.FC<SystemLogsViewProps> = ({ node, initialUni
     if (user.trim()) params.set('user', user.trim());
     if (priority !== 'all') params.set('priority', priority);
     if (since !== 'all') params.set('since', since);
+    if (searchTerm.trim()) params.set('grep', searchTerm.trim());
     params.set('lines', String(linesLimit));
 
     try {
@@ -80,10 +85,13 @@ export const SystemLogsView: React.FC<SystemLogsViewProps> = ({ node, initialUni
     }
   };
 
-  // Initial fetch and dependency trigger
+  // Initial fetch and dependency trigger with debounce
   useEffect(() => {
-    fetchLogs(true);
-  }, [node.id, source, unit, user, priority, since, linesLimit]);
+    const timer = setTimeout(() => {
+      fetchLogs(true);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [node.id, source, unit, user, priority, since, linesLimit, searchTerm]);
 
   // Auto-refresh timer (every 5 seconds)
   useEffect(() => {
