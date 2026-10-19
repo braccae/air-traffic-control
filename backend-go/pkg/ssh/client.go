@@ -1,11 +1,11 @@
 package ssh
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"os"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -27,15 +27,22 @@ type Config struct {
 
 // ClientManager handles pooling and lifecycle of SSH sessions
 type ClientManager struct {
-	mu      sync.RWMutex
-	clients map[string]*ssh.Client
+	pool *ClientPool
 }
 
 // NewClientManager initializes a thread-safe connection pool
 func NewClientManager() *ClientManager {
 	return &ClientManager{
-		clients: make(map[string]*ssh.Client),
+		pool: NewClientPool(PoolConfig{
+			MaxSessionsPerHost: DefaultMaxSessionsPerHost,
+			HeartbeatInterval:  DefaultHeartbeatInterval,
+		}),
 	}
+}
+
+// Pool returns the underlying ClientPool.
+func (m *ClientManager) Pool() *ClientPool {
+	return m.pool
 }
 
 func resolveAgentSocketPath() string {
@@ -73,98 +80,12 @@ func getSSHAgentAuthMethod() (ssh.AuthMethod, io.Closer) {
 
 // GetClient retrieves or dials an SSH client
 func (m *ClientManager) GetClient(cfg Config) (*ssh.Client, error) {
-	port := cfg.Port
-	if port == 0 {
-		port = 22
-	}
-	user := cfg.User
-	if user == "" {
-		user = "core"
-	}
-	key := fmt.Sprintf("%s@%s:%d", user, cfg.Host, port)
-
-	m.mu.RLock()
-	if client, ok := m.clients[key]; ok {
-		m.mu.RUnlock()
-		return client, nil
-	}
-	m.mu.RUnlock()
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Double-check under write lock
-	if client, ok := m.clients[key]; ok {
-		return client, nil
-	}
-
-	authMethods := []ssh.AuthMethod{}
-	if agentAuth, _ := getSSHAgentAuthMethod(); agentAuth != nil {
-		authMethods = append(authMethods, agentAuth)
-	}
-	if len(cfg.PrivateKey) > 0 {
-		var signer ssh.Signer
-		var err error
-		if cfg.Passphrase != "" {
-			signer, err = ssh.ParsePrivateKeyWithPassphrase(cfg.PrivateKey, []byte(cfg.Passphrase))
-		} else {
-			signer, err = ssh.ParsePrivateKey(cfg.PrivateKey)
-		}
-		if err == nil {
-			authMethods = append(authMethods, ssh.PublicKeys(signer))
-		}
-	}
-	if cfg.Password != "" {
-		authMethods = append(authMethods, ssh.Password(cfg.Password))
-	}
-
-	timeout := cfg.Timeout
-	if timeout == 0 {
-		timeout = 8 * time.Second
-	}
-
-	sshConfig := &ssh.ClientConfig{
-		User:            user,
-		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Configurable in production
-		Timeout:         timeout,
-	}
-
-	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", port))
-	client, err := ssh.Dial("tcp", addr, sshConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to dial ssh to %s: %w", addr, err)
-	}
-
-	m.clients[key] = client
-	return client, nil
+	return m.pool.GetClient(context.Background(), cfg)
 }
 
-// RunCommand executes a command remotely and returns output
+// RunCommand executes a command remotely and returns output using channel multiplexing
 func (m *ClientManager) RunCommand(cfg Config, command string) (string, error) {
-	client, err := m.GetClient(cfg)
-	if err != nil {
-		return "", err
-	}
-
-	session, err := client.NewSession()
-	if err != nil {
-		return "", err
-	}
-	defer session.Close()
-
-	// Adapt command execution depending on node type
-	formattedCmd := command
-	if cfg.NodeType == types.NodeTypeWindows {
-		// Target powershell
-		formattedCmd = fmt.Sprintf("powershell.exe -NoProfile -NonInteractive -Command \"%s\"", command)
-	}
-
-	out, err := session.CombinedOutput(formattedCmd)
-	if err != nil {
-		return string(out), fmt.Errorf("ssh command execution failed: %w (output: %s)", err, string(out))
-	}
-	return string(out), nil
+	return m.pool.RunCommand(context.Background(), cfg, command)
 }
 
 // OpenPTY opens an interactive pseudo-terminal for web sockets / xterm.js
