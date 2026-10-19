@@ -14,9 +14,13 @@ import { useDraggable, type DragPosition } from '../hooks/useDraggable.ts';
 import { useResizable, type WindowSize, type ResizeDirection } from '../hooks/useResizable.ts';
 import {
   type TerminalSession,
-  TERMINAL_QUICK_COMMANDS,
   formatSshTarget,
 } from '../utils/terminalSessionManager.ts';
+import {
+  loadQuickCommands,
+  QUICK_COMMAND_EVENT,
+  type QuickCommandItem,
+} from '../utils/quickCommandsManager.ts';
 
 let ghosttyLoadPromise: Promise<Ghostty> | null = null;
 function loadGhosttyEngine(): Promise<Ghostty> {
@@ -56,6 +60,23 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
   const [lastOutputText, setLastOutputText] = useState('');
   const [connStatus, setConnStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('connected');
   const [showQuickMenu, setShowQuickMenu] = useState(false);
+  const [quickCommands, setQuickCommands] = useState<QuickCommandItem[]>(() => loadQuickCommands());
+
+  useEffect(() => {
+    const handleQuickCommandsUpdated = (event: Event) => {
+      const customEvt = event as CustomEvent<QuickCommandItem[]>;
+      if (customEvt.detail && Array.isArray(customEvt.detail)) {
+        setQuickCommands(customEvt.detail);
+      } else {
+        setQuickCommands(loadQuickCommands());
+      }
+    };
+
+    window.addEventListener(QUICK_COMMAND_EVENT, handleQuickCommandsUpdated);
+    return () => {
+      window.removeEventListener(QUICK_COMMAND_EVENT, handleQuickCommandsUpdated);
+    };
+  }, []);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -459,16 +480,16 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
             <span className="text-[10px] text-gray-500 font-mono flex items-center gap-1">
               <TerminalSquare className="w-3 h-3 text-[#79c0ff]" />
             </span>
-            {TERMINAL_QUICK_COMMANDS.map((qc) => (
+            {quickCommands.map((qc) => (
               <button
-                key={qc.label}
+                key={qc.id}
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   handleRunQuickCommand(qc.cmd);
                 }}
                 className="px-1.5 py-0.5 text-[10px] font-mono text-gray-300 hover:text-white hover:bg-[#21262d] rounded transition-colors"
-                title={`Run '${qc.cmd}'`}
+                title={qc.description ? `${qc.description} (${qc.cmd})` : `Run '${qc.cmd}'`}
               >
                 {qc.label}
               </button>
@@ -489,22 +510,26 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
               <TerminalSquare className="w-3.5 h-3.5 text-[#79c0ff]" />
             </button>
             {showQuickMenu && (
-              <div className="absolute right-0 top-8 z-50 bg-[#161b22] border border-[#30363d] rounded-md shadow-xl py-1 w-36">
+              <div className="absolute right-0 top-8 z-50 bg-[#161b22] border border-[#30363d] rounded-md shadow-xl py-1 w-48">
                 <div className="px-2.5 py-1 text-[10px] font-mono text-gray-400 uppercase tracking-wider border-b border-[#30363d]/50">
                   Quick Commands
                 </div>
-                {TERMINAL_QUICK_COMMANDS.map((qc) => (
+                {quickCommands.map((qc) => (
                   <button
-                    key={qc.label}
+                    key={qc.id}
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
                       handleRunQuickCommand(qc.cmd);
                       setShowQuickMenu(false);
                     }}
-                    className="w-full text-left px-2.5 py-1.5 text-xs font-mono text-gray-200 hover:text-white hover:bg-[#1f6feb]/20"
+                    className="w-full text-left px-2.5 py-1.5 text-xs font-mono text-gray-200 hover:text-white hover:bg-[#1f6feb]/20 flex flex-col"
+                    title={qc.cmd}
                   >
-                    {qc.label}
+                    <span>{qc.label}</span>
+                    {qc.description && (
+                      <span className="text-[10px] text-gray-400 font-sans truncate">{qc.description}</span>
+                    )}
                   </button>
                 ))}
               </div>
