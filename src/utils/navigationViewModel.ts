@@ -140,6 +140,12 @@ export function buildProvisionedNode(
       secureBoot: 'Enabled',
       iommu: 'Enabled',
     },
+    ...(input.connectionProtocol ? { connectionProtocol: input.connectionProtocol } : {}),
+    ...(input.vaultSecretId ? { vaultSecretId: input.vaultSecretId } : {}),
+    ...(input.winrmPort !== undefined ? { winrmPort: input.winrmPort } : {}),
+    ...(input.folder ? { folder: input.folder } : {}),
+    ...(input.isDynamicTagMember !== undefined ? { isDynamicTagMember: input.isDynamicTagMember } : {}),
+    ...(input.followedTag ? { followedTag: input.followedTag } : {}),
   };
 }
 
