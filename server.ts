@@ -3,7 +3,7 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import fs from 'fs';
-import { spawn, execSync, type ChildProcess } from 'child_process';
+import { spawn, execSync, execFile, type ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { getDefaultHostPodmanProbe, probeUnprivilegedPodmanUsers, parseTerminalCommand } from './src/utils/orchestrator.ts';
@@ -1860,22 +1860,20 @@ app.post('/api/ansible/collections/install', (req, res) => {
     return;
   }
 
-  try {
-    const output = execSync(`ansible-galaxy collection install ${collection}`, {
-      encoding: 'utf-8',
-      timeout: 120000,
-    });
+  execFile('ansible-galaxy', ['collection', 'install', collection], { timeout: 120000, encoding: 'utf-8' }, (err, stdout, stderr) => {
+    if (err) {
+      res.status(500).json({
+        success: false,
+        error: err.message || stderr || `Failed to install collection ${collection}`,
+      });
+      return;
+    }
     res.json({
       success: true,
       message: `Collection ${collection} installed successfully`,
-      output,
+      output: stdout,
     });
-  } catch (err: any) {
-    res.status(500).json({
-      success: false,
-      error: err?.message || `Failed to install collection ${collection}`,
-    });
-  }
+  });
 });
 
 app.post('/api/playbook/run', (req, res) => {

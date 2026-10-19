@@ -28,8 +28,10 @@ export const RebootConfirmModal: React.FC<RebootConfirmModalProps> = ({
         mode,
         message: `Safety reboot (${mode}) staged from Cockpit`,
       });
-      await stageTaskInQueue(task);
-      onClose();
+      const res = await stageTaskInQueue(task);
+      if (res.success) {
+        onClose();
+      }
     } catch (err) {
       console.error('Failed to stage reboot task:', err);
     } finally {
