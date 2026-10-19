@@ -17,6 +17,7 @@ import {
   buildPrivilegeProbeCommand,
   parsePrivilegeProbeOutput,
 } from './privilegeEscalation.ts';
+import { fetchNodeTelemetryMultiTier, type GlancesMetricPayload } from './telemetryCollector.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -513,17 +514,28 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
       'zpool list -H -o name,size,alloc,free,cap,health 2>/dev/null | head -n 1 || echo "NO_POOL"',
     ].join(' && echo "---SPLIT---" && ');
 
+    let glancesPayload: GlancesMetricPayload | undefined;
+    try {
+      glancesPayload = await fetchNodeTelemetryMultiTier(node, { timeoutMs: 2000, execRemoteCommand: runNodeCommand });
+    } catch {
+      // Degrades gracefully to native probe script
+    }
+
     const out = await runNodeCommand(node, script, 5000);
     const sections = out.split('---SPLIT---').map(s => s.trim());
 
     const loadParts = (sections[0] || '').split(/\s+/);
-    const load1 = Number.parseFloat(loadParts[0]) || 0.2;
-    const load5 = Number.parseFloat(loadParts[1]) || 0.3;
-    const load15 = Number.parseFloat(loadParts[2]) || 0.25;
+    const load1 = glancesPayload ? glancesPayload.load.min1 : (Number.parseFloat(loadParts[0]) || 0.2);
+    const load5 = glancesPayload ? glancesPayload.load.min5 : (Number.parseFloat(loadParts[1]) || 0.3);
+    const load15 = glancesPayload ? glancesPayload.load.min15 : (Number.parseFloat(loadParts[2]) || 0.25);
 
     const memParts = (sections[1] || '').split(/\s+/);
-    const memTotalMb = Number.parseFloat(memParts[0]) || node.specs.ramGiB * 1024;
-    const memUsedMb = Number.parseFloat(memParts[1]) || memTotalMb * 0.35;
+    const memTotalMb = glancesPayload && glancesPayload.mem.total > 0
+      ? +(glancesPayload.mem.total / (1024 * 1024)).toFixed(0)
+      : (Number.parseFloat(memParts[0]) || node.specs.ramGiB * 1024);
+    const memUsedMb = glancesPayload && glancesPayload.mem.used > 0
+      ? +(glancesPayload.mem.used / (1024 * 1024)).toFixed(0)
+      : (Number.parseFloat(memParts[1]) || memTotalMb * 0.35);
     const memCacheMb = Number.parseFloat(memParts[2]) || memTotalMb * 0.15;
 
     const vCpus = Number.parseInt(sections[2] || '', 10) || node.specs.vcpus;
@@ -563,9 +575,12 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
     let metricsSource: 'glances' | 'pcp' | 'cockpit-bridge' | 'kernel' = 'kernel';
     let metricsWarning: string | undefined;
 
-    if (hasGlances) {
+    if (glancesPayload && (glancesPayload.source === 'http_rest' || glancesPayload.source === 'ssh_localhost_curl' || glancesPayload.source === 'cli_stdout_json')) {
       metricsSource = 'glances';
-    } else if (hasPcp) {
+      metricsWarning = undefined;
+    } else if (hasGlances) {
+      metricsSource = 'glances';
+    } else if (hasPcp || glancesPayload?.source === 'pcp_fallback') {
       metricsSource = 'pcp';
       metricsWarning = 'Glances not installed on host. Falling back to PCP (Performance Co-Pilot) daemon.';
     } else if (hasCockpit) {
@@ -576,7 +591,9 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
       metricsWarning = 'Glances not installed on host. Sourcing metrics directly from /proc & sysfs.';
     }
 
-    const cpuUsage = Math.max(0.5, Math.min(99.0, +((load1 / Math.max(1, vCpus)) * 100).toFixed(1)));
+    const cpuUsage = glancesPayload && glancesPayload.cpu.total > 0
+      ? glancesPayload.cpu.total
+      : Math.max(0.5, Math.min(99.0, +((load1 / Math.max(1, vCpus)) * 100).toFixed(1)));
 
     return {
       cpuUsage,

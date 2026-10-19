@@ -19,6 +19,7 @@ import {
 } from './src/utils/liveCluster.ts';
 import { updateNodeSettings } from './src/utils/navigationViewModel.ts';
 import { createHostCacheStore } from './src/utils/hostCacheDb.ts';
+import { fetchNodeTelemetryMultiTier } from './src/utils/telemetryCollector.ts';
 import { registerPrivilegeRoutes } from './src/utils/privilegeEscalation.ts';
 import { buildJournalctlCommand, sanitizeLogFilter } from './src/utils/systemLogs.ts';
 import {
@@ -508,6 +509,20 @@ app.get('/api/telemetry', async (req, res) => {
     hostCache.upsertHost(targetNode);
   }
   res.json({ ...telemetry, node: targetNode, fromCache: false, cachedAt: Date.now() });
+});
+
+app.get('/api/nodes/:id/telemetry/glances', async (req, res) => {
+  const targetNode = nodes.find(n => n.id === req.params.id);
+  if (!targetNode) {
+    res.status(404).json({ success: false, error: 'Node not found' });
+    return;
+  }
+  try {
+    const glances = await fetchNodeTelemetryMultiTier(targetNode);
+    res.json({ success: true, glances });
+  } catch (err: any) {
+    res.status(502).json({ success: false, error: err?.message || String(err) });
+  }
 });
 
 app.get('/api/tasks', (_req, res) => {
@@ -2272,6 +2287,8 @@ wss.on('connection', ws => {
 });
 
 // Broadcast live telemetry periodically without synthetic noise (Zero-Mock Policy)
+// Conservative telemetry polling cadence: 45 seconds (within 30–60s range) per Homelab & Ansible telemetry policy
+const TELEMETRY_POLL_INTERVAL_MS = 45000;
 setInterval(async () => {
   if (nodes.length > 0) {
     try {
@@ -2285,7 +2302,7 @@ setInterval(async () => {
       // Keep existing telemetry if node probe times out
     }
   }
-}, 10000);
+}, TELEMETRY_POLL_INTERVAL_MS);
 
 async function startServer() {
   // Explicit API 404 catch-all: any unhandled /api/* request must return JSON 404, never falling through to Vite/index.html
