@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import type { NodeItem, TelemetryData, GlobalTaskItem } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ServerViewSidebar } from './components/ServerViewSidebar.tsx';
@@ -17,9 +17,13 @@ import { FirewallView } from './components/FirewallView.tsx';
 import { ZfsManagementView } from './components/ZfsManagementView.tsx';
 import { NetworkSharesView } from './components/NetworkSharesView.tsx';
 import { DisksSmartView } from './components/DisksSmartView.tsx';
+import { SystemLogsView } from './components/SystemLogsView.tsx';
+import { ToastNotification, type ToastItem } from './components/ToastNotification.tsx';
 
 // Modals
 import { TerminalModal } from './components/modals/TerminalModal.tsx';
+import { TerminalDockBar } from './components/TerminalDockBar.tsx';
+import { TailscaleExplorerView } from './components/TailscaleExplorerView.tsx';
 import { AddNodeModal } from './components/modals/AddNodeModal.tsx';
 import { EditNodeModal } from './components/modals/EditNodeModal.tsx';
 import { RunPlaybookModal } from './components/modals/RunPlaybookModal.tsx';
@@ -32,6 +36,17 @@ import {
   getSubSidebarWrapperClasses,
   getWorkspaceWrapperClasses,
 } from './utils/navigationViewModel.ts';
+import {
+  createTerminalSession,
+  closeTerminalSession,
+  setSessionMinimized,
+  toggleSessionMaximized,
+  updateSessionPosition,
+  updateSessionSize,
+  type TerminalSession,
+} from './utils/terminalSessionManager.ts';
+import type { DragPosition } from './hooks/useDraggable.ts';
+import type { WindowSize } from './hooks/useResizable.ts';
 
 const initialNodes: NodeItem[] = [
   {
@@ -402,6 +417,132 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [groupVarsOpen, setGroupVarsOpen] = useState(false);
 
+  // Floating & Draggable Terminal Sessions State
+  const [sessions, setSessions] = useState<TerminalSession[]>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('prox_orch_term_sessions');
+        if (saved) return JSON.parse(saved);
+      } catch {}
+    }
+    return [];
+  });
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('prox_orch_term_active_id');
+    }
+    return null;
+  });
+
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+
+  const addToast = useCallback((toast: Omit<ToastItem, 'id'>) => {
+    const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    setToasts(prev => [...prev.slice(-3), { ...toast, id }]);
+  }, []);
+
+  const handleDismissToast = useCallback((id: string) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('prox_orch_term_sessions', JSON.stringify(sessions));
+        if (activeSessionId) {
+          localStorage.setItem('prox_orch_term_active_id', activeSessionId);
+        } else {
+          localStorage.removeItem('prox_orch_term_active_id');
+        }
+      } catch {}
+    }
+  }, [sessions, activeSessionId]);
+
+  const handleOpenTerminal = (targetNodeId?: string) => {
+    const target = nodesList.find(n => n.id === targetNodeId) || selectedNode;
+    const existing = sessions.find(s => s.nodeId === target.id);
+    if (existing) {
+      if (existing.isMinimized) {
+        setSessions(prev => setSessionMinimized(prev, existing.id, false));
+      }
+      setActiveSessionId(existing.id);
+    } else {
+      const newSession = createTerminalSession(
+        target.id,
+        target.name,
+        target.tailscaleIp || target.ip,
+        undefined,
+        sessions.length
+      );
+      setSessions(prev => [...prev, newSession]);
+      setActiveSessionId(newSession.id);
+    }
+    setTerminalOpen(true);
+  };
+
+  const handleCloseTerminalSession = (id: string) => {
+    const { sessions: next, nextActiveId } = closeTerminalSession(sessions, id, activeSessionId);
+    setSessions(next);
+    setActiveSessionId(nextActiveId);
+    if (!nextActiveId) setTerminalOpen(false);
+  };
+
+  const handleNewTerminalSession = (nodeId?: string) => {
+    const target = nodesList.find(n => n.id === nodeId) || selectedNode;
+    const newSession = createTerminalSession(
+      target.id,
+      target.name,
+      target.tailscaleIp || target.ip,
+      undefined,
+      sessions.length
+    );
+    setSessions(prev => [...prev, newSession]);
+    setActiveSessionId(newSession.id);
+    setTerminalOpen(true);
+  };
+
+  const handleMinimizeTerminalSession = (id: string) => {
+    setSessions(prev => setSessionMinimized(prev, id, true));
+  };
+
+  const handleToggleMaximizeTerminalSession = (id: string) => {
+    setSessions(prev => toggleSessionMaximized(prev, id));
+  };
+
+  const handleUpdateSessionPosition = (id: string, pos: DragPosition) => {
+    setSessions(prev => updateSessionPosition(prev, id, pos));
+  };
+
+  const handleUpdateSessionSize = (id: string, size: WindowSize) => {
+    setSessions(prev => updateSessionSize(prev, id, size));
+  };
+
+  // Global Keyboard Shortcuts (Task 25 & Task 95)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl+Shift+T or Ctrl+` to toggle terminal
+      if ((e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 't') || (e.ctrlKey && e.key === '`')) {
+        e.preventDefault();
+        if (terminalOpen && activeSessionId) {
+          const s = sessions.find(s => s.id === activeSessionId);
+          if (s && !s.isMinimized) {
+            handleMinimizeTerminalSession(activeSessionId);
+          } else {
+            setTerminalOpen(false);
+          }
+        } else {
+          handleOpenTerminal();
+        }
+      }
+      // Cmd/Ctrl+K for search modal
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [terminalOpen, activeSessionId, sessions, selectedNode, nodesList]);
+
   // Fetch initial nodes and tasks from API
   useEffect(() => {
     fetch('/api/nodes')
@@ -488,17 +629,26 @@ export default function App() {
               }));
             } else if (msg.type === 'task_started') {
               setTasks(prev => [msg.task, ...prev]);
+              addToast({ type: 'info', title: 'Task Started', message: msg.task.description });
             } else if (msg.type === 'task_updated') {
               setTasks(prev => prev.map(t => (t.id === msg.task.id ? msg.task : t)));
+              if (msg.task.status === 'OK') {
+                addToast({ type: 'success', title: 'Task Completed', message: msg.task.description });
+              } else if (msg.task.status === 'FAILED') {
+                addToast({ type: 'error', title: 'Task Failed', message: msg.task.description });
+              }
             } else if (msg.type === 'node_added') {
               setNodesList(prev =>
                 prev.some(n => n.id === msg.node.id) ? prev : [...prev, msg.node]
               );
+              addToast({ type: 'success', title: 'Node Added', message: `Registered node ${msg.node.name}` });
             } else if (msg.type === 'node_updated' && msg.node) {
               setNodesList(prev => prev.map(n => (n.id === msg.node.id ? msg.node : n)));
               setSelectedNode(prev => (prev.id === msg.node.id ? msg.node : prev));
+              addToast({ type: 'info', title: 'Node Updated', message: `Settings saved for ${msg.node.name}` });
             } else if (msg.type === 'node_deleted' && msg.nodeId) {
               setNodesList(prev => prev.filter(n => n.id !== msg.nodeId));
+              addToast({ type: 'warning', title: 'Node Removed', message: `Deleted node ${msg.nodeId}` });
             }
           } catch {
             // ignore JSON parse
@@ -596,11 +746,17 @@ export default function App() {
     fetch(`/api/nodes/${encodeURIComponent(nodeId)}`, { method: 'DELETE' }).catch(() => {});
   };
 
-  const handleRunPlaybook = (playbook: string, target: string) => {
+  const handleRunPlaybook = (
+    playbook: string,
+    target: string,
+    checkMode = false,
+    tags?: string,
+    extraVars?: string
+  ) => {
     fetch('/api/playbook/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ playbook, target }),
+      body: JSON.stringify({ playbook, target, checkMode, tags, extraVars }),
     }).catch(() => {});
   };
 
@@ -628,18 +784,31 @@ export default function App() {
   };
 
   const handleRebootConfirm = (mode: string) => {
-    const rebootTask: GlobalTaskItem = {
-      id: `task-${Date.now()}`,
-      startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      nodeTarget: selectedNode.tailscaleHost,
-      user: `${selectedNode.sshUser || 'core'}@ssh-agent`,
-      description: `reboot sequence initiated (mode: ${mode})`,
-      progress: 50,
-      progressEta: 'Broadcasting ACPI reboot signal',
-      status: 'RUNNING',
-      category: 'active',
-    };
-    setTasks(prev => [rebootTask, ...prev]);
+    fetch(`/api/nodes/${encodeURIComponent(selectedNode.id)}/reboot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data?.task) {
+          setTasks(prev => [data.task, ...prev.filter(t => t.id !== data.task.id)]);
+        }
+      })
+      .catch(() => {
+        const rebootTask: GlobalTaskItem = {
+          id: `task-${Date.now()}`,
+          startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
+          nodeTarget: selectedNode.tailscaleHost,
+          user: `${selectedNode.sshUser || 'core'}@ssh-agent`,
+          description: `reboot sequence initiated (mode: ${mode})`,
+          progress: 50,
+          progressEta: 'Broadcasting ACPI reboot signal',
+          status: 'RUNNING',
+          category: 'active',
+        };
+        setTasks(prev => [rebootTask, ...prev]);
+      });
   };
 
   // Drag-and-drop panel order state
@@ -701,11 +870,13 @@ export default function App() {
       <Header
         onOpenAddNode={() => setAddNodeOpen(true)}
         onOpenPlaybook={() => setPlaybookOpen(true)}
-        onOpenTerminal={() => setTerminalOpen(true)}
+        onOpenTerminal={() => handleOpenTerminal()}
         onOpenSearch={() => setSearchOpen(true)}
         onOpenGroupVars={() => setGroupVarsOpen(true)}
         onToggleSidebar={() => setMobileSidebarOpen(!mobileSidebarOpen)}
         isSidebarOpen={mobileSidebarOpen}
+        onlineCount={nodesList.filter(n => n.status === 'online').length}
+        totalCount={nodesList.length}
       />
 
       {/* Left Server View Sidebar */}
@@ -734,7 +905,7 @@ export default function App() {
               setActiveOpTab('tailscale');
               setActiveCockpitItem('tailscale');
             }
-            if (tabId === 'xterm_console') setTerminalOpen(true);
+            if (tabId === 'xterm_console') handleOpenTerminal();
             if (tabId === 'playbooks') setPlaybookOpen(true);
             if (tabId === 'group_vars') setGroupVarsOpen(true);
             if (tabId === 'task_queue') {
@@ -757,7 +928,7 @@ export default function App() {
             }`}>
               <NodeBreadcrumbBar
                 node={selectedNode}
-                onOpenTerminal={() => setTerminalOpen(true)}
+                onOpenTerminal={() => handleOpenTerminal()}
                 onTriggerRestic={handleTriggerRestic}
                 onReboot={() => setRebootModalOpen(true)}
                 onPowerOff={() => setRebootModalOpen(true)}
@@ -807,7 +978,6 @@ export default function App() {
                   onSelectItem={item => {
                     setActiveCockpitItem(item);
                     setActiveOpTab(item);
-                    if (item === 'logs') setLogsTarget('dmesg / journald');
                   }}
                   onEditNode={() => setEditNodeTarget(selectedNode)}
                 />
@@ -816,6 +986,10 @@ export default function App() {
               {/* Main Operational Workspace Grid */}
               <div className={getWorkspaceWrapperClasses(subSidebarWidth)}>
                 {/* Specific dedicated Views when selected from Menu */}
+                {(activeOpTab === 'logs' || activeCockpitItem === 'logs') && (
+                  <SystemLogsView node={selectedNode} />
+                )}
+
                 {activeOpTab === 'interfaces' && (
                   <NetworkInterfacesView node={selectedNode} />
                 )}
@@ -837,11 +1011,11 @@ export default function App() {
                 )}
 
                 {activeOpTab === 'tailscale' && (
-                  <TailscaleMeshCard
-                    node={selectedNode}
-                    peers={nodesList}
-                    onReauth={() => setTerminalOpen(true)}
-                    onEditNode={() => setEditNodeTarget(selectedNode)}
+                  <TailscaleExplorerView
+                    onOpenTerminalForHost={ip => {
+                      const match = nodesList.find(n => n.tailscaleIp === ip || n.ip === ip);
+                      handleOpenTerminal(match?.id);
+                    }}
                   />
                 )}
 
@@ -868,6 +1042,8 @@ export default function App() {
 
                 {activeOpTab === 'restic' && (
                   <ResticBackupPolicy
+                    nodeName={selectedNode.name}
+                    hasRestic={selectedNode.hasRestic}
                     onIntegrityCheck={() =>
                       handleRunPlaybook('security-hardening.yml', selectedNode.tailscaleHost)
                     }
@@ -1042,6 +1218,8 @@ export default function App() {
                                 onNewVM={() => setAddNodeOpen(true)}
                               />
                               <ResticBackupPolicy
+                                nodeName={selectedNode.name}
+                                hasRestic={selectedNode.hasRestic}
                                 onIntegrityCheck={() =>
                                   handleRunPlaybook('security-hardening.yml', selectedNode.tailscaleHost)
                                 }
@@ -1118,9 +1296,36 @@ export default function App() {
 
       {/* Interactive Modals */}
       <TerminalModal
-        node={selectedNode}
-        isOpen={terminalOpen}
+        sessions={sessions}
+        activeSessionId={activeSessionId}
+        nodes={nodesList}
+        isOpen={terminalOpen && !!activeSessionId && !sessions.find(s => s.id === activeSessionId)?.isMinimized}
         onClose={() => setTerminalOpen(false)}
+        onSelectSession={setActiveSessionId}
+        onCloseSession={handleCloseTerminalSession}
+        onNewSession={handleNewTerminalSession}
+        onMinimizeSession={handleMinimizeTerminalSession}
+        onToggleMaximizeSession={handleToggleMaximizeTerminalSession}
+        onUpdateSessionPosition={handleUpdateSessionPosition}
+        onUpdateSessionSize={handleUpdateSessionSize}
+      />
+
+      {/* Floating Bottom Minimized Terminal Dock Bar */}
+      <TerminalDockBar
+        sessions={sessions}
+        activeSessionId={activeSessionId}
+        onSelectSession={(id) => {
+          setActiveSessionId(id);
+          setTerminalOpen(true);
+        }}
+        onRestoreSession={(id) => {
+          setSessions(prev => setSessionMinimized(prev, id, false));
+          setActiveSessionId(id);
+          setTerminalOpen(true);
+        }}
+        onMinimizeSession={handleMinimizeTerminalSession}
+        onCloseSession={handleCloseTerminalSession}
+        onNewSession={() => handleNewTerminalSession()}
       />
 
       <AddNodeModal
@@ -1169,6 +1374,11 @@ export default function App() {
       <GroupVarsModal
         isOpen={groupVarsOpen}
         onClose={() => setGroupVarsOpen(false)}
+      />
+
+      <ToastNotification
+        toasts={toasts}
+        onDismiss={handleDismissToast}
       />
     </div>
   );

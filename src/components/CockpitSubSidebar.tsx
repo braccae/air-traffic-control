@@ -55,7 +55,7 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
                 <span className="material-symbols-outlined text-[14px]">article</span>
                 <span>System Logs</span>
               </span>
-              <span className="font-mono text-[10px] text-[#8d909b]">dmesg</span>
+              <span className="font-mono text-[10px] text-[#8d909b]">journald</span>
             </button>
 
             <button

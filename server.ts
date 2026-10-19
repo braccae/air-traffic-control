@@ -16,6 +16,7 @@ import {
 } from './src/utils/liveCluster.ts';
 import { updateNodeSettings } from './src/utils/navigationViewModel.ts';
 import { createHostCacheStore } from './src/utils/hostCacheDb.ts';
+import { buildJournalctlCommand, sanitizeLogFilter } from './src/utils/systemLogs.ts';
 import type { NodeItem, TelemetryData, GlobalTaskItem, ServiceUser } from './src/types/index.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1087,6 +1088,49 @@ app.get('/api/podman/logs', async (req, res) => {
       `INFO  [systemd] Target unit / container ${target} active on ${targetNode.osDescription}`,
     ],
   });
+});
+
+app.get(['/api/nodes/:id/system-logs', '/api/system/logs'], async (req, res) => {
+  const queryNodeId =
+    req.params.id ||
+    (typeof req.query.node === 'string' ? req.query.node : undefined) ||
+    (typeof req.query.host === 'string' ? req.query.host : undefined);
+  const targetNode = findNode(queryNodeId);
+
+  const filter = sanitizeLogFilter({
+    source: req.query.source,
+    unit: req.query.unit,
+    user: req.query.user,
+    priority: req.query.priority,
+    since: req.query.since,
+    grep: req.query.grep,
+    lines: req.query.lines,
+  });
+
+  const cmd = buildJournalctlCommand(filter);
+
+  try {
+    const out = await runNodeCommand(targetNode, cmd, 8000);
+    const lines = out
+      .split('\n')
+      .map(l => l.trimEnd())
+      .filter(Boolean);
+
+    res.json({
+      success: true,
+      lines,
+      host: targetNode.tailscaleHost,
+      filter,
+    });
+  } catch (err: any) {
+    res.status(502).json({
+      success: false,
+      error: err?.message || 'Failed to retrieve system logs from node',
+      lines: [],
+      host: targetNode.tailscaleHost,
+      filter,
+    });
+  }
 });
 
 app.post('/api/terminal/exec', async (req, res) => {

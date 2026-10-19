@@ -155,4 +155,35 @@ export interface GlobalTaskItem {
   progressEta: string;
   status: 'RUNNING' | 'OK' | 'FAILED';
   category: 'active' | 'ansible' | 'syslog' | 'vault';
+  logs?: string[];
+}
+
+export type LogSeverity = 'emerg' | 'alert' | 'crit' | 'err' | 'warning' | 'notice' | 'info' | 'debug';
+
+export interface SystemLogsFilter {
+  source?: 'journald' | 'dmesg' | 'audit' | 'sshd' | string;
+  unit?: string;
+  user?: string;
+  priority?: string;
+  since?: string;
+  grep?: string;
+  lines?: number;
+}
+
+export interface SystemLogsResponse {
+  success: boolean;
+  lines: string[];
+  host: string;
+  filter: SystemLogsFilter;
+  error?: string;
+}
+
+export interface ParsedLogEntry {
+  raw: string;
+  id: string;
+  timestamp?: string;
+  hostname?: string;
+  unit?: string;
+  message: string;
+  level: 'error' | 'warning' | 'info' | 'debug';
 }
