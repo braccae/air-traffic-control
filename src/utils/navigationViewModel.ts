@@ -181,29 +181,59 @@ export interface FormattedNodeBadge {
   badgeClasses: string;
 }
 
-export function formatNodeTypeBadge(node: NodeItem): FormattedNodeBadge {
-  const rawBadge = (node.badge || '').trim();
-  const isGenericSsh = rawBadge.toUpperCase() === 'SSH' || rawBadge.toUpperCase() === 'TS-SSH';
+export function formatNodeTypeBadge(node: NodeItem): FormattedNodeBadge | null {
+  const rawBadge = (node.badge || '').trim().toUpperCase();
+  const lowerName = (node.name || '').toLowerCase();
+  const lowerGroup = (node.group || '').toLowerCase();
+  const nodeType = (node.nodeType as string || '').toLowerCase();
 
-  let label = '';
-  if (rawBadge && !isGenericSsh) {
-    label = rawBadge;
-  } else if (node.nodeType === 'lxc' || node.name.toLowerCase().includes('lxc-')) {
-    label = 'LXC';
-  } else if (node.nodeType === 'k3s' || node.name.toLowerCase().includes('k3s-')) {
-    label = 'K3S';
-  } else if (node.nodeType === 'pbs') {
-    label = 'PBS';
-  } else if (node.nodeType === 'windows') {
-    label = 'WIN';
-  } else if (node.nodeType === 'router_switch') {
-    label = 'NET';
-  } else if (node.group === 'tag:pve' || node.name.toLowerCase().includes('pve-')) {
+  let label: string | null = null;
+
+  if (rawBadge === 'GPU') {
+    label = 'GPU';
+  } else if (
+    nodeType === 'pve' ||
+    lowerGroup === 'tag:pve' ||
+    lowerName.startsWith('pve-') ||
+    rawBadge === 'PVE'
+  ) {
     label = 'PVE';
-  } else if (node.group === 'tag:vm' || node.name.toLowerCase().includes('vm-')) {
+  } else if (
+    nodeType === 'vm' ||
+    lowerGroup === 'tag:vm' ||
+    lowerName.startsWith('vm-') ||
+    rawBadge === 'VM'
+  ) {
     label = 'VM';
-  } else {
-    label = 'Linux';
+  } else if (
+    nodeType === 'lxc' ||
+    lowerGroup === 'tag:lxc' ||
+    lowerName.startsWith('lxc-') ||
+    rawBadge === 'LXC'
+  ) {
+    label = 'LXC';
+  } else if (
+    nodeType === 'k3s' ||
+    lowerGroup === 'tag:k3s' ||
+    lowerName.startsWith('k3s-') ||
+    rawBadge === 'K3S'
+  ) {
+    label = 'K3S';
+  } else if (nodeType === 'pbs' || rawBadge === 'PBS') {
+    label = 'PBS';
+  } else if (nodeType === 'windows' || rawBadge === 'WIN') {
+    label = 'WIN';
+  } else if (
+    nodeType === 'router_switch' ||
+    rawBadge === 'NET' ||
+    rawBadge === 'SWITCH' ||
+    rawBadge === 'VYOS'
+  ) {
+    label = 'NET';
+  }
+
+  if (!label) {
+    return null;
   }
 
   const upper = label.toUpperCase();
@@ -216,10 +246,12 @@ export function formatNodeTypeBadge(node: NodeItem): FormattedNodeBadge {
     badgeClasses = 'bg-[#291e3b] text-[#d9b9ff] border border-[#d9b9ff]/30';
   } else if (upper === 'GPU') {
     badgeClasses = 'bg-[#2d1b38] text-[#f2b9ff] border border-[#f2b9ff]/30';
-  } else if (upper === 'NET' || upper === 'SWITCH' || upper === 'VYOS') {
+  } else if (upper === 'NET') {
     badgeClasses = 'bg-[#2d281b] text-[#ffd580] border border-[#ffd580]/30';
-  } else if (upper === 'LOCAL') {
-    badgeClasses = 'bg-[#1e293b] text-[#93c5fd] border border-[#93c5fd]/30';
+  } else if (upper === 'WIN') {
+    badgeClasses = 'bg-[#182030] text-[#b0c9ff] border border-[#b0c9ff]/30';
+  } else if (upper === 'PBS') {
+    badgeClasses = 'bg-[#1c2e28] text-[#7ae0c2] border border-[#7ae0c2]/30';
   }
 
   return { label, badgeClasses };

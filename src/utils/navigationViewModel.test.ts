@@ -308,71 +308,132 @@ test('getSubSidebarWrapperClasses generates responsive sticky positioning and in
   assert.ok(wideWorkspace.includes('min-w-0'));
 });
 
-test('formatNodeTypeBadge replaces generic SSH placeholders with styled node type pills', async () => {
+test('formatNodeTypeBadge returns null for standard Linux hosts and clutter badges', async () => {
   const { formatNodeTypeBadge } = await import('./navigationViewModel.ts');
 
-  // Generic SSH badge on Linux node -> 'Linux'
-  const linuxWithSshBadge = formatNodeTypeBadge({
+  // Standard Linux host without virtualization tier -> null
+  const standardHost = formatNodeTypeBadge({
     ...sampleNodes[0],
-    badge: 'SSH',
+    badge: undefined,
     nodeType: 'linux',
   });
-  assert.equal(linuxWithSshBadge.label, 'Linux');
-  assert.ok(linuxWithSshBadge.badgeClasses.includes('text-[#b0c9ff]'));
+  assert.equal(standardHost, null);
 
-  // Generic TS-SSH badge on Linux node -> 'Linux'
-  const linuxWithTsSsh = formatNodeTypeBadge({
-    ...sampleNodes[0],
-    badge: 'TS-SSH',
-    nodeType: 'linux',
-  });
-  assert.equal(linuxWithTsSsh.label, 'Linux');
+  // Clutter / generic badges -> null
+  const clutterBadges = [
+    'Linux',
+    'linux',
+    'Local',
+    'LOCAL',
+    'Mgr',
+    'mgr',
+    'Host',
+    'HOST',
+    'Arm64',
+    'arm64',
+    'ts-ssh',
+    'TS-SSH',
+    'ssh',
+    'SSH',
+    'core',
+    'CORE',
+    'x86_64',
+    'aarch64',
+  ];
+  for (const b of clutterBadges) {
+    const res = formatNodeTypeBadge({
+      ...sampleNodes[0],
+      badge: b,
+      nodeType: 'linux',
+    });
+    assert.equal(res, null, `Expected badge "${b}" to return null`);
+  }
+});
 
-  // Node with LXC type -> 'LXC' with cyan styling
-  const lxcNode = formatNodeTypeBadge({
-    ...sampleNodes[0],
-    badge: 'SSH',
-    nodeType: 'lxc',
-  });
-  assert.equal(lxcNode.label, 'LXC');
-  assert.ok(lxcNode.badgeClasses.includes('text-[#8cd6cb]'));
+test('formatNodeTypeBadge returns styled pills for distinct virtualization and platform tiers', async () => {
+  const { formatNodeTypeBadge } = await import('./navigationViewModel.ts');
 
-  // Node with PVE group -> 'PVE' with distinct styling
-  const pveNode = formatNodeTypeBadge({
-    ...sampleNodes[0],
-    badge: 'SSH',
-    group: 'tag:pve',
-    nodeType: 'linux',
-  });
-  assert.equal(pveNode.label, 'PVE');
-  assert.ok(pveNode.badgeClasses.includes('text-[#ffb4ab]'));
+  // PVE via nodeType, group, prefix, or badge
+  const pve1 = formatNodeTypeBadge({ ...sampleNodes[0], nodeType: 'pve' as any });
+  assert.equal(pve1?.label, 'PVE');
+  assert.ok(pve1?.badgeClasses.includes('text-[#ffb4ab]'));
 
-  // Node with VM group -> 'VM' with purple styling
-  const vmNode = formatNodeTypeBadge({
-    ...sampleNodes[0],
-    badge: 'SSH',
-    group: 'tag:vm',
-    nodeType: 'linux',
-  });
-  assert.equal(vmNode.label, 'VM');
-  assert.ok(vmNode.badgeClasses.includes('text-[#d9b9ff]'));
+  const pve2 = formatNodeTypeBadge({ ...sampleNodes[0], group: 'tag:pve', nodeType: 'linux' });
+  assert.equal(pve2?.label, 'PVE');
 
-  // Node with explicit non-generic badge preserved (e.g. GPU, LOCAL, SWITCH)
-  const gpuNode = formatNodeTypeBadge({
-    ...sampleNodes[0],
-    badge: 'GPU',
-    nodeType: 'linux',
-  });
-  assert.equal(gpuNode.label, 'GPU');
-  assert.ok(gpuNode.badgeClasses.includes('text-[#f2b9ff]'));
+  const pve3 = formatNodeTypeBadge({ ...sampleNodes[0], name: 'pve-cluster-01', nodeType: 'linux' });
+  assert.equal(pve3?.label, 'PVE');
 
-  const localNode = formatNodeTypeBadge({
-    ...sampleNodes[0],
-    badge: 'LOCAL',
-    nodeType: 'linux',
-  });
-  assert.equal(localNode.label, 'LOCAL');
-  assert.ok(localNode.badgeClasses.includes('text-[#93c5fd]'));
+  const pve4 = formatNodeTypeBadge({ ...sampleNodes[0], badge: 'PVE', nodeType: 'linux' });
+  assert.equal(pve4?.label, 'PVE');
+
+  // VM via nodeType, group, prefix, or badge
+  const vm1 = formatNodeTypeBadge({ ...sampleNodes[0], nodeType: 'vm' as any });
+  assert.equal(vm1?.label, 'VM');
+  assert.ok(vm1?.badgeClasses.includes('text-[#d9b9ff]'));
+
+  const vm2 = formatNodeTypeBadge({ ...sampleNodes[0], group: 'tag:vm', nodeType: 'linux' });
+  assert.equal(vm2?.label, 'VM');
+
+  const vm3 = formatNodeTypeBadge({ ...sampleNodes[0], name: 'vm-postgres-01', nodeType: 'linux' });
+  assert.equal(vm3?.label, 'VM');
+
+  const vm4 = formatNodeTypeBadge({ ...sampleNodes[0], badge: 'VM', nodeType: 'linux' });
+  assert.equal(vm4?.label, 'VM');
+
+  // LXC via nodeType, prefix, or badge
+  const lxc1 = formatNodeTypeBadge({ ...sampleNodes[0], nodeType: 'lxc' });
+  assert.equal(lxc1?.label, 'LXC');
+  assert.ok(lxc1?.badgeClasses.includes('text-[#8cd6cb]'));
+
+  const lxc2 = formatNodeTypeBadge({ ...sampleNodes[0], name: 'lxc-pihole', nodeType: 'linux' });
+  assert.equal(lxc2?.label, 'LXC');
+
+  const lxc3 = formatNodeTypeBadge({ ...sampleNodes[0], badge: 'LXC', nodeType: 'linux' });
+  assert.equal(lxc3?.label, 'LXC');
+
+  // K3S via nodeType, prefix, or badge
+  const k3s1 = formatNodeTypeBadge({ ...sampleNodes[0], nodeType: 'k3s' });
+  assert.equal(k3s1?.label, 'K3S');
+  assert.ok(k3s1?.badgeClasses.includes('text-[#8cd6cb]'));
+
+  const k3s2 = formatNodeTypeBadge({ ...sampleNodes[0], name: 'k3s-agent-01', nodeType: 'linux' });
+  assert.equal(k3s2?.label, 'K3S');
+
+  const k3s3 = formatNodeTypeBadge({ ...sampleNodes[0], badge: 'K3S', nodeType: 'linux' });
+  assert.equal(k3s3?.label, 'K3S');
+
+  // PBS via nodeType or badge
+  const pbs1 = formatNodeTypeBadge({ ...sampleNodes[0], nodeType: 'pbs' });
+  assert.equal(pbs1?.label, 'PBS');
+  assert.ok(pbs1?.badgeClasses.includes('text-[#7ae0c2]'));
+
+  const pbs2 = formatNodeTypeBadge({ ...sampleNodes[0], badge: 'PBS', nodeType: 'linux' });
+  assert.equal(pbs2?.label, 'PBS');
+
+  // WIN via nodeType or badge
+  const win1 = formatNodeTypeBadge({ ...sampleNodes[0], nodeType: 'windows' });
+  assert.equal(win1?.label, 'WIN');
+  assert.ok(win1?.badgeClasses.includes('text-[#b0c9ff]'));
+
+  const win2 = formatNodeTypeBadge({ ...sampleNodes[0], badge: 'WIN', nodeType: 'linux' });
+  assert.equal(win2?.label, 'WIN');
+
+  // NET via nodeType router_switch or badge NET/SWITCH/VYOS
+  const net1 = formatNodeTypeBadge({ ...sampleNodes[0], nodeType: 'router_switch' });
+  assert.equal(net1?.label, 'NET');
+  assert.ok(net1?.badgeClasses.includes('text-[#ffd580]'));
+
+  const net2 = formatNodeTypeBadge({ ...sampleNodes[0], badge: 'NET', nodeType: 'linux' });
+  assert.equal(net2?.label, 'NET');
+
+  const net3 = formatNodeTypeBadge({ ...sampleNodes[0], badge: 'SWITCH', nodeType: 'linux' });
+  assert.equal(net3?.label, 'NET');
+
+  // GPU via badge
+  const gpu = formatNodeTypeBadge({ ...sampleNodes[0], badge: 'GPU', nodeType: 'linux' });
+  assert.equal(gpu?.label, 'GPU');
+  assert.ok(gpu?.badgeClasses.includes('text-[#f2b9ff]'));
 });
 
 test('shouldShowSshUser suppresses common default users core and root and preserves custom users', async () => {

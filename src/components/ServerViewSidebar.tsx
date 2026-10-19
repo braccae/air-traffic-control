@@ -6,7 +6,6 @@ import {
   filterNodesBySearchQuery,
   resolveNodeIcon,
   formatNodeTypeBadge,
-  shouldShowSshUser,
   formatNodeIpBadge,
   getDatacenterNavSections,
   calculateClusterHealthScore,
@@ -275,7 +274,6 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                           const isSelected = node.id === selectedNodeId;
                           const badgeInfo = formatNodeTypeBadge(node);
                           const ipBadge = formatNodeIpBadge(node);
-                          const showUser = shouldShowSshUser(node.sshUser);
 
                           return (
                             <div
@@ -309,20 +307,6 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                                 <span className="truncate flex-1 font-semibold">{node.name}</span>
                               </button>
 
-                              {/* SSH Connection indicator icon */}
-                              <span
-                                className={`material-symbols-outlined text-[12px] shrink-0 ${
-                                  node.sshConnected ? 'text-[#8cd6cb]' : 'text-[#8d909b]/40'
-                                }`}
-                                title={
-                                  node.sshConnected
-                                    ? `SSH Connected (${node.sshUser || 'core'}@${node.tailscaleHost || node.ip})`
-                                    : 'SSH Disconnected'
-                                }
-                              >
-                                {node.sshConnected ? 'vpn_key' : 'lock'}
-                              </span>
-
                               {/* Monospaced Tailscale IP badge */}
                               {ipBadge && (
                                 <span
@@ -333,22 +317,14 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                                 </span>
                               )}
 
-                              {/* Non-standard SSH user */}
-                              {showUser && (
+                              {/* Platform tier pill (only if distinct virtualization / platform tier) */}
+                              {badgeInfo && (
                                 <span
-                                  className="text-[9px] text-[#dfe1fa]/80 font-mono px-1 rounded bg-[#26293c] border border-[#3b405e] shrink-0"
-                                  title={`Custom User: ${node.sshUser}`}
+                                  className={`font-mono text-[9px] px-1 py-0.2 rounded font-semibold uppercase tracking-wider shrink-0 ${badgeInfo.badgeClasses}`}
                                 >
-                                  {node.sshUser}
+                                  {badgeInfo.label}
                                 </span>
                               )}
-
-                              {/* Polished node type badge */}
-                              <span
-                                className={`font-mono text-[9px] px-1 py-0.2 rounded font-semibold uppercase tracking-wider shrink-0 ${badgeInfo.badgeClasses}`}
-                              >
-                                {badgeInfo.label}
-                              </span>
 
                               {onEditNode && (
                                 <button

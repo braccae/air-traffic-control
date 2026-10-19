@@ -547,11 +547,13 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
                           </span>
                         </div>
 
-                        <span
-                          className={`font-mono text-[9px] px-1 py-0.2 rounded font-semibold uppercase tracking-wider shrink-0 ${badgeInfo.badgeClasses}`}
-                        >
-                          {badgeInfo.label}
-                        </span>
+                        {badgeInfo && (
+                          <span
+                            className={`font-mono text-[9px] px-1 py-0.2 rounded font-semibold uppercase tracking-wider shrink-0 ${badgeInfo.badgeClasses}`}
+                          >
+                            {badgeInfo.label}
+                          </span>
+                        )}
                       </div>
 
                       <div className="font-mono text-[10px] text-[#8d909b] space-y-0.5">
