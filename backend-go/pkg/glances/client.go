@@ -48,25 +48,44 @@ func (c *Client) FetchTelemetry(nodeID string) (*types.Telemetry, error) {
 	min5, _ := loadMap["min5"].(float64)
 	min15, _ := loadMap["min15"].(float64)
 
+	var cpuTemp float64
+	if sensors, ok := payload["sensors"].([]interface{}); ok {
+		for _, s := range sensors {
+			if sMap, ok := s.(map[string]interface{}); ok {
+				if val, ok := sMap["value"].(float64); ok && val > 0 {
+					cpuTemp = val
+					break
+				}
+			}
+		}
+	}
+
+	var cpuModel string
+	var vcpus int
+	if coreMap, ok := payload["core"].(map[string]interface{}); ok {
+		if c, ok := coreMap["phys"].(float64); ok {
+			vcpus = int(c)
+		} else if c, ok := coreMap["log"].(float64); ok {
+			vcpus = int(c)
+		}
+	}
+	if sysMap, ok := payload["system"].(map[string]interface{}); ok {
+		if m, ok := sysMap["cpu_name"].(string); ok {
+			cpuModel = m
+		}
+	}
+
 	return &types.Telemetry{
 		NodeID:         nodeID,
 		Timestamp:      time.Now(),
 		CPUUsage:       cpuTotal,
-		CPUModel:       "Intel Core i9-13900K",
-		VCPUs:          16,
+		CPUModel:       cpuModel,
+		VCPUs:          vcpus,
 		MemoryUsedGiB:  memUsed / (1024 * 1024 * 1024),
 		MemoryTotalGiB: memTotal / (1024 * 1024 * 1024),
-		ArcCacheGiB:    12.3,
-		ZFSTankUsedTB:  14.2,
-		ZFSTankTotalTB: 48.0,
-		ZFSRaidType:    "RAIDZ2",
-		ZFSScrubStatus: "Scrub 2d ago",
 		LoadAvg1m:      min1,
 		LoadAvg5m:      min5,
 		LoadAvg15m:     min15,
-		IODelayPercent: 0.02,
-		CPUTempC:       38.0,
-		FanSpeedRPM:    820,
-		PackageWatts:   44.2,
+		CPUTempC:       cpuTemp,
 	}, nil
 }

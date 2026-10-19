@@ -168,6 +168,10 @@ export const NodeBreadcrumbBar: React.FC<NodeBreadcrumbBarProps> = ({
                   <span>
                     Standard Unix setuid elevation (<code className="text-[#b0c9ff]">sudo -n</code>).
                   </span>
+                ) : privilege.method === 'doas' ? (
+                  <span>
+                    Lightweight elevation fallback (<code className="text-[#b0c9ff]">doas -n</code>).
+                  </span>
                 ) : (
                   <span>Unprivileged host session without automatic elevation.</span>
                 )}

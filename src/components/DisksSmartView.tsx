@@ -139,7 +139,7 @@ export const DisksSmartView: React.FC<DisksSmartViewProps> = ({ node }) => {
                           </span>
                         </td>
                         <td className="p-2.5 text-[#ffd97d]">
-                          {disk.tempC ? `${disk.tempC}°C` : '34°C'}
+                          {disk.tempC != null ? `${disk.tempC}°C` : 'N/A'}
                         </td>
                         <td className="p-2.5 text-right text-[#b0c9ff]">
                           {disk.children ? `${disk.children.length} part(s)` : disk.mountpoint || '-'}

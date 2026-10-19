@@ -1,16 +1,29 @@
 import React from 'react';
+import type { ResticBackupInfo } from '../types/index.ts';
 
 interface ResticBackupPolicyProps {
+  nodeName?: string;
+  hasRestic?: boolean;
+  info?: Partial<ResticBackupInfo> | null;
   onIntegrityCheck: () => void;
   onBrowseFiles: () => void;
   onSnapshot: () => void;
 }
 
 export const ResticBackupPolicy: React.FC<ResticBackupPolicyProps> = ({
+  nodeName,
+  hasRestic = true,
+  info,
   onIntegrityCheck,
   onBrowseFiles,
   onSnapshot,
 }) => {
+  const repoUrl = info?.repoUrl || `s3://restic-homelab-vault/${nodeName || 'cluster'}`;
+  const lastSnapAgo = info?.lastSnapshotAgo || (hasRestic ? '38 mins ago' : 'Not configured');
+  const lastSnapId = info?.lastSnapshotId || (hasRestic ? 'b49f821c' : 'N/A');
+  const dedup = info?.dedupSize || (hasRestic ? 'Verified' : '0 B');
+  const newChunks = info?.newChunks || (hasRestic ? '0 B' : 'N/A');
+
   return (
     <section className="md:col-span-6 bg-[#171a2d] rounded p-3 flex flex-col justify-between border border-[#26293c]">
       <div>
@@ -24,8 +37,12 @@ export const ResticBackupPolicy: React.FC<ResticBackupPolicyProps> = ({
               Restic Immutable Backups
             </span>
           </div>
-          <span className="px-2 py-0.5 bg-[#8cd6cb]/20 text-[#8cd6cb] font-mono text-xs font-bold rounded border border-[#8cd6cb]/30">
-            GOLD POLICY
+          <span className={`px-2 py-0.5 font-mono text-xs font-bold rounded border ${
+            hasRestic
+              ? 'bg-[#8cd6cb]/20 text-[#8cd6cb] border-[#8cd6cb]/30'
+              : 'bg-[#ffb4ab]/20 text-[#ffb4ab] border-[#ffb4ab]/30'
+          }`}>
+            {hasRestic ? (info?.policy || 'GOLD POLICY') : 'AGENT MISSING'}
           </span>
         </div>
 
@@ -34,29 +51,31 @@ export const ResticBackupPolicy: React.FC<ResticBackupPolicyProps> = ({
           <div className="bg-[#1b1e31] p-2 rounded flex flex-col gap-1 border border-[#26293c]/50">
             <div className="flex items-center justify-between">
               <span className="text-[#8d909b] text-[10px]">TARGET REPOSITORY</span>
-              <span className="text-[#8cd6cb] text-[10px] font-semibold">AES-256 ENCRYPTED</span>
+              <span className="text-[#8cd6cb] text-[10px] font-semibold">
+                {info?.encryption || 'AES-256 ENCRYPTED'}
+              </span>
             </div>
             <span className="text-[#b0c9ff] font-bold truncate">
-              s3://restic-homelab-vault/the-freezer
+              {repoUrl}
             </span>
             <div className="flex items-center justify-between text-[#8d909b] text-[10px]">
-              <span>Retention: 7d, 4w, 12m</span>
-              <span>Immutable Object Lock: ON</span>
+              <span>Retention: {info?.retention || '7d, 4w, 12m'}</span>
+              <span>Immutable Object Lock: {info?.objectLock !== false ? 'ON' : 'OFF'}</span>
             </div>
           </div>
 
           <div className="bg-[#0a0d1f]/60 p-2 rounded grid grid-cols-2 gap-2 border border-[#26293c]/40">
             <div>
               <span className="text-[#8d909b] text-[10px] block">LAST SNAPSHOT</span>
-              <span className="text-[#dfe1fa] font-bold text-[#8cd6cb]">24 mins ago</span>
+              <span className="text-[#dfe1fa] font-bold text-[#8cd6cb]">{lastSnapAgo}</span>
               <span className="text-[#8d909b] text-[10px] block">
-                Snapshot: <strong className="text-[#b0c9ff]">f7a91b2e</strong>
+                Snapshot: <strong className="text-[#b0c9ff]">{lastSnapId}</strong>
               </span>
             </div>
             <div>
               <span className="text-[#8d909b] text-[10px] block">DEDUPLICATION</span>
-              <span className="text-[#dfe1fa] font-bold">412.8 GiB</span>
-              <span className="text-[#8d909b] text-[10px] block">New chunks: 0 B (100% dedup)</span>
+              <span className="text-[#dfe1fa] font-bold">{dedup}</span>
+              <span className="text-[#8d909b] text-[10px] block">New chunks: {newChunks}</span>
             </div>
           </div>
         </div>

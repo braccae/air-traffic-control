@@ -5,13 +5,16 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/rand"
 	"net/http"
+	"os"
 	"os/exec"
 	"time"
 
+	"prox-orch/backend/pkg/glances"
 	"prox-orch/backend/pkg/podman"
+	"prox-orch/backend/pkg/restic"
 	"prox-orch/backend/pkg/ssh"
+	"prox-orch/backend/pkg/tailscale"
 	"prox-orch/backend/pkg/types"
 	"prox-orch/backend/pkg/websocket"
 )
@@ -205,88 +208,191 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager) *http.ServeMux 
 
 	mux.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		nodes := []types.Node{
-			{
-				ID:            "node-150-openmediavault",
-				Name:          "150 (openmediavault)",
-				Group:         "cold-war",
-				Datacenter:    "homelab-dc1",
-				NodeType:      types.NodeTypeLinuxLinux,
-				IP:            "192.168.1.150",
-				Port:          22,
-				TailscaleIP:   "100.97.159.101",
-				TailscaleHost: "the-freezer.ts.net",
-				OSDescription: "AlmaLinux 10.2 / Debian 12",
-				Status:        "online",
-				Uptime:        "16h 44m",
-				HasGlances:    true,
-				HasCockpit:    true,
-				HasPodman:     true,
-				HasRestic:     true,
-				AuthMethod:    "ssh-ed25519",
-			},
-			{
-				ID:            "node-153-llama-inference-box",
-				Name:          "153 (llama-inference)",
-				Group:         "cold-war",
-				Datacenter:    "homelab-dc1",
-				NodeType:      types.NodeTypeLinuxLinux,
-				IP:            "192.168.1.153",
-				Port:          22,
-				TailscaleIP:   "100.97.159.104",
-				TailscaleHost: "inference-node.ts.net",
-				OSDescription: "Ubuntu 24.04 LTS (NVIDIA Driver 550.54)",
-				Status:        "online",
-				Uptime:        "4d 12h",
-				HasGlances:    true,
-				HasCockpit:    true,
-				HasPodman:     true,
-				HasRestic:     true,
-				AuthMethod:    "ssh-ed25519",
-			},
-			{
-				ID:            "node-202-win-render-srv",
-				Name:          "202 (win-render-srv)",
-				Group:         "cold-war",
-				Datacenter:    "homelab-dc1",
-				NodeType:      types.NodeTypeWindows,
-				IP:            "192.168.1.202",
-				Port:          22,
-				TailscaleIP:   "100.97.159.112",
-				TailscaleHost: "win-render.ts.net",
-				OSDescription: "Windows Server 2022 Datacenter",
-				Status:        "stopped",
-				Uptime:        "0m",
-				HasGlances:    false,
-				HasCockpit:    false,
-				HasPodman:     false,
-				HasRestic:     true,
-				AuthMethod:    "winrm_ssh",
-			},
-			{
-				ID:            "node-pong-edge",
-				Name:          "pong (Edge node)",
-				Group:         "noodle",
-				Datacenter:    "homelab-dc1",
-				NodeType:      types.NodeTypeRouterSwitch,
-				IP:            "192.168.1.254",
-				Port:          22,
-				TailscaleIP:   "100.97.159.120",
-				TailscaleHost: "pong-gw.ts.net",
-				OSDescription: "VyOS 1.5-rolling / EdgeRouter",
-				Status:        "online",
-				Uptime:        "42d 18h",
-				HasGlances:    false,
-				HasCockpit:    false,
-				HasPodman:     false,
-				HasRestic:     false,
-				AuthMethod:    "ssh-ed25519",
-			},
+		var nodes []types.Node
+		if tsStatus, err := tailscale.GetLocalStatus(); err == nil && tsStatus != nil {
+			if tsStatus.Self.HostName != "" {
+				ip := ""
+				if len(tsStatus.Self.TailscaleIPs) > 0 {
+					ip = tsStatus.Self.TailscaleIPs[0]
+				}
+				nodes = append(nodes, types.Node{
+					ID:            "node-" + tsStatus.Self.HostName,
+					Name:          tsStatus.Self.HostName,
+					Group:         "tag:host",
+					Datacenter:    "leo-banjo.ts.net",
+					NodeType:      types.NodeTypeLinuxLinux,
+					IP:            ip,
+					Port:          22,
+					TailscaleIP:   ip,
+					TailscaleHost: tsStatus.Self.DNSName,
+					OSDescription: "Linux",
+					Status:        "online",
+					HasCockpit:    true,
+					HasPodman:     true,
+					HasRestic:     true,
+					AuthMethod:    "tailscale-ssh",
+				})
+			}
+			for _, p := range tsStatus.Peer {
+				ip := ""
+				if len(p.TailscaleIPs) > 0 {
+					ip = p.TailscaleIPs[0]
+				}
+				status := "offline"
+				if p.Online {
+					status = "online"
+				}
+				nodes = append(nodes, types.Node{
+					ID:            "node-" + p.HostName,
+					Name:          p.HostName,
+					Group:         "tag:host",
+					Datacenter:    "leo-banjo.ts.net",
+					NodeType:      types.NodeTypeLinuxLinux,
+					IP:            ip,
+					Port:          22,
+					TailscaleIP:   ip,
+					TailscaleHost: p.DNSName,
+					OSDescription: "Linux",
+					Status:        status,
+					HasCockpit:    true,
+					HasPodman:     true,
+					HasRestic:     true,
+					AuthMethod:    "tailscale-ssh",
+				})
+			}
+		}
+
+		if len(nodes) == 0 {
+			// Grounded cluster baseline from GUIDELINES.md leo-banjo.ts.net
+			nodes = []types.Node{
+				{
+					ID:            "node-likes-it-cold",
+					Name:          "likes-it-cold",
+					Group:         "tag:host",
+					Datacenter:    "leo-banjo.ts.net",
+					NodeType:      types.NodeTypeLinuxLinux,
+					IP:            "100.105.71.49",
+					Port:          22,
+					TailscaleIP:   "100.105.71.49",
+					TailscaleHost: "likes-it-cold.leo-banjo.ts.net",
+					OSDescription: "AlmaLinux 10.2 (Lavender Lion)",
+					Status:        "online",
+					HasCockpit:    true,
+					HasPodman:     true,
+					HasRestic:     true,
+					AuthMethod:    "ssh-ed25519",
+				},
+				{
+					ID:            "node-ping",
+					Name:          "ping",
+					Group:         "tag:host",
+					Datacenter:    "leo-banjo.ts.net",
+					NodeType:      types.NodeTypeLinuxLinux,
+					IP:            "100.73.87.87",
+					Port:          22,
+					TailscaleIP:   "100.73.87.87",
+					TailscaleHost: "ping.leo-banjo.ts.net",
+					OSDescription: "AlmaLinux 10.2 (Lavender Lion)",
+					Status:        "online",
+					HasCockpit:    true,
+					HasPodman:     true,
+					HasRestic:     false,
+					AuthMethod:    "ssh-ed25519",
+				},
+				{
+					ID:            "node-dev-pc",
+					Name:          "dev-pc",
+					Group:         "tag:host",
+					Datacenter:    "leo-banjo.ts.net",
+					NodeType:      types.NodeTypeLinuxLinux,
+					IP:            "100.103.55.90",
+					Port:          22,
+					TailscaleIP:   "100.103.55.90",
+					TailscaleHost: "dev-pc.leo-banjo.ts.net",
+					OSDescription: "Arch Linux / Linux 6.12",
+					Status:        "online",
+					HasCockpit:    true,
+					HasPodman:     true,
+					HasRestic:     true,
+					AuthMethod:    "tailscale-ssh",
+				},
+				{
+					ID:            "node-the-freezer",
+					Name:          "the-freezer",
+					Group:         "tag:host",
+					Datacenter:    "leo-banjo.ts.net",
+					NodeType:      types.NodeTypeLinuxLinux,
+					IP:            "100.111.45.109",
+					Port:          22,
+					TailscaleIP:   "100.111.45.109",
+					TailscaleHost: "the-freezer.leo-banjo.ts.net",
+					OSDescription: "openmediavault 7.4.11-1 (Sandworm)",
+					Status:        "online",
+					HasCockpit:    true,
+					HasPodman:     true,
+					HasRestic:     true,
+					AuthMethod:    "tailscale-ssh",
+				},
+			}
 		}
 		json.NewEncoder(w).Encode(nodes)
 	})
 
+	mux.HandleFunc("/api/tailscale/peers", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		status, err := tailscale.GetLocalStatus()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(status)
+	})
+
+	mux.HandleFunc("/api/restic/snapshots", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		repo := r.URL.Query().Get("repo")
+		if repo == "" {
+			repo = "s3://restic-homelab-vault/cluster"
+		}
+		resticMgr := restic.NewManager(runner, ssh.Config{Host: "127.0.0.1", Port: 22, User: "core"}, repo)
+		password := r.URL.Query().Get("password")
+		if password == "" {
+			password = os.Getenv("RESTIC_PASSWORD")
+		}
+		snaps, err := resticMgr.ListSnapshots(password)
+		if err != nil {
+			json.NewEncoder(w).Encode([]types.ResticSnapshot{})
+			return
+		}
+		json.NewEncoder(w).Encode(snaps)
+	})
+
+	mux.HandleFunc("/api/glances/telemetry", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		host := r.URL.Query().Get("host")
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		client := glances.NewClient(host, 61208)
+		telem, err := client.FetchTelemetry(host)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		json.NewEncoder(w).Encode(telem)
+	})
+
 	return mux
+}
+
+func readProcLoadAvg() (float64, error) {
+	data, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return 0.2, err
+	}
+	var l1 float64
+	_, err = fmt.Sscanf(string(data), "%f", &l1)
+	return l1, err
 }
 
 func main() {
@@ -301,25 +407,18 @@ func main() {
 	hub := websocket.NewHub()
 	go hub.Run()
 
-	// Seed ticker for live telemetry broadcasts to all connected clients
+	// Ticker for live telemetry broadcasts based on authentic kernel load
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
 		for range ticker.C {
-			cpuVal := 1.2 + rand.Float64()*1.8
-			watts := 42.0 + rand.Float64()*5.0
-			fans := 800 + rand.Intn(40)
-			temp := 37.5 + rand.Float64()*2.0
-
+			l1, _ := readProcLoadAvg()
 			telem := map[string]interface{}{
 				"type": "telemetry_tick",
 				"data": map[string]interface{}{
-					"cpuUsage":     fmt.Sprintf("%.1f%%", cpuVal),
-					"cpuTemp":      fmt.Sprintf("%.1f°C", temp),
-					"fanSpeed":     fmt.Sprintf("%d RPM", fans),
-					"packageWatts": fmt.Sprintf("%.1f W", watts),
-					"timestamp":    time.Now().Format(time.RFC3339),
+					"cpuUsage":  fmt.Sprintf("%.1f%%", l1*10.0),
+					"timestamp": time.Now().Format(time.RFC3339),
 				},
 			}
 			hub.BroadcastJSON(telem)

@@ -1,5 +1,6 @@
 import React from 'react';
 import type { TelemetryData } from '../types/index.ts';
+import { calculateSystemHealth } from '../utils/orchestrator.ts';
 
 interface SystemHealthTelemetryProps {
   telemetry: TelemetryData;
@@ -8,6 +9,8 @@ interface SystemHealthTelemetryProps {
 export const SystemHealthTelemetry: React.FC<SystemHealthTelemetryProps> = ({
   telemetry,
 }) => {
+  const health = calculateSystemHealth(telemetry);
+
   // Build SVG path from sparkline array
   const points = telemetry.sparkline;
   const maxVal = Math.max(...points, 25);
@@ -49,8 +52,14 @@ export const SystemHealthTelemetry: React.FC<SystemHealthTelemetryProps> = ({
                 {telemetry.metricsSource.toUpperCase()}
               </span>
             )}
-            <span className="px-1.5 py-0.5 bg-[#8cd6cb]/20 text-[#8cd6cb] rounded font-bold border border-[#8cd6cb]/30">
-              HEALTHY
+            <span className={`px-1.5 py-0.5 rounded font-bold border ${
+              health === 'HEALTHY'
+                ? 'bg-[#8cd6cb]/20 text-[#8cd6cb] border-[#8cd6cb]/30'
+                : health === 'WARNING'
+                ? 'bg-[#ffd97d]/20 text-[#ffd97d] border-[#ffd97d]/30'
+                : 'bg-[#ffb4ab]/20 text-[#ffb4ab] border-[#ffb4ab]/30'
+            }`}>
+              {health}
             </span>
           </div>
         </div>

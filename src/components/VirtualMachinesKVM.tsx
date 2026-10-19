@@ -37,14 +37,21 @@ export const VirtualMachinesKVM: React.FC<VirtualMachinesKVMProps> = ({
     fetchVms(false);
   }, [node?.id, node?.shortName]);
 
-  const toggleVM = (vmid: number) => {
-    setVms(prev =>
-      prev.map(vm =>
-        vm.vmid === vmid
-          ? { ...vm, status: vm.status === 'RUNNING' ? 'STOPPED' : 'RUNNING' }
-          : vm
-      )
-    );
+  const toggleVM = async (vmItem: VMItem) => {
+    if (!node?.id) return;
+    const action = vmItem.status === 'RUNNING' ? 'shutdown' : 'start';
+    try {
+      const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/vms/${encodeURIComponent(vmItem.name)}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      if (res.ok) {
+        fetchVms(true);
+      }
+    } catch {
+      // error handling
+    }
   };
 
   const totalVcpus = vms.reduce((acc, vm) => acc + (vm.vcpus || 0), 0);
@@ -140,7 +147,7 @@ export const VirtualMachinesKVM: React.FC<VirtualMachinesKVMProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => toggleVM(vm.vmid)}
+                            onClick={() => toggleVM(vm)}
                             className="p-1 bg-[#26293c] hover:bg-[#35384c] text-[#ffb4ab] rounded cursor-pointer"
                             title="Shutdown VM"
                           >
@@ -151,7 +158,7 @@ export const VirtualMachinesKVM: React.FC<VirtualMachinesKVMProps> = ({
                         <>
                           <button
                             type="button"
-                            onClick={() => toggleVM(vm.vmid)}
+                            onClick={() => toggleVM(vm)}
                             className="p-1 bg-[#b0c9ff] text-[#002e68] font-bold rounded cursor-pointer"
                             title="Start VM"
                           >

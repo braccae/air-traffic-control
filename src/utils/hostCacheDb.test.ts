@@ -183,5 +183,39 @@ describe('SQLite Host Cache Store (hostCacheDb)', () => {
     assert.equal(cached.data[0].name, 'sda');
     assert.equal(cached.data[0].size, '5.5T');
     assert.ok(cached.updatedAt > 0);
+
+    store.invalidateHostSections('node-likes-it-cold');
+    assert.equal(store.getHostSection('node-likes-it-cold', 'disks'), null);
+  });
+
+  it('persists, updates, and retrieves global task items', () => {
+    const store = createHostCacheStore(':memory:');
+    assert.equal(store.getAllTasks().length, 0);
+
+    const task = {
+      id: 'task-101',
+      startTime: '10:00:00',
+      nodeTarget: 'likes-it-cold',
+      user: 'core',
+      description: 'Run security-hardening playbook',
+      progress: 30,
+      progressEta: '45s',
+      status: 'RUNNING' as const,
+      category: 'ansible' as const,
+      logs: ['TASK [Gathering Facts]'],
+    };
+
+    store.saveTask(task);
+    const tasks = store.getAllTasks();
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].id, 'task-101');
+    assert.equal(tasks[0].progress, 30);
+    assert.equal(tasks[0].status, 'RUNNING');
+    assert.deepEqual(tasks[0].logs, ['TASK [Gathering Facts]']);
+
+    store.updateTask('task-101', { progress: 100, status: 'OK' as const });
+    const updated = store.getAllTasks();
+    assert.equal(updated[0].progress, 100);
+    assert.equal(updated[0].status, 'OK');
   });
 });
