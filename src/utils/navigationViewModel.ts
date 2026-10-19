@@ -165,7 +165,7 @@ export function getSubSidebarWrapperClasses(width: SubSidebarWidth): string {
       ? 'col-span-12 lg:col-span-2 xl:col-span-2'
       : 'col-span-12 lg:col-span-3 xl:col-span-2';
 
-  return `${columnClasses} sticky top-2 h-[calc(100vh-140px)] overflow-y-auto shrink-0 pr-1 scrollbar-thin`;
+  return `${columnClasses} lg:sticky lg:top-[76px] lg:h-[calc(100vh-140px)] overflow-y-auto shrink-0 pr-1 scrollbar-thin`;
 }
 
 export function getWorkspaceWrapperClasses(width: SubSidebarWidth): string {

@@ -1452,8 +1452,21 @@ app.get('/api/ansible/inventory', (_req, res) => {
 
 app.post('/api/playbook/run', (req, res) => {
   const { playbook = 'site.yml', target = 'all', checkMode = false, tags, extraVars } = req.body;
+
+  const playbookValidation = validatePlaybookName(playbook);
+  if (!playbookValidation.valid) {
+    res.status(400).json({ error: playbookValidation.error || 'Invalid playbook name' });
+    return;
+  }
+
   const inventoryPath = path.resolve(__dirname, 'inventory/tailscale_inventory.py');
-  const playbookPath = path.resolve(__dirname, 'ansible/playbooks', playbook);
+  const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
+  const playbookPath = path.resolve(playbookDir, playbookValidation.name);
+
+  if (!playbookPath.startsWith(playbookDir + path.sep)) {
+    res.status(400).json({ error: 'Path traversal detected in playbook name' });
+    return;
+  }
 
   if (!fs.existsSync(playbookPath)) {
     res.status(404).json({ error: `Playbook ${playbook} not found on filesystem` });
@@ -1499,6 +1512,18 @@ app.post('/api/playbook/run', (req, res) => {
 
   activePlaybookProcs.set(taskId, proc);
 
+  proc.on('error', (err: any) => {
+    activePlaybookProcs.delete(taskId);
+    newTask.status = 'FAILED';
+    newTask.progress = 100;
+    newTask.progressEta = `Spawn error: ${err?.code || err?.message || 'Failed to spawn runner'}`;
+    newTask.logs = newTask.logs || [];
+    newTask.logs.push(`[error] Process failed to spawn: ${err?.message || String(err)}`);
+    hostCache.saveTask(newTask);
+    broadcast({ type: 'task_output', taskId, line: `[error] Process failed to spawn: ${err?.message || String(err)}` });
+    broadcast({ type: 'task_updated', task: newTask });
+  });
+
   const appendLog = (line: string) => {
     newTask.logs = newTask.logs || [];
     newTask.logs.push(line);
@@ -1538,6 +1563,9 @@ app.post('/api/playbook/run', (req, res) => {
 
   proc.on('close', code => {
     activePlaybookProcs.delete(taskId);
+    if (newTask.status === 'FAILED') {
+      return;
+    }
     newTask.progress = 100;
     if (code === 0) {
       newTask.status = 'OK';
@@ -1669,6 +1697,20 @@ wss.on('connection', ws => {
         ptyProc.stderr.on('data', chunk => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'terminal_data', sessionId, data: chunk.toString() }));
+          }
+        });
+
+        ptyProc.on('error', (err: any) => {
+          activePtySessions.delete(sessionId);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: 'terminal_data',
+                sessionId,
+                data: `\r\n[ssh spawn error: ${err?.message || String(err)}]\r\n`,
+              })
+            );
+            ws.send(JSON.stringify({ type: 'terminal_exit', sessionId, code: 1 }));
           }
         });
 
