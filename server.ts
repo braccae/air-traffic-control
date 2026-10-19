@@ -30,6 +30,15 @@ import {
 } from './src/utils/playbookManager.ts';
 import type { NodeItem, TelemetryData, GlobalTaskItem, ServiceUser, VMItem } from './src/types/index.ts';
 import { getHardwareProbeCommand, parseHardwareProbeOutput } from './src/utils/hardwareProbe.ts';
+import {
+  buildNfsSaveCommand,
+  buildSmbSaveCommand,
+  parseEtcPasswd,
+  buildUserCreateCommand,
+  buildUserPasswdCommand,
+  buildSmbPasswdCommand,
+  sanitizeUsername,
+} from './src/utils/sharesManager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1544,6 +1553,119 @@ app.post('/api/nodes/:id/shares/reload', async (req, res) => {
     res.json({ success: true, output: out.trim() });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err?.message || 'Failed to reload network shares' });
+  }
+});
+
+// Create or edit an NFS export
+app.post('/api/nodes/:id/shares/nfs', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  try {
+    const { path: sharePath, client, options, name } = req.body;
+    if (!sharePath) {
+      res.status(400).json({ success: false, error: 'Share directory path is required' });
+      return;
+    }
+    const saveCmd = buildNfsSaveCommand({ path: sharePath, client, options }, name);
+    const out = await runNodeCommand(targetNode, saveCmd, 10000);
+    hostCache.invalidateHostSections(targetNode.id);
+    res.json({ success: true, message: 'NFS export configured successfully', output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to configure NFS export' });
+  }
+});
+
+// Create or edit an SMB share
+app.post('/api/nodes/:id/shares/smb', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  try {
+    const { name, path: sharePath, comment, readOnly, validUsers, guestOk } = req.body;
+    if (!name || !sharePath) {
+      res.status(400).json({ success: false, error: 'Share name and path are required' });
+      return;
+    }
+    const saveCmd = buildSmbSaveCommand({
+      name,
+      path: sharePath,
+      comment,
+      readOnly: Boolean(readOnly),
+      validUsers,
+      guestOk: Boolean(guestOk),
+    });
+    const out = await runNodeCommand(targetNode, saveCmd, 12000);
+    hostCache.invalidateHostSections(targetNode.id);
+    res.json({ success: true, message: 'SMB share configured successfully', output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to configure SMB share' });
+  }
+});
+
+// List host users
+app.get('/api/nodes/:id/users', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  try {
+    const cmd = 'cat /etc/passwd 2>/dev/null; echo "===SUBUID==="; cat /etc/subuid 2>/dev/null || true';
+    const out = await runNodeCommand(targetNode, cmd, 6000);
+    const [passwdRaw = '', subuidRaw = ''] = out.split('===SUBUID===');
+    const allUsers = parseEtcPasswd(passwdRaw, subuidRaw);
+    const interactiveUsers = allUsers.filter(u => !u.isSystemUser);
+    res.json({
+      success: true,
+      users: interactiveUsers,
+      allUsers,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to retrieve host users' });
+  }
+});
+
+// Create new user on host
+app.post('/api/nodes/:id/users/create', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  try {
+    const { username } = req.body;
+    if (!username) {
+      res.status(400).json({ success: false, error: 'Username is required' });
+      return;
+    }
+    const cmd = buildUserCreateCommand(username);
+    const out = await runNodeCommand(targetNode, cmd, 8000);
+    res.json({ success: true, username: sanitizeUsername(username), output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to create user' });
+  }
+});
+
+// Set regular user password
+app.post('/api/nodes/:id/users/:user/password', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  try {
+    const { password } = req.body;
+    if (!password) {
+      res.status(400).json({ success: false, error: 'Password is required' });
+      return;
+    }
+    const cmd = buildUserPasswdCommand(req.params.user, password);
+    const out = await runNodeCommand(targetNode, cmd, 8000);
+    res.json({ success: true, message: `Password updated for ${req.params.user}`, output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to set password' });
+  }
+});
+
+// Set Samba (SMB) user password
+app.post('/api/nodes/:id/users/:user/smbpassword', async (req, res) => {
+  const targetNode = findNode(req.params.id);
+  try {
+    const { password } = req.body;
+    if (!password) {
+      res.status(400).json({ success: false, error: 'Samba password is required' });
+      return;
+    }
+    const cmd = buildSmbPasswdCommand(req.params.user, password);
+    const out = await runNodeCommand(targetNode, cmd, 8000);
+    res.json({ success: true, message: `Samba password updated for ${req.params.user}`, output: out.trim() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to set Samba password' });
   }
 });
 

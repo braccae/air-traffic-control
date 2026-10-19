@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../types/index.ts';
+import { ShareEditorModal } from './modals/ShareEditorModal.tsx';
+import { UserManagerModal } from './modals/UserManagerModal.tsx';
 
 interface NetworkSharesViewProps {
   node: NodeItem;
@@ -18,6 +20,15 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
   }>>([]);
   const [sambaConfig, setSambaConfig] = useState<string>('');
   const [notice, setNotice] = useState<string>('');
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [editingShare, setEditingShare] = useState<{
+    id?: string;
+    name?: string;
+    protocol?: string;
+    path?: string;
+    permissions?: string;
+  } | null>(null);
+  const [showUserModal, setShowUserModal] = useState(false);
 
   const fetchShares = (refresh = false) => {
     setLoading(true);
@@ -131,6 +142,23 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
     fetchShares(false);
   }, [node.id, node.shortName]);
 
+  const [reloading, setReloading] = useState(false);
+  const handleReloadShares = async () => {
+    setReloading(true);
+    try {
+      const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/shares/reload`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        fetchShares(true);
+      }
+    } catch {
+      // error
+    } finally {
+      setReloading(false);
+    }
+  };
+
   return (
     <section className="bg-[#171a2d] rounded-lg p-4 flex flex-col border border-[#313447] shadow-lg">
       <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#26293c]">
@@ -145,7 +173,35 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2 font-mono text-xs">
+        <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
+          <button
+            type="button"
+            onClick={() => {
+              setEditingShare(null);
+              setShowShareModal(true);
+            }}
+            className="flex items-center gap-1 bg-[#b0c9ff] hover:bg-[#82aaff] text-[#0a0d1f] font-bold px-2.5 py-1 rounded transition-colors cursor-pointer shadow-xs"
+          >
+            <span className="material-symbols-outlined text-[15px]">add</span>
+            <span>Add Share</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowUserModal(true)}
+            className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#ffd97d] px-2.5 py-1 rounded transition-colors border border-[#ffd97d]/40 cursor-pointer"
+          >
+            <span className="material-symbols-outlined text-[15px]">manage_accounts</span>
+            <span>Manage Users &amp; Passwords</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleReloadShares}
+            disabled={reloading || loading}
+            className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded transition-colors border border-[#434750]/40 cursor-pointer disabled:opacity-50"
+          >
+            <span className={`material-symbols-outlined text-[14px] ${reloading ? 'animate-spin' : ''}`}>refresh</span>
+            <span>Reload Daemon</span>
+          </button>
           <button
             type="button"
             onClick={() => fetchShares(true)}
@@ -180,6 +236,7 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
                 <th className="px-3">Exported Path</th>
                 <th className="px-3">Permissions</th>
                 <th className="px-3">Service Status</th>
+                <th className="px-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#26293c]/60">
@@ -196,6 +253,19 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
                     <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-[#8cd6cb]/20 text-[#8cd6cb] border border-[#8cd6cb]/30">
                       {share.status}
                     </span>
+                  </td>
+                  <td className="px-3 text-right">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingShare(share);
+                        setShowShareModal(true);
+                      }}
+                      className="p-1 hover:bg-[#35384c] text-[#b0c9ff] rounded transition-colors cursor-pointer"
+                      title="Edit share configuration"
+                    >
+                      <span className="material-symbols-outlined text-[15px]">edit</span>
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -219,6 +289,23 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
           </pre>
         </div>
       )}
+
+      <ShareEditorModal
+        node={node}
+        isOpen={showShareModal}
+        onClose={() => {
+          setShowShareModal(false);
+          setEditingShare(null);
+        }}
+        onSaved={() => fetchShares(true)}
+        initialShare={editingShare}
+      />
+
+      <UserManagerModal
+        node={node}
+        isOpen={showUserModal}
+        onClose={() => setShowUserModal(false)}
+      />
     </section>
   );
 };
