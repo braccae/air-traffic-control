@@ -397,4 +397,11 @@ export const TOP_SUB_NAV_TABS: TopSubNavTab[] = [
   { id: 'task_queue', label: 'Ansible Task Queue' },
 ];
 
+export type ConsoleDrawerTab = 'active' | 'task_queue' | 'ansible' | 'syslog' | 'vault';
+
+export function formatTaskQueueTabLabel(stagedCount: number): string {
+  return `Task Queue (${stagedCount})`;
+}
+
+
 

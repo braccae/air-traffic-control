@@ -1,10 +1,13 @@
-import React, { useState } from 'react';
-import type { GlobalTaskItem } from '../types/index.ts';
+import React, { useState, useEffect } from 'react';
+import type { GlobalTaskItem, QueuedAnsibleTask } from '../types/index.ts';
 import type { ManagedWindow } from '../utils/windowManager.ts';
-import { getConsoleWindowPillClasses } from '../utils/navigationViewModel.ts';
+import { getConsoleWindowPillClasses, type ConsoleDrawerTab } from '../utils/navigationViewModel.ts';
+import { TaskQueueTab } from './TaskQueueTab.tsx';
 
 interface GlobalTasksExecutionLogProps {
   tasks: GlobalTaskItem[];
+  queue?: QueuedAnsibleTask[];
+  isRunning?: boolean;
   onOpenTaskDetails?: (taskId: string) => void;
   onOpenPlaybookEditor?: () => void;
   windows?: ManagedWindow[];
@@ -17,6 +20,8 @@ interface GlobalTasksExecutionLogProps {
 
 export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = ({
   tasks,
+  queue: initialQueue,
+  isRunning: initialIsRunning,
   onOpenTaskDetails,
   onOpenPlaybookEditor,
   windows = [],
@@ -26,9 +31,169 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
   onMinimizeWindow,
   onCloseWindow,
 }) => {
-  const [activeTab, setActiveTab] = useState<'active' | 'ansible' | 'syslog' | 'vault'>('active');
+  const [activeTab, setActiveTab] = useState<ConsoleDrawerTab>('active');
   const [isExpanded, setIsExpanded] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
+
+  // Task Queue state
+  const [queue, setQueue] = useState<QueuedAnsibleTask[]>(initialQueue || []);
+  const [isQueueRunning, setIsQueueRunning] = useState<boolean>(initialIsRunning || false);
+
+  useEffect(() => {
+    if (initialQueue !== undefined) {
+      setQueue(initialQueue);
+    }
+  }, [initialQueue]);
+
+  useEffect(() => {
+    if (initialIsRunning !== undefined) {
+      setIsQueueRunning(initialIsRunning);
+    }
+  }, [initialIsRunning]);
+
+  // Fetch initial queue state from /api/queue on mount and connect to WebSocket
+  useEffect(() => {
+    let isMounted = true;
+
+    fetch('/api/queue')
+      .then(res => res.json())
+      .then(data => {
+        if (isMounted && data?.tasks) {
+          setQueue(data.tasks);
+          setIsQueueRunning(!!data.isRunning);
+        }
+      })
+      .catch(() => {});
+
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: any = null;
+
+    const connectWS = () => {
+      try {
+        if (typeof window === 'undefined' || !window.location) return;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'init' && msg.queue) {
+              setQueue(msg.queue.tasks || []);
+              setIsQueueRunning(!!msg.queue.isRunning);
+            } else if (msg.type === 'queue_updated' && msg.queue) {
+              setQueue(msg.queue.tasks || []);
+              setIsQueueRunning(!!msg.queue.isRunning);
+            } else if (msg.type === 'queue_execution_started') {
+              setIsQueueRunning(true);
+              if (msg.queue) {
+                setQueue(msg.queue.tasks || []);
+              }
+            } else if (msg.type === 'queue_execution_finished') {
+              setIsQueueRunning(false);
+              if (msg.queue) {
+                setQueue(msg.queue.tasks || []);
+              }
+            }
+          } catch {
+            // ignore non-json messages
+          }
+        };
+
+        ws.onclose = () => {
+          if (isMounted) {
+            reconnectTimeout = setTimeout(connectWS, 3000);
+          }
+        };
+      } catch {
+        if (isMounted) {
+          reconnectTimeout = setTimeout(connectWS, 3000);
+        }
+      }
+    };
+
+    connectWS();
+
+    return () => {
+      isMounted = false;
+      if (ws) ws.close();
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    };
+  }, []);
+
+  const refreshQueue = async () => {
+    try {
+      const res = await fetch('/api/queue');
+      const data = await res.json();
+      if (data?.tasks) {
+        setQueue(data.tasks);
+        setIsQueueRunning(!!data.isRunning);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleRunNextTask = async () => {
+    try {
+      setIsQueueRunning(true);
+      await fetch('/api/queue/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      await refreshQueue();
+    } catch (err) {
+      console.error('Failed to run next queue task:', err);
+    } finally {
+      setIsQueueRunning(false);
+    }
+  };
+
+  const handleExecuteAll = async () => {
+    try {
+      setIsQueueRunning(true);
+      let keepGoing = true;
+      while (keepGoing) {
+        const res = await fetch('/api/queue/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        const data = await res.json();
+        if (!data.success || data.haltedOnError || (data.remainingCount !== undefined && data.remainingCount === 0)) {
+          keepGoing = false;
+        }
+      }
+      await refreshQueue();
+    } catch (err) {
+      console.error('Failed to execute all queue tasks:', err);
+    } finally {
+      setIsQueueRunning(false);
+    }
+  };
+
+  const handleDeleteTask = async (id: string) => {
+    try {
+      await fetch(`/api/queue/task/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+      setQueue(prev => prev.filter(t => t.id !== id));
+    } catch (err) {
+      console.error(`Failed to delete task ${id}:`, err);
+    }
+  };
+
+  const handleClearQueue = async () => {
+    try {
+      await fetch('/api/queue', {
+        method: 'DELETE',
+      });
+      setQueue([]);
+    } catch (err) {
+      console.error('Failed to clear queue:', err);
+    }
+  };
+
 
   const activeCount = tasks.filter(t => t.status === 'RUNNING').length;
 
@@ -100,6 +265,20 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
               }`}
             >
               Active Tasks ({activeCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('task_queue');
+                setIsCollapsed(false);
+              }}
+              className={`px-2 h-full font-mono text-xs transition-colors cursor-pointer shrink-0 ${
+                activeTab === 'task_queue'
+                  ? 'text-[#b0c9ff] bg-[#313447] font-bold'
+                  : 'text-[#c3c6d2] hover:text-[#dfe1fa]'
+              }`}
+            >
+              {`Task Queue (${queue.filter(t => t.status === 'staged').length})`}
             </button>
             <button
               type="button"
@@ -333,6 +512,17 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
                 )}
               </tbody>
             </table>
+          )}
+
+          {activeTab === 'task_queue' && (
+            <TaskQueueTab
+              queue={queue}
+              isRunning={isQueueRunning}
+              onRunNextTask={handleRunNextTask}
+              onExecuteAll={handleExecuteAll}
+              onDeleteTask={handleDeleteTask}
+              onClearQueue={handleClearQueue}
+            />
           )}
 
           {activeTab === 'ansible' && (

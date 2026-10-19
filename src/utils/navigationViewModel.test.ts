@@ -585,3 +585,11 @@ test('getSubSidebarWrapperClasses includes overflow-x-hidden across all widths',
     assert.ok(classes.includes('shrink-0'), `Expected shrink-0 for width ${width}`);
   }
 });
+
+test('formatTaskQueueTabLabel formats staged task count correctly', async () => {
+  const { formatTaskQueueTabLabel } = await import('./navigationViewModel.ts');
+
+  assert.strictEqual(formatTaskQueueTabLabel(0), 'Task Queue (0)');
+  assert.strictEqual(formatTaskQueueTabLabel(5), 'Task Queue (5)');
+});
+
