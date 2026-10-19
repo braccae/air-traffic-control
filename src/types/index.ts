@@ -121,6 +121,7 @@ export interface UnprivilegedPodmanUser {
   linger: boolean;
   activeProcesses: string[];
   containers: ContainerItem[];
+  pods?: PodItem[];
 }
 
 export interface StandaloneDaemon {

@@ -204,7 +204,7 @@ func TestListPods_IncludesRootAndUnprivilegedUserPods(t *testing.T) {
 	runner := &mockRunner{
 		handler: func(cfg ssh.Config, cmd string) (string, error) {
 			switch {
-			case cmd == "podman pod ps --format json":
+			case strings.Contains(cmd, "podman pod ps --format json") && !strings.Contains(cmd, "-u"):
 				return `[{"Id": "root-pod-1", "Name": "system-ingress", "Status": "Running"}]`, nil
 			case strings.Contains(cmd, "ps -eo"):
 				return "1001 podman /usr/bin/conmon --api-version 1 -c 7e4b9019a101\n", nil
@@ -296,7 +296,7 @@ func TestListAllContainers_CombinesRootAndUnprivilegedContainers(t *testing.T) {
 	runner := &mockRunner{
 		handler: func(cfg ssh.Config, cmd string) (string, error) {
 			switch {
-			case cmd == "podman ps --all --format json":
+			case strings.Contains(cmd, "podman ps --all --format json") && !strings.Contains(cmd, "-u"):
 				return `[{"Id": "root-c1", "Names": ["traefik-proxy"], "Image": "traefik:v3", "State": "running", "Status": "Up 3d"}]`, nil
 			case strings.Contains(cmd, "ps -eo"):
 				return "1000 deployer /usr/bin/conmon -c rootless-c1\n", nil
@@ -332,11 +332,11 @@ func TestRootlessFallback_ContainerLogsAndActions(t *testing.T) {
 		handler: func(cfg ssh.Config, cmd string) (string, error) {
 			executedCmds = append(executedCmds, cmd)
 			switch {
-			case cmd == "podman logs --tail 50 jellyfin":
+			case strings.Contains(cmd, "podman logs --tail 50 jellyfin") && !strings.Contains(cmd, "-u"):
 				return "", fmt.Errorf("Error: no container with name or ID \"jellyfin\" found")
-			case cmd == "podman restart jellyfin":
+			case strings.Contains(cmd, "podman restart jellyfin") && !strings.Contains(cmd, "-u"):
 				return "", fmt.Errorf("Error: no container with name or ID \"jellyfin\" found")
-			case cmd == "podman pod restart media-stack":
+			case strings.Contains(cmd, "podman pod restart media-stack") && !strings.Contains(cmd, "-u"):
 				return "", fmt.Errorf("Error: no pod with name or ID \"media-stack\" found")
 			case strings.Contains(cmd, "ps -eo"):
 				return "1000 deployer /usr/bin/conmon -c d9841af024ea\n", nil

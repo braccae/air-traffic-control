@@ -239,8 +239,8 @@ export function separatePodsAndStandaloneContainers(
           name: pname.startsWith('pod:') ? pname : `pod: ${pname}`,
           containersRunningCount: 0,
           ports: c.ports || 'Host Mesh',
-          totalCpu: c.cpu || '0.2%',
-          totalRam: c.memory || '64 MiB',
+          totalCpu: c.cpu || '',
+          totalRam: c.memory || '',
           user: c.user || 'root',
           uid: c.uid ?? 0,
           rootless: c.rootless ?? (c.user !== 'root' && (c.uid ?? 0) !== 0),
@@ -417,35 +417,136 @@ export function mergeLiveProbeIntoPods(
     return defaultPods;
   }
 
-  const existingPodUserSet = new Set(defaultPods.map(p => p.user).filter(Boolean));
+  const podMap = new Map<string, PodItem>();
+  for (const p of defaultPods) {
+    podMap.set(p.id, { ...p, containers: [...p.containers] });
+    podMap.set(p.name, podMap.get(p.id)!);
+  }
+
   const livePods: PodItem[] = [];
 
   for (const u of probedUsers) {
-    if (u.uid <= 0 || u.user === 'root' || u.containers.length === 0) continue;
-    // If this user is a newly discovered live host user (e.g. 'pants'), group their containers into a rootless pod card
-    if (!existingPodUserSet.has(u.user)) {
-      const normalizedContainers = u.containers.map(c => ({
-        id: c.id,
-        name: c.name,
+    if (u.uid <= 0 || u.user === 'root') continue;
+    if ((!u.containers || u.containers.length === 0) && (!u.pods || u.pods.length === 0)) continue;
+
+    // 1. Explicit user pods (u.pods)
+    if (u.pods && u.pods.length > 0) {
+      for (const p of u.pods) {
+        const podId = p.id;
+        const podName = p.name.startsWith('pod:') ? p.name : `pod: ${p.name}`;
+        let matched = podMap.get(podId) || podMap.get(p.name);
+        if (!matched) {
+          matched = {
+            ...p,
+            name: podName,
+            user: u.user,
+            uid: u.uid,
+            rootless: true,
+            containers: [...(p.containers || [])],
+          };
+          podMap.set(podId, matched);
+          podMap.set(p.name, matched);
+          livePods.push(matched);
+        }
+        // Attach any user containers belonging to this pod
+        for (const c of u.containers || []) {
+          const cPodId = c.podId || (c as any).Pod;
+          const cPodName = c.podName || (c as any).PodName;
+          if (cPodId === podId || cPodName === p.name || cPodId === p.name || cPodName === podName) {
+            if (!matched.containers.some(ec => ec.id === c.id || ec.name === c.name)) {
+              matched.containers.push({
+                ...c,
+                user: u.user,
+                uid: u.uid,
+                rootless: true,
+              });
+            }
+          }
+        }
+        matched.containersRunningCount = matched.containers.filter(c => {
+          const s = (c.status || '').toLowerCase();
+          return s.includes('running') || s.startsWith('up ');
+        }).length;
+      }
+    }
+
+    // 2. Containers with podId or podName
+    const unpoddedContainers: ContainerItem[] = [];
+    for (const c of u.containers || []) {
+      const pId = c.podId || (c as any).Pod;
+      const pName = c.podName || (c as any).PodName;
+      if (pId || pName) {
+        const id = pId || pName;
+        const name = (pName || pId).startsWith('pod:') ? (pName || pId) : `pod: ${pName || pId}`;
+        let matched = (pId ? podMap.get(pId) : null) || (pName ? podMap.get(pName) : null);
+        if (!matched) {
+          matched = {
+            id,
+            name,
+            containersRunningCount: 0,
+            ports: c.ports || (u.subUidRange ? `SubUID: ${u.subUidRange}` : `Host: ${u.user}`),
+            totalCpu: c.cpu || '',
+            totalRam: c.memory || '',
+            user: u.user,
+            uid: u.uid,
+            rootless: true,
+            containers: [],
+          };
+          podMap.set(id, matched);
+          if (pName) podMap.set(pName, matched);
+          livePods.push(matched);
+        }
+        if (!matched.containers.some(ec => ec.id === c.id || ec.name === c.name)) {
+          matched.containers.push({
+            ...c,
+            user: u.user,
+            uid: u.uid,
+            rootless: true,
+          });
+          const s = (c.status || '').toLowerCase();
+          if (s.includes('running') || s.startsWith('up ')) {
+            matched.containersRunningCount++;
+          }
+        }
+      } else {
+        let isAttached = false;
+        for (const p of podMap.values()) {
+          if (p.containers.some(pc => pc.id === c.id || pc.name === c.name)) {
+            isAttached = true;
+            break;
+          }
+        }
+        if (!isAttached) {
+          unpoddedContainers.push(c);
+        }
+      }
+    }
+
+    // 3. Fallback for unpodded containers if the user has no pods at all
+    const userHasPod = Array.from(podMap.values()).some(p => p.user === u.user);
+    if (!userHasPod && unpoddedContainers.length > 0) {
+      const normalizedContainers = unpoddedContainers.map(c => ({
+        ...c,
         image: c.image || 'local/rootless:latest',
         status: c.status.toLowerCase().startsWith('up ') ? `Running (${c.status})` : c.status,
-        cpu: c.cpu || '0.4%',
-        memory: c.memory || '64 MiB',
+        cpu: c.cpu || '',
+        memory: c.memory || '',
         user: u.user,
         uid: u.uid,
         rootless: true,
       }));
-      const runningCount = normalizedContainers.filter(c =>
-        c.status.toLowerCase().includes('running')
-      ).length;
+      const runningCount = normalizedContainers.filter(c => {
+        const s = (c.status || '').toLowerCase();
+        return s.includes('running') || s.startsWith('up ');
+      }).length;
 
       livePods.push({
         id: `rootless-${u.user}-${u.uid}`,
         name: `pod: rootless-${u.user}`,
         containersRunningCount: runningCount,
-        ports: u.subUidRange ? `SubUID: ${u.subUidRange}` : `Home: ${u.homeDir}`,
-        totalCpu: '1.2%',
-        totalRam: `${Math.max(1, normalizedContainers.length * 64)} MiB`,
+        ports: u.subUidRange ? `SubUID: ${u.subUidRange}` : `Home: ${u.homeDir || '/home/' + u.user}`,
+        totalCpu: '',
+        totalRam: '',
         user: u.user,
         uid: u.uid,
         rootless: true,
@@ -454,6 +555,7 @@ export function mergeLiveProbeIntoPods(
     }
   }
 
-  return [...livePods, ...defaultPods];
+  const allMergedPods = Array.from(new Set([...livePods, ...defaultPods]));
+  return allMergedPods;
 }
 

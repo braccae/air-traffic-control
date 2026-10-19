@@ -187,10 +187,48 @@ test('probeUnprivilegedPodmanUsers extracts containers from conmon args when use
   assert.equal(result[0].containers.length, 2);
   assert.equal(result[0].containers[0].id, '998877665544');
   assert.equal(result[0].containers[0].name, 'immich-server');
+  assert.equal(result[0].containers[0].image, 'immich-server:latest');
+  assert.notEqual(result[0].containers[0].image, 'rootless/container');
+  assert.equal(result[0].containers[0].cpu, '');
+  assert.equal(result[0].containers[0].memory, '');
   assert.equal(result[0].containers[0].rootless, true);
+
   assert.equal(result[0].containers[1].id, 'aabbccddeeff');
   assert.equal(result[0].containers[1].name, 'immich-ml');
+  assert.equal(result[0].containers[1].image, 'immich-ml:latest');
+  assert.notEqual(result[0].containers[1].image, 'rootless/container');
+  assert.equal(result[0].containers[1].cpu, '');
+  assert.equal(result[0].containers[1].memory, '');
   assert.equal(result[0].containers[1].rootless, true);
+});
+
+test('probeUnprivilegedPodmanUsers associates userPods with discovered rootless users', () => {
+  const result = probeUnprivilegedPodmanUsers({
+    psOutput: '1000 deployer /usr/bin/conmon -c c1 -n caddy\n',
+    passwdOutput: 'deployer:x:1000:1000::/home/deployer:/bin/bash\n',
+    subuidOutput: 'deployer:100000:65536\n',
+    userPods: {
+      deployer: [
+        {
+          id: 'web-pod',
+          name: 'pod: web-pod',
+          containersRunningCount: 1,
+          ports: '80:80',
+          totalCpu: '0.5%',
+          totalRam: '100 MiB',
+          containers: [],
+        },
+      ],
+    },
+  });
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].user, 'deployer');
+  assert.ok(result[0].pods && result[0].pods.length === 1);
+  assert.equal(result[0].pods[0].id, 'web-pod');
+  assert.equal(result[0].pods[0].user, 'deployer');
+  assert.equal(result[0].pods[0].uid, 1000);
+  assert.equal(result[0].pods[0].rootless, true);
 });
 
 test('parseTerminalCommand supports podman probe to list unprivileged users running podman containers', () => {
@@ -216,4 +254,5 @@ test('getDefaultHostPodmanProbe returns unprivileged users running podman contai
     }
   }
 });
+
 

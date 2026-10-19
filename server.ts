@@ -1090,54 +1090,60 @@ app.post('/api/podman/action', async (req, res) => {
   const targetNode = findNode(host);
   try {
     let cmd = `podman ${action} ${container}`;
-    if (user && user !== 'root' && uid) {
-      cmd =
-        user === targetNode.sshUser
-          ? `XDG_RUNTIME_DIR=/run/user/${uid} podman ${action} ${container}`
-          : `cd / && sudo -n -i -u ${user} XDG_RUNTIME_DIR=/run/user/${uid} podman ${action} ${container}`;
+    if (user && user !== 'root') {
+      const effectiveUid = uid ?? 1000;
+      cmd = `run0 --background=no --user ${user} podman ${action} ${container} 2>&1 || sudo -n -u ${user} XDG_RUNTIME_DIR=/run/user/${effectiveUid} podman ${action} ${container} 2>&1 || podman ${action} ${container} 2>&1`;
     } else {
-      cmd = `sudo -n podman ${action} ${container} 2>/dev/null || sudo -n docker ${action} ${container} 2>/dev/null || podman ${action} ${container}`;
+      cmd = `run0 --background=no podman ${action} ${container} 2>&1 || sudo -n podman ${action} ${container} 2>&1 || sudo -n docker ${action} ${container} 2>&1 || podman ${action} ${container} 2>&1`;
     }
-    const output = await runNodeCommand(targetNode, cmd, 6000);
+    const output = await runNodeCommand(targetNode, cmd, 8000);
     res.json({ success: true, output });
   } catch (err: any) {
-    res.json({ success: true, simulated: true, message: err?.message || 'Action queued' });
+    res.json({ success: false, error: err?.message || 'Container action failed' });
   }
 });
 
 app.get('/api/podman/logs', async (req, res) => {
   const host = typeof req.query.host === 'string' ? req.query.host : undefined;
   const target = typeof req.query.target === 'string' ? req.query.target : 'system';
+  const user = typeof req.query.user === 'string' ? req.query.user : undefined;
+  const rawUid = typeof req.query.uid === 'string' ? Number.parseInt(req.query.uid, 10) : undefined;
+  const uid = Number.isNaN(rawUid) ? undefined : rawUid;
   const targetNode = findNode(host);
 
   try {
-    let cmd = `sudo -n podman logs --tail 40 ${target} 2>&1 || sudo -n docker logs --tail 40 ${target} 2>&1 || podman logs --tail 40 ${target} 2>&1`;
+    let cmd: string;
     if (target.includes('dmesg') || target.includes('kernel') || target.includes('journal')) {
-      cmd = `sudo -n journalctl -n 40 --no-pager 2>&1 || dmesg | tail -n 40 2>&1`;
+      cmd = `run0 --background=no journalctl -n 100 --no-pager 2>&1 || sudo -n journalctl -n 100 --no-pager 2>&1 || dmesg | tail -n 100 2>&1`;
     } else if (target.includes('audit') || target.includes('pam')) {
-      cmd = `sudo -n journalctl -u sshd -n 30 --no-pager 2>&1 || last -n 15 2>&1`;
+      cmd = `run0 --background=no journalctl -u sshd -n 100 --no-pager 2>&1 || sudo -n journalctl -u sshd -n 100 --no-pager 2>&1 || last -n 30 2>&1`;
+    } else if (user && user !== 'root') {
+      const effectiveUid = uid ?? 1000;
+      cmd = `run0 --background=no --user ${user} podman logs --tail 100 ${target} 2>&1 || sudo -n -u ${user} XDG_RUNTIME_DIR=/run/user/${effectiveUid} podman logs --tail 100 ${target} 2>&1 || podman logs --tail 100 ${target} 2>&1`;
+    } else {
+      cmd = `run0 --background=no podman logs --tail 100 ${target} 2>&1 || sudo -n podman logs --tail 100 ${target} 2>&1 || podman logs --tail 100 ${target} 2>&1`;
     }
-    const out = await runNodeCommand(targetNode, cmd, 5000);
+
+    const out = await runNodeCommand(targetNode, cmd, 8000);
     const lines = out
       .split('\n')
       .map(l => l.trimEnd())
       .filter(Boolean);
+
     if (lines.length > 0) {
-      res.json({ lines, host: targetNode.tailscaleHost });
+      res.json({ success: true, lines, host: targetNode.tailscaleHost });
       return;
     }
-  } catch {
-    // Fallback
-  }
 
-  res.json({
-    host: targetNode.tailscaleHost,
-    lines: [
-      `[${targetNode.tailscaleHost}] Attaching to ${target} via ${targetNode.sshUser || 'core'}@${targetNode.tailscaleIp}`,
-      `INFO  [ssh-agent] Authenticated using /run/user/1000/ssh-agent.socket`,
-      `INFO  [systemd] Target unit / container ${target} active on ${targetNode.osDescription}`,
-    ],
-  });
+    res.json({ success: false, lines: [], error: `No logs available for ${target}`, host: targetNode.tailscaleHost });
+  } catch (err: any) {
+    res.json({
+      success: false,
+      lines: [],
+      error: err?.message || `Failed to fetch logs for ${target}`,
+      host: targetNode.tailscaleHost,
+    });
+  }
 });
 
 app.get(['/api/nodes/:id/system-logs', '/api/system/logs'], async (req, res) => {

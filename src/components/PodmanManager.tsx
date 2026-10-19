@@ -18,11 +18,47 @@ import { safeFetchJson } from '../utils/apiDefensive.ts';
 
 interface PodmanManagerProps {
   selectedNode?: NodeItem;
-  onOpenLogs: (target: string) => void;
+  onOpenLogs: (target: string, user?: string, uid?: number) => void;
   onOpenExec: (target: string) => void;
   onRestartPod: (podName: string) => void;
   onCreatePod?: () => void;
   onRunContainer?: () => void;
+}
+
+function getPodDisplayCpu(pod: PodItem): string {
+  if (pod.totalCpu) return pod.totalCpu;
+  let sum = 0;
+  let hasValid = false;
+  for (const c of pod.containers) {
+    if (c.cpu && c.cpu.includes('%')) {
+      const v = parseFloat(c.cpu);
+      if (!isNaN(v)) {
+        sum += v;
+        hasValid = true;
+      }
+    }
+  }
+  return hasValid ? `${sum.toFixed(1)}%` : '-';
+}
+
+function getPodDisplayRam(pod: PodItem): string {
+  if (pod.totalRam) return pod.totalRam;
+  let sumMiB = 0;
+  let hasValid = false;
+  for (const c of pod.containers) {
+    if (c.memory) {
+      const lower = c.memory.toLowerCase();
+      if (lower.includes('gib')) {
+        const v = parseFloat(lower);
+        if (!isNaN(v)) { sumMiB += v * 1024; hasValid = true; }
+      } else if (lower.includes('mib')) {
+        const v = parseFloat(lower);
+        if (!isNaN(v)) { sumMiB += v; hasValid = true; }
+      }
+    }
+  }
+  if (!hasValid) return '-';
+  return sumMiB >= 1024 ? `${(sumMiB / 1024).toFixed(2)} GiB` : `${Math.round(sumMiB)} MiB`;
 }
 
 export const PodmanManager: React.FC<PodmanManagerProps> = ({
@@ -84,8 +120,8 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
             name: c.name,
             image: c.image,
             status: c.status,
-            cpu: c.cpu || '0.4%',
-            memory: c.memory || '96 MiB',
+            cpu: c.cpu || '',
+            memory: c.memory || '',
             user: c.user || 'root',
             uid: c.uid ?? 0,
             rootless: Boolean(c.rootless),
@@ -98,7 +134,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
               name: c.name,
               subtext: `${c.image} (${c.user || 'root'}:${c.uid ?? 0})`,
               status: String(c.status).toLowerCase().includes('exited') ? 'exited' : 'running',
-              memory: '64 MiB',
+              memory: c.memory || '',
               user: c.user || 'root',
               uid: c.uid ?? 0,
               rootless: Boolean(c.rootless),
@@ -215,7 +251,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
         name: s.name,
         image: s.subtext,
         status: s.status === 'running' ? 'Running' : 'Exited (0)',
-        cpu: '0.1%',
+        cpu: '',
         memory: s.memory,
         user: s.user || 'root',
         uid: s.uid ?? 0,
@@ -544,10 +580,10 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
 
                       <div className="flex items-center gap-3">
                         <span className="text-[#8d909b]">
-                          CPU: <strong className="text-[#dfe1fa]">{pod.totalCpu}</strong>
+                          CPU: <strong className="text-[#dfe1fa]">{getPodDisplayCpu(pod)}</strong>
                         </span>
                         <span className="text-[#8d909b]">
-                          RAM: <strong className="text-[#dfe1fa]">{pod.totalRam}</strong>
+                          RAM: <strong className="text-[#dfe1fa]">{getPodDisplayRam(pod)}</strong>
                         </span>
                         <div className="flex items-center gap-1">
                           <button
@@ -560,7 +596,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => onOpenLogs(pod.name)}
+                            onClick={() => onOpenLogs(pod.name, pod.user, pod.uid)}
                             className="p-1 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded cursor-pointer border border-[#434750]/30"
                             title="Pod Logs"
                           >
@@ -612,8 +648,8 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                                   {c.status}
                                 </span>
                               </td>
-                              <td className="px-2 text-[#dfe1fa]">{c.cpu}</td>
-                              <td className="px-2 text-[#dfe1fa]">{c.memory}</td>
+                              <td className="px-2 text-[#dfe1fa]">{c.cpu || '-'}</td>
+                              <td className="px-2 text-[#dfe1fa]">{c.memory || '-'}</td>
                               <td className="px-2 text-right space-x-1">
                                 <button
                                   type="button"
@@ -631,7 +667,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => onOpenLogs(c.name)}
+                                  onClick={() => onOpenLogs(c.name, c.user, c.uid)}
                                   className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded text-[10px] cursor-pointer"
                                 >
                                   Logs
@@ -743,8 +779,8 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                                 {c.status}
                               </span>
                             </td>
-                            <td className="px-2 text-[#dfe1fa]">{c.cpu}</td>
-                            <td className="px-2 text-[#dfe1fa]">{c.memory}</td>
+                            <td className="px-2 text-[#dfe1fa]">{c.cpu || '-'}</td>
+                            <td className="px-2 text-[#dfe1fa]">{c.memory || '-'}</td>
                             <td className="px-2 text-right space-x-1">
                               <button
                                 type="button"
@@ -762,7 +798,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                               </button>
                               <button
                                 type="button"
-                                onClick={() => onOpenLogs(c.name)}
+                                onClick={() => onOpenLogs(c.name, c.user, c.uid)}
                                 className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded text-[10px] cursor-pointer"
                               >
                                 Logs
@@ -866,7 +902,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => onOpenLogs(dc.name)}
+                            onClick={() => onOpenLogs(dc.name, 'root', 0)}
                             className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded text-[10px] cursor-pointer"
                           >
                             Logs

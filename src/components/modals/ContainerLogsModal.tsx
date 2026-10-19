@@ -4,6 +4,8 @@ import type { NodeItem } from '../../types/index.ts';
 interface ContainerLogsModalProps {
   targetName: string | null;
   node?: NodeItem;
+  user?: string;
+  uid?: number;
   isOpen: boolean;
   isMinimized?: boolean;
   onMinimize?: () => void;
@@ -13,6 +15,8 @@ interface ContainerLogsModalProps {
 export const ContainerLogsModal: React.FC<ContainerLogsModalProps> = ({
   targetName,
   node,
+  user,
+  uid,
   isOpen,
   isMinimized = false,
   onMinimize,
@@ -28,22 +32,29 @@ export const ContainerLogsModal: React.FC<ContainerLogsModalProps> = ({
     if (!isOpen || !targetName) return;
     setLoading(true);
     const hostParam = node?.id || node?.tailscaleHost || 'likes-it-cold';
-    fetch(
-      `/api/podman/logs?host=${encodeURIComponent(hostParam)}&target=${encodeURIComponent(targetName)}`
-    )
+    const params = new URLSearchParams({
+      host: hostParam,
+      target: targetName,
+    });
+    if (user) params.set('user', user);
+    if (uid !== undefined) params.set('uid', String(uid));
+
+    fetch(`/api/podman/logs?${params.toString()}`)
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data?.lines) && data.lines.length > 0) {
           setLines(data.lines);
+        } else if (data?.error) {
+          setLines([`[${hostParam}] ${data.error}`]);
         } else {
-          setLines([`[${hostParam}] Attached to ${targetName}`]);
+          setLines([`[${hostParam}] No log output recorded for ${targetName}`]);
         }
       })
-      .catch(() => {
-        setLines([`[${hostParam}] Attached to ${targetName}`]);
+      .catch(err => {
+        setLines([`[${hostParam}] Error fetching logs: ${err?.message || 'Network error'}`]);
       })
       .finally(() => setLoading(false));
-  }, [isOpen, targetName, node?.id]);
+  }, [isOpen, targetName, node?.id, user, uid]);
 
   useEffect(() => {
     if (autoScroll && logContainerRef.current) {

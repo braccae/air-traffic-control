@@ -1,4 +1,4 @@
-import type { ContainerItem, NodeItem, TelemetryData, UnprivilegedPodmanUser } from '../types/index.ts';
+import type { ContainerItem, NodeItem, PodItem, TelemetryData, UnprivilegedPodmanUser } from '../types/index.ts';
 
 export interface PodmanProbeInput {
   psOutput: string;
@@ -7,6 +7,7 @@ export interface PodmanProbeInput {
   lingerUsers?: string[] | string;
   runUserDirs?: string[] | string;
   userContainers?: Record<string, ContainerItem[]>;
+  userPods?: Record<string, PodItem[]>;
 }
 
 const PODMAN_PROCESS_SIGNATURES = [
@@ -44,6 +45,8 @@ function extractContainersFromConmonProcesses(
     const tokens = proc.trim().split(/\s+/);
     let cid = '';
     let cname = '';
+    let extractedImage = '';
+
     for (let i = 0; i < tokens.length; i++) {
       const tok = tokens[i];
       if ((tok === '-c' || tok === '--cid') && i + 1 < tokens.length) {
@@ -60,6 +63,11 @@ function extractContainersFromConmonProcesses(
         cname = tok.slice('--name='.length);
       } else if (tok.startsWith('-n') && tok.length > 2 && !tok.startsWith('--')) {
         cname = tok.slice(2);
+      } else if ((tok === '-i' || tok === '--image') && i + 1 < tokens.length) {
+        extractedImage = tokens[i + 1];
+        i++;
+      } else if (tok.startsWith('--image=')) {
+        extractedImage = tok.slice('--image='.length);
       }
     }
     if (!cid && !cname) continue;
@@ -72,13 +80,16 @@ function extractContainersFromConmonProcesses(
     }
     if (seen.has(cid)) continue;
     seen.add(cid);
+
+    const imageName = extractedImage || (cname ? `${cname}:latest` : 'oci-image');
+
     containers.push({
       id: cid,
       name: cname,
-      image: 'rootless/container',
+      image: imageName,
       status: 'Running',
-      cpu: '0.0%',
-      memory: '0 MiB',
+      cpu: '',
+      memory: '',
       user,
       uid,
       rootless: uid !== 0,
@@ -245,7 +256,17 @@ export function probeUnprivilegedPodmanUsers(input: PodmanProbeInput): Unprivile
       containers = extractContainersFromConmonProcesses(cand.activeProcesses, cand.user, cand.uid);
     }
 
-    if (containers.length > 0) {
+    const mappedPods = input.userPods?.[username];
+    if (mappedPods && mappedPods.length > 0) {
+      cand.pods = mappedPods.map(p => ({
+        ...p,
+        user: cand.user,
+        uid: cand.uid,
+        rootless: true,
+      }));
+    }
+
+    if (containers.length > 0 || (cand.pods && cand.pods.length > 0)) {
       cand.containers = containers;
       activeUsers.push(cand);
     }
@@ -280,6 +301,36 @@ export function getDefaultHostPodmanProbe(): UnprivilegedPodmanUser[] {
       'restic-svc:231072:65536',
     ].join('\n'),
     lingerUsers: ['deployer', 'podman'],
+    userPods: {
+      deployer: [
+        {
+          id: 'media-stack',
+          name: 'pod: media-stack',
+          containersRunningCount: 3,
+          ports: 'Ports: 8096:8096, 443:443',
+          totalCpu: '2.4%',
+          totalRam: '1.82 GiB',
+          user: 'deployer',
+          uid: 1000,
+          rootless: true,
+          containers: [],
+        },
+      ],
+      podman: [
+        {
+          id: 'ai-inference',
+          name: 'pod: ai-inference',
+          containersRunningCount: 2,
+          ports: 'Ports: 11434:11434, 3000:8080',
+          totalCpu: '4.7%',
+          totalRam: '6.9 GiB',
+          user: 'podman',
+          uid: 1001,
+          rootless: true,
+          containers: [],
+        },
+      ],
+    },
     userContainers: {
       deployer: [
         {

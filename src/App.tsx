@@ -462,6 +462,15 @@ export default function App() {
   const [playbookEditorOpen, setPlaybookEditorOpen] = useState(false);
   const [selectedPlaybookForEdit, setSelectedPlaybookForEdit] = useState<string | undefined>(undefined);
   const [logsTarget, setLogsTarget] = useState<string | null>(null);
+  const [logsUser, setLogsUser] = useState<string | undefined>(undefined);
+  const [logsUid, setLogsUid] = useState<number | undefined>(undefined);
+
+  const handleOpenLogs = (target: string, user?: string, uid?: number) => {
+    setLogsTarget(target);
+    setLogsUser(user);
+    setLogsUid(uid);
+  };
+
   const [rebootModalOpen, setRebootModalOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [groupVarsOpen, setGroupVarsOpen] = useState(false);
@@ -624,6 +633,8 @@ export default function App() {
       setMinimizedModals(prev => ({ ...prev, [id]: false }));
     } else if (id === 'modal-container-logs') {
       setLogsTarget(null);
+      setLogsUser(undefined);
+      setLogsUid(undefined);
       setMinimizedModals(prev => ({ ...prev, [id]: false }));
     }
   };
@@ -1300,7 +1311,7 @@ export default function App() {
                 {(activeOpTab === 'containers' || activeOpTab === 'pods') && (
                   <PodmanManager
                     selectedNode={selectedNode}
-                    onOpenLogs={setLogsTarget}
+                    onOpenLogs={handleOpenLogs}
                     onOpenExec={() => setTerminalOpen(true)}
                     onRestartPod={podName => handleRunPlaybook('site.yml', podName)}
                   />
@@ -1433,9 +1444,11 @@ export default function App() {
                             <div className="p-1">
                               <PodmanManager
                                 selectedNode={selectedNode}
-                                onOpenLogs={name => setLogsTarget(name)}
+                                onOpenLogs={handleOpenLogs}
                                 onOpenExec={() => {
                                   setLogsTarget(null);
+                                  setLogsUser(undefined);
+                                  setLogsUid(undefined);
                                   setTerminalOpen(true);
                                 }}
                                 onRestartPod={handleRestartPod}
@@ -1673,11 +1686,15 @@ export default function App() {
       <ContainerLogsModal
         targetName={logsTarget}
         node={selectedNode}
+        user={logsUser}
+        uid={logsUid}
         isOpen={Boolean(logsTarget)}
         isMinimized={Boolean(minimizedModals['modal-container-logs'])}
         onMinimize={() => setMinimizedModals(prev => ({ ...prev, 'modal-container-logs': true }))}
         onClose={() => {
           setLogsTarget(null);
+          setLogsUser(undefined);
+          setLogsUid(undefined);
           setMinimizedModals(prev => ({ ...prev, 'modal-container-logs': false }));
         }}
       />

@@ -13,7 +13,7 @@ import {
   separatePodsAndStandaloneContainers,
 } from './podmanViewModel.ts';
 import { getDefaultHostPodmanProbe } from './orchestrator.ts';
-import type { ContainerItem, PodItem, ServiceUser, StandaloneDaemon } from '../types/index.ts';
+import type { ContainerItem, PodItem, ServiceUser, StandaloneDaemon, UnprivilegedPodmanUser } from '../types/index.ts';
 
 const samplePods: PodItem[] = [
   {
@@ -522,6 +522,119 @@ test('separatePodsAndStandaloneContainers separates podded containers from stand
   assert.equal(standaloneContainers.length, 1);
   assert.equal(standaloneContainers[0].name, 'standalone-worker');
   assert.equal(standaloneContainers[0].user, 'apps');
+});
+
+test('mergeLiveProbeIntoPods renders both rootful pods and rootless user pods with member containers and real images', () => {
+  const rootPods: PodItem[] = [
+    {
+      id: 'system-ingress',
+      name: 'pod: system-ingress',
+      containersRunningCount: 1,
+      ports: 'Ports: 80:80, 443:443',
+      totalCpu: '0.8%',
+      totalRam: '128 MiB',
+      user: 'root',
+      uid: 0,
+      rootless: false,
+      containers: [
+        {
+          id: 'root-c1',
+          name: 'caddy-ingress',
+          image: 'docker.io/library/caddy:2.8-alpine',
+          status: 'Up 4 days',
+          cpu: '0.3%',
+          memory: '42 MiB',
+          user: 'root',
+          uid: 0,
+          rootless: false,
+          podId: 'system-ingress',
+        },
+      ],
+    },
+  ];
+
+  const probedUsers: UnprivilegedPodmanUser[] = [
+    {
+      user: 'deployer',
+      uid: 1000,
+      linger: true,
+      activeProcesses: [],
+      pods: [
+        {
+          id: 'media-stack',
+          name: 'media-stack',
+          containersRunningCount: 2,
+          ports: '8096:8096',
+          totalCpu: '',
+          totalRam: '',
+          containers: [],
+        },
+      ],
+      containers: [
+        {
+          id: 'c101',
+          name: 'jellyfin-live',
+          image: 'docker.io/jellyfin/jellyfin:10.9.1',
+          status: 'Running',
+          cpu: '2.4%',
+          memory: '1.2 GiB',
+          user: 'deployer',
+          uid: 1000,
+          rootless: true,
+          podId: 'media-stack',
+        },
+        {
+          id: 'c102',
+          name: 'sonarr-live',
+          image: 'lscr.io/linuxserver/sonarr:latest',
+          status: 'Running',
+          cpu: '0.6%',
+          memory: '256 MiB',
+          user: 'deployer',
+          uid: 1000,
+          rootless: true,
+          podId: 'media-stack',
+        },
+      ],
+    },
+  ];
+
+  const merged = mergeLiveProbeIntoPods(rootPods, probedUsers);
+
+  // Both root pod and user pod are present
+  assert.equal(merged.length, 2);
+
+  const userPod = merged.find(p => p.id === 'media-stack');
+  assert.ok(userPod, 'expected user pod media-stack to be merged');
+  assert.equal(userPod.user, 'deployer');
+  assert.equal(userPod.uid, 1000);
+  assert.equal(userPod.rootless, true);
+  assert.equal(userPod.containers.length, 2);
+  assert.equal(userPod.containers[0].image, 'docker.io/jellyfin/jellyfin:10.9.1');
+  assert.notEqual(userPod.containers[0].image, 'rootless/container');
+  assert.equal(userPod.containers[0].cpu, '2.4%');
+  assert.equal(userPod.containers[0].memory, '1.2 GiB');
+
+  const rootPod = merged.find(p => p.id === 'system-ingress');
+  assert.ok(rootPod, 'expected root pod system-ingress to be present');
+  assert.equal(rootPod.user, 'root');
+  assert.equal(rootPod.uid, 0);
+  assert.equal(rootPod.rootless, false);
+  assert.equal(rootPod.containers[0].image, 'docker.io/library/caddy:2.8-alpine');
+});
+
+test('getContainerSecurityBadge correctly classifies rootful system containers vs unprivileged rootless users', () => {
+  const rootBadge = getContainerSecurityBadge('root', 0, false);
+  assert.equal(rootBadge.isRootful, true);
+  assert.equal(rootBadge.label, 'Rootful / System');
+
+  const coreBadge = getContainerSecurityBadge('core', 1000, true);
+  assert.equal(coreBadge.isRootful, false);
+  assert.equal(coreBadge.label, 'Rootless (UID 1000)');
+
+  const appsBadge = getContainerSecurityBadge('apps', 2000, true);
+  assert.equal(appsBadge.isRootful, false);
+  assert.equal(appsBadge.label, 'Rootless (UID 2000)');
 });
 
 

@@ -293,6 +293,7 @@ func extractContainersFromProcesses(processes []string, user string, uid int) []
 		containers = append(containers, types.PodmanContainer{
 			ID:       cid,
 			Name:     cname,
+			Image:    cname + ":latest",
 			Status:   "Running",
 			User:     user,
 			UID:      uid,
@@ -364,7 +365,7 @@ func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContai
 }
 
 func (m *Manager) listUserContainers(user string, uid int) ([]types.PodmanContainer, error) {
-	cmd := fmt.Sprintf("cd / && sudo -n -i -u %s XDG_RUNTIME_DIR=/run/user/%d podman ps --format json", user, uid)
+	cmd := fmt.Sprintf("run0 --background=no --user %s podman ps --format json 2>/dev/null || cd / && sudo -n -i -u %s XDG_RUNTIME_DIR=/run/user/%d podman ps --format json", user, user, uid)
 	out, err := m.sshMgr.RunCommand(m.cfg, cmd)
 	if err != nil {
 		suCmd := fmt.Sprintf("su - %s -s /bin/sh -c \"XDG_RUNTIME_DIR=/run/user/%d podman ps --format json\"", user, uid)
@@ -381,7 +382,7 @@ func (m *Manager) listUserContainers(user string, uid int) ([]types.PodmanContai
 }
 
 func (m *Manager) listUserPods(user string, uid int) ([]types.PodmanPod, error) {
-	cmd := fmt.Sprintf("cd / && sudo -n -i -u %s XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json", user, uid)
+	cmd := fmt.Sprintf("run0 --background=no --user %s podman pod ps --format json 2>/dev/null || cd / && sudo -n -i -u %s XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json", user, user, uid)
 	out, err := m.sshMgr.RunCommand(m.cfg, cmd)
 	if err != nil {
 		suCmd := fmt.Sprintf("su - %s -s /bin/sh -c \"XDG_RUNTIME_DIR=/run/user/%d podman pod ps --format json\"", user, uid)
@@ -428,7 +429,7 @@ func (m *Manager) listUserPods(user string, uid int) ([]types.PodmanPod, error) 
 func (m *Manager) ListAllContainers() ([]types.PodmanContainer, error) {
 	var all []types.PodmanContainer
 
-	out, err := m.sshMgr.RunCommand(m.cfg, "podman ps --all --format json")
+	out, err := m.sshMgr.RunCommand(m.cfg, "run0 --background=no podman ps --all --format json 2>/dev/null || podman ps --all --format json")
 	if err == nil {
 		if rootContainers, parseErr := parseContainersJSON(out, "root", 0); parseErr == nil {
 			all = append(all, rootContainers...)
@@ -450,7 +451,7 @@ func (m *Manager) ListAllContainers() ([]types.PodmanContainer, error) {
 func (m *Manager) ListPods() ([]types.PodmanPod, error) {
 	var pods []types.PodmanPod
 
-	cmd := "podman pod ps --format json"
+	cmd := "run0 --background=no podman pod ps --format json 2>/dev/null || podman pod ps --format json"
 	out, rootErr := m.sshMgr.RunCommand(m.cfg, cmd)
 	if rootErr == nil {
 		var rawPods []struct {
@@ -500,7 +501,7 @@ func (m *Manager) ListPods() ([]types.PodmanPod, error) {
 
 // RestartPod restarts a pod (searching unprivileged users if not found in root)
 func (m *Manager) RestartPod(podName string) error {
-	cmd := fmt.Sprintf("podman pod restart %s", podName)
+	cmd := fmt.Sprintf("run0 --background=no podman pod restart %s 2>/dev/null || podman pod restart %s", podName, podName)
 	_, err := m.sshMgr.RunCommand(m.cfg, cmd)
 	if err == nil {
 		return nil
@@ -510,7 +511,7 @@ func (m *Manager) RestartPod(podName string) error {
 		for _, u := range unprivUsers {
 			for _, p := range u.Pods {
 				if p.Name == podName || p.ID == podName {
-					userCmd := fmt.Sprintf("sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman pod restart %s", u.User, u.UID, podName)
+					userCmd := fmt.Sprintf("run0 --background=no --user %s podman pod restart %s 2>/dev/null || sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman pod restart %s", u.User, podName, u.User, u.UID, podName)
 					_, userErr := m.sshMgr.RunCommand(m.cfg, userCmd)
 					return userErr
 				}
@@ -522,7 +523,7 @@ func (m *Manager) RestartPod(podName string) error {
 
 // ContainerAction performs start, stop, restart, or inspect (falling back to unprivileged user if needed)
 func (m *Manager) ContainerAction(containerName, action string) error {
-	cmd := fmt.Sprintf("podman %s %s", action, containerName)
+	cmd := fmt.Sprintf("run0 --background=no podman %s %s 2>/dev/null || podman %s %s", action, containerName, action, containerName)
 	_, err := m.sshMgr.RunCommand(m.cfg, cmd)
 	if err == nil {
 		return nil
@@ -532,7 +533,7 @@ func (m *Manager) ContainerAction(containerName, action string) error {
 		for _, u := range unprivUsers {
 			for _, c := range u.Containers {
 				if c.Name == containerName || c.ID == containerName {
-					userCmd := fmt.Sprintf("sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman %s %s", u.User, u.UID, action, containerName)
+					userCmd := fmt.Sprintf("run0 --background=no --user %s podman %s %s 2>/dev/null || sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman %s %s", u.User, action, containerName, u.User, u.UID, action, containerName)
 					_, userErr := m.sshMgr.RunCommand(m.cfg, userCmd)
 					return userErr
 				}
@@ -544,7 +545,7 @@ func (m *Manager) ContainerAction(containerName, action string) error {
 
 // GetContainerLogs returns recent logs (falling back to unprivileged user if needed)
 func (m *Manager) GetContainerLogs(containerName string, tail int) (string, error) {
-	cmd := fmt.Sprintf("podman logs --tail %d %s", tail, containerName)
+	cmd := fmt.Sprintf("run0 --background=no podman logs --tail %d %s 2>&1 || sudo -n podman logs --tail %d %s 2>&1 || podman logs --tail %d %s", tail, containerName, tail, containerName, tail, containerName)
 	out, err := m.sshMgr.RunCommand(m.cfg, cmd)
 	if err == nil {
 		return out, nil
@@ -554,7 +555,7 @@ func (m *Manager) GetContainerLogs(containerName string, tail int) (string, erro
 		for _, u := range unprivUsers {
 			for _, c := range u.Containers {
 				if c.Name == containerName || c.ID == containerName {
-					userCmd := fmt.Sprintf("sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman logs --tail %d %s", u.User, u.UID, tail, containerName)
+					userCmd := fmt.Sprintf("run0 --background=no --user %s podman logs --tail %d %s 2>&1 || sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman logs --tail %d %s", u.User, tail, containerName, u.User, u.UID, tail, containerName)
 					return m.sshMgr.RunCommand(m.cfg, userCmd)
 				}
 			}

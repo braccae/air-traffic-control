@@ -641,8 +641,8 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<Prob
               })
               .map((c: any) => ({
                 ...c,
-                cpu: c.cpu || '0.4%',
-                memory: c.memory || '64 MiB',
+                cpu: c.cpu || '',
+                memory: c.memory || '',
               })),
           }));
         }
@@ -662,24 +662,154 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<Prob
       'echo "===RUNUSER==="',
       'ls -1d /run/user/*/libpod /run/user/*/podman /run/user/*/containers 2>/dev/null || true',
       'echo "===ROOTPODMAN==="',
-      '(sudo -n podman ps --all --format json 2>/dev/null || podman ps --all --format json 2>/dev/null) || true',
+      '(run0 --background=no podman ps --all --format json 2>/dev/null || sudo -n podman ps --all --format json 2>/dev/null || podman ps --all --format json 2>/dev/null) || true',
       'echo "===ROOTPODS==="',
-      '(sudo -n podman pod ps --format json 2>/dev/null || podman pod ps --format json 2>/dev/null) || true',
+      '(run0 --background=no podman pod ps --format json 2>/dev/null || sudo -n podman pod ps --format json 2>/dev/null || podman pod ps --format json 2>/dev/null) || true',
+      'echo "===ROOTSTATS==="',
+      '(run0 --background=no podman stats --no-stream --format json 2>/dev/null || sudo -n podman stats --no-stream --format json 2>/dev/null || podman stats --no-stream --format json 2>/dev/null) || true',
+      'echo "===USERPROBES==="',
+      'USERS=$( ( [ -d /run/user ] && ls -1 /run/user 2>/dev/null | grep -E "^[0-9]+$" | while read u; do id -nu "$u" 2>/dev/null; done ; ls -1 /var/lib/systemd/linger 2>/dev/null ; awk -F: "$1 != \\"root\\" && $2 != \\"\\" {print $1}" /etc/subuid 2>/dev/null ) | sort -u )',
+      'for u in $USERS; do uid=$(id -u "$u" 2>/dev/null || true); [ -n "$uid" ] && [ "$uid" -gt 0 ] 2>/dev/null || continue; echo "---USER_PS:$u:$uid---"; (run0 --background=no --user "$u" podman ps --all --format json 2>/dev/null || sudo -n -u "$u" XDG_RUNTIME_DIR=/run/user/$uid podman ps --all --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman ps --all --format json 2>/dev/null) || true; echo "---USER_PODS:$u:$uid---"; (run0 --background=no --user "$u" podman pod ps --format json 2>/dev/null || sudo -n -u "$u" XDG_RUNTIME_DIR=/run/user/$uid podman pod ps --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman pod ps --format json 2>/dev/null) || true; echo "---USER_STATS:$u:$uid---"; (run0 --background=no --user "$u" podman stats --no-stream --format json 2>/dev/null || sudo -n -u "$u" XDG_RUNTIME_DIR=/run/user/$uid podman stats --no-stream --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman stats --no-stream --format json 2>/dev/null) || true; done',
       'echo "===DOCKER_CLI==="',
       'which docker 2>/dev/null || echo "NO_DOCKER"',
       'echo "===DOCKER==="',
       '(docker ps --format "{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}" 2>/dev/null || sudo -n docker ps --format "{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}" 2>/dev/null) || echo "NO_DOCKER"',
     ].join('; ');
 
-    const raw = await runNodeCommand(node, script, 6000);
+    const raw = await runNodeCommand(node, script, 8000);
     const [psPart, rest1 = ''] = raw.split('===PASSWD===');
     const [passwdPart, rest2 = ''] = rest1.split('===SUBUID===');
     const [subuidPart, rest3 = ''] = rest2.split('===LINGER===');
     const [lingerPart, rest4 = ''] = rest3.split('===RUNUSER===');
     const [runUserPart, rest5 = ''] = rest4.split('===ROOTPODMAN===');
     const [rootPodmanPart, rest6 = ''] = rest5.split('===ROOTPODS===');
-    const [rootPodsPart, rest7 = ''] = rest6.split('===DOCKER_CLI===');
-    const [dockerCliPart, dockerPart = ''] = rest7.split('===DOCKER===');
+    const [rootPodsPart, rest7 = ''] = rest6.split('===ROOTSTATS===');
+    const [rootStatsPart, rest8 = ''] = rest7.split('===USERPROBES===');
+    const [userProbesPart, rest9 = ''] = rest8.split('===DOCKER_CLI===');
+    const [dockerCliPart, dockerPart = ''] = rest9.split('===DOCKER===');
+
+    // Parse stats JSON helper
+    const parseStatsJson = (statsJsonStr: string) => {
+      const map = new Map<string, { cpu: string; memory: string }>();
+      try {
+        const parsed = JSON.parse(statsJsonStr.trim());
+        if (Array.isArray(parsed)) {
+          for (const s of parsed) {
+            const sid = String(s.ID || s.Id || s.Container || '').trim();
+            const sname = String(s.Name || '').trim();
+            const cpu = String(s.CPUPerc || s.CPU || s.cpu || '').trim();
+            const memRaw = String(s.MemUsage || s.Memory || s.memory || '').trim();
+            const mem = memRaw.includes('/') ? memRaw.split('/')[0].trim() : memRaw;
+            const entry = { cpu, memory: mem };
+            if (sid) {
+              map.set(sid, entry);
+              if (sid.length > 12) map.set(sid.slice(0, 12), entry);
+            }
+            if (sname) {
+              map.set(sname, entry);
+            }
+          }
+        }
+      } catch {}
+      return map;
+    };
+
+    const rootStatsMap = parseStatsJson(rootStatsPart || '');
+
+    // Parse user probes from userProbesPart
+    const discoveredUserContainers: Record<string, ContainerItem[]> = {};
+    const discoveredUserPods: Record<string, PodItem[]> = {};
+
+    const userProbeBlocks = (userProbesPart || '').split('---USER_PS:');
+    for (const block of userProbeBlocks) {
+      if (!block.trim()) continue;
+      const firstLineEnd = block.indexOf('---');
+      if (firstLineEnd === -1) continue;
+      const userMeta = block.slice(0, firstLineEnd).trim();
+      const [uName, uUidStr] = userMeta.split(':');
+      if (!uName) continue;
+      const uUid = Number.parseInt(uUidStr, 10) || 1000;
+
+      const restOfBlock = block.slice(firstLineEnd + 3);
+      const [userPsJson, restUser1 = ''] = restOfBlock.split(`---USER_PODS:${uName}:${uUid}---`);
+      const [userPodsJson, userStatsJson = ''] = restUser1.split(`---USER_STATS:${uName}:${uUid}---`);
+
+      const userStatsMap = parseStatsJson(userStatsJson);
+      const userContainersList: ContainerItem[] = [];
+
+      try {
+        const parsedCs = JSON.parse((userPsJson || '').trim());
+        if (Array.isArray(parsedCs)) {
+          for (const rc of parsedCs) {
+            const cName = Array.isArray(rc.Names) && rc.Names.length > 0 ? rc.Names[0] : rc.Names || rc.Id;
+            const cNameLower = String(cName).toLowerCase();
+            const imgLower = String(rc.Image || '').toLowerCase();
+            if (
+              rc.IsInfra ||
+              cNameLower.includes('pause') ||
+              cNameLower.endsWith('-infra') ||
+              imgLower.includes('pause') ||
+              imgLower.includes('podman-pause')
+            ) {
+              continue;
+            }
+            const fullId = String(rc.Id || cName);
+            const shortId = fullId.slice(0, 12);
+            const nameStr = String(cName);
+            const stat = userStatsMap.get(fullId) || userStatsMap.get(shortId) || userStatsMap.get(nameStr);
+
+            userContainersList.push({
+              id: shortId,
+              name: nameStr,
+              image: String(rc.Image || `${nameStr}:latest`),
+              status: String(rc.Status || rc.State || 'Running'),
+              cpu: stat?.cpu || '',
+              memory: stat?.memory || '',
+              user: uName,
+              uid: uUid,
+              rootless: true,
+              podId: rc.Pod || rc.PodId || undefined,
+              podName: rc.PodName || undefined,
+            });
+          }
+        }
+      } catch {}
+
+      const userPodsList: PodItem[] = [];
+      try {
+        const parsedPs = JSON.parse((userPodsJson || '').trim());
+        if (Array.isArray(parsedPs)) {
+          for (const rp of parsedPs) {
+            const pName = String(rp.Name || rp.Id || 'user-pod');
+            const pId = String(rp.Id || pName);
+            const memberContainers = userContainersList.filter(
+              c => c.podId === pId || c.podName === pName || c.podId === rp.Name
+            );
+            userPodsList.push({
+              id: pId,
+              name: pName.startsWith('pod:') ? pName : `pod: ${pName}`,
+              containersRunningCount: memberContainers.filter(c =>
+                c.status.toLowerCase().includes('running') || c.status.toLowerCase().startsWith('up ')
+              ).length,
+              ports: rp.PortMappings || rp.Ports ? String(rp.PortMappings || rp.Ports) : `Host: ${node.tailscaleHost || 'local'}`,
+              totalCpu: '',
+              totalRam: '',
+              user: uName,
+              uid: uUid,
+              rootless: true,
+              containers: memberContainers,
+            });
+          }
+        }
+      } catch {}
+
+      if (userContainersList.length > 0) {
+        discoveredUserContainers[uName] = userContainersList;
+      }
+      if (userPodsList.length > 0) {
+        discoveredUserPods[uName] = userPodsList;
+      }
+    }
 
     const baseProbed =
       goProbed.length > 0
@@ -690,6 +820,8 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<Prob
             subuidOutput: subuidPart || '',
             lingerUsers: lingerPart || '',
             runUserDirs: runUserPart || '',
+            userContainers: Object.keys(discoveredUserContainers).length > 0 ? discoveredUserContainers : undefined,
+            userPods: Object.keys(discoveredUserPods).length > 0 ? discoveredUserPods : undefined,
           });
 
     const passwdLines = (passwdPart || '').split('\n').filter(Boolean);
@@ -728,9 +860,9 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<Prob
             id: pId,
             name: pName.startsWith('pod:') ? pName : `pod: ${pName}`,
             containersRunningCount: 0,
-            ports: rp.PortMappings ? String(rp.PortMappings) : `Host: ${node.tailscaleHost || 'local'}`,
-            totalCpu: '0.8%',
-            totalRam: '64 MiB',
+            ports: rp.PortMappings || rp.Ports ? String(rp.PortMappings || rp.Ports) : `Host: ${node.tailscaleHost || 'local'}`,
+            totalCpu: '',
+            totalRam: '',
             user: 'root',
             uid: 0,
             rootless: false,
@@ -757,15 +889,20 @@ export async function probeNodePodmanAndIdentities(node: NodeItem): Promise<Prob
           ) {
             continue;
           }
+          const fullId = String(rc.Id || cName);
+          const shortId = fullId.slice(0, 12);
+          const nameStr = String(cName);
           const podId = rc.Pod || rc.PodId || '';
           const podName = rc.PodName || '';
+          const stat = rootStatsMap.get(fullId) || rootStatsMap.get(shortId) || rootStatsMap.get(nameStr);
+
           rawRootContainers.push({
-            id: String(rc.Id || cName).slice(0, 12),
-            name: String(cName),
-            image: String(rc.Image || 'system/container'),
+            id: shortId,
+            name: nameStr,
+            image: String(rc.Image || `${nameStr}:latest`),
             status: String(rc.Status || rc.State || 'Running'),
-            cpu: '0.4%',
-            memory: '96 MiB',
+            cpu: stat?.cpu || '',
+            memory: stat?.memory || '',
             user: 'root',
             uid: 0,
             rootless: false,
