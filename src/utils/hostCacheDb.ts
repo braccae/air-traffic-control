@@ -564,15 +564,22 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
     },
 
     deleteCustomFolder(id: string): boolean {
-      const hosts = this.getAllHosts();
-      for (const host of hosts) {
-        if (host.folder === id) {
-          delete host.folder;
-          upsertSingleHost(host);
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const hosts = this.getAllHosts();
+        for (const host of hosts) {
+          if (host.folder === id) {
+            delete host.folder;
+            upsertSingleHost(host);
+          }
         }
+        const res = stmtDeleteFolder.run(id);
+        db.exec('COMMIT');
+        return Number(res.changes) > 0;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
       }
-      const res = stmtDeleteFolder.run(id);
-      return Number(res.changes) > 0;
     },
 
     upsertTagChunk(chunk: TagInventoryChunk): void {
@@ -633,10 +640,11 @@ export function registerInventoryRoutes(
     res.json({ success: true, chunks: hostCache.getAllTagChunks() });
   });
 
+  const VALID_AUTH_METHODS = new Set(['tailscale-ssh', 'vault-password', 'vault-sshkey', 'ssh-agent']);
   app.post('/api/inventory/chunks', (req: any, res: any) => {
     const { tag, authMethod, sshUser, vaultSecretId, id, createdAt } = req.body || {};
-    if (!tag || !authMethod) {
-      res.status(400).json({ success: false, error: 'tag and authMethod are required' });
+    if (!tag || !authMethod || !VALID_AUTH_METHODS.has(authMethod)) {
+      res.status(400).json({ success: false, error: 'Valid tag and authMethod are required' });
       return;
     }
     const chunk: TagInventoryChunk = {
