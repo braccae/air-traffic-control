@@ -94,18 +94,55 @@ All host state mutations (network interface changes, firewall rules, package upg
 
 ---
 
-## 6. Pluggable Driver Architecture & Extensibility
+## 6. Pluggable Go Plugin Framework & Extensibility
 
-Host actions are encapsulated behind typed driver interfaces:
-- **`SystemDriver`:** Service lifecycle, elevation, reboot/power actions, host discovery.
-- **`StorageDriver`:** ZFS pools/datasets, Btrfs filesystems, LVM and mount points.
-- **`NetworkDriver`:** Interfaces, routing, IP assignments, Tailscale mesh peering.
-- **`ContainerDriver`:** Podman (rootful and rootless user sessions), Docker daemon fallback.
-- **`PackageDriver`:** Image/immutable systems (`bootc`, `rpm-ostree`) and traditional package managers (`dnf`, `apt`, `apk`).
-- **Extensible Expansion Slots:** Architecture includes dedicated driver slots for:
-  - Databases (`DatabaseDriver`: MongoDB, PostgreSQL, MySQL)
-  - Kubernetes (`KubernetesDriver`: k8s, k3s cluster orchestration)
-  - Network switches (`NetworkSwitchDriver`: Cisco `cisco.ios.*`, Arista EOS, VyOS)
+All host capabilities, storage systems, container engines, package managers, network interfaces, and connection transports are structured as compile-time Go plugins registered in `backend-go/pkg/plugin`. The Go daemon owns all plugin definitions, capability probes, telemetry readers, and Ansible task compilation templates. The TypeScript coordinator delegates discovery and task compilation directly to the Go daemon over HTTP.
+
+### Compile-Time Plugin Registry (`backend-go/pkg/plugin`)
+Plugins are registered via Go `init()` functions and imported into the daemon via blank imports in `backend-go/plugins/all/all.go`. No dynamic `.so` or runtime WASM binaries are used.
+- **Plugin Interfaces:**
+  - `Plugin`: Defines metadata (`Name`, `Kind`, `Description`, `Version`), requirements, and `Detect(ctx, conn, facts)` probe.
+  - `Reader`: Reads real-time telemetry or state data over the connection (`Read(ctx, conn, facts)`).
+  - `Actor`: Compiles declarative Ansible tasks for mutations (`CompileTask(action, params)`).
+  - `Runner`: Optional direct non-Ansible execution for non-destructive operations.
+- **Plugin Kinds:**
+  - `connection`: SSH, Tailscale (`tsnet`), Local loopback (`connection/ssh`, `connection/tailscale`, `connection/local`).
+  - `elevation`: `run0`, `sudo`, `doas`, `none`.
+  - `storage`: OpenZFS (`zpool`, `zfs`), Btrfs (`btrfs`), LVM/ext4/XFS (`findmnt`).
+  - `container`: Podman (rootful and rootless user sessions), Docker daemon.
+  - `package`: Image/immutable managers (`bootc`, `rpm-ostree`), traditional package managers (`dnf`, `apt`, `apk`).
+  - `shares`: NFS exports (`nfs`), Samba shares (`samba`).
+  - `backup`: Restic (`restic`).
+  - `telemetry`: Glances HTTP/SSH (`glances`), `/proc` + `/sys` fallback (`proc`).
+  - `system`: Systemd units and services (`systemd`), network interfaces and links (`network`).
+
+### Connection Layer & Ansible Proxy Bridge
+All target nodes remain agentless. Communication is handled through pure-Go transports:
+- **Transports (`backend-go/plugins/connection/*`):**
+  - `connection/ssh`: Pure Go `golang.org/x/crypto/ssh` client pool with agent forwarding (`SSH_AUTH_SOCK`).
+  - `connection/tailscale`: Embedded `tailscale.com/tsnet` server providing direct encrypted Tailscale mesh connectivity without relying on host-level tailscaled.
+  - `connection/local`: Loopback executor for controller localhost operations.
+- **Ansible Proxy Bridge Subcommand:**
+  - Running `air-traffic-control-daemon proxy <host> <port>` establishes a stdio-to-target stream through the daemon's connection pool.
+  - Ansible uses this via `ssh_common_args = -o ProxyCommand="air-traffic-control-daemon proxy %h %p"` in `ansible.cfg`, eliminating external OpenSSH client dependency quirks and seamlessly bridging Ansible through tsnet or custom tunnels.
+
+### Dynamic Inner Sidebar & Host Modules View
+The user interface dynamically adapts to each host's probed capabilities:
+- **Dynamic Inner Sidebar (`CockpitSubSidebar`):**
+  - Tabs are dynamically registered based on detected plugins returned by `GET /api/nodes/:id/plugins`.
+  - If a capability is not detected on a host (e.g. no ZFS or no Podman), its tab is automatically hidden from the navigation sub-sidebar to eliminate clutter.
+  - Core views (`Terminal`, `Modules`, and default system views) remain readily accessible.
+- **Host Modules View (`HostModulesView`):**
+  - Accessible via the **Modules** tab at the bottom of the node sub-sidebar.
+  - Groups plugins into **Active** (probed and working), **Available** (installed or installable on the host), and **Unsupported** (missing OS or architecture prerequisites).
+  - Provides one-click installation actions that stage declarative Ansible tasks into the mutation queue.
+  - Allows manual connection, elevation, and package plugin overrides per host via the Edit Node modal.
+
+### Standard for Adding a New Plugin
+Adding a new capability to Air Traffic Control requires three simple steps:
+1. **Implement the Go Plugin Package:** Create `backend-go/plugins/<kind>/<name>/<name>.go` implementing `plugin.Plugin` (and optionally `plugin.Reader` or `plugin.Actor`) and register it in `init()` via `plugin.Register(...)`.
+2. **Import the Plugin:** Add a single blank import line in `backend-go/plugins/all/all.go` (`_ "air-traffic-control/plugins/<kind>/<name>"`).
+3. **Optional Custom View:** If the plugin requires a dedicated UI beyond the standard telemetry card or existing view, add a view component in `src/plugins/views/index.ts`.
 
 ---
 
