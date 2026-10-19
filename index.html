@@ -16,11 +16,26 @@
     <script>
       (function () {
         try {
-          var theme = localStorage.getItem('prox_orch_theme') || 'dark';
-          document.documentElement.setAttribute('data-theme', theme);
-          if (theme === 'latte') {
-            document.documentElement.classList.add('theme-latte');
+          var stored = localStorage.getItem('prox_orch_theme');
+          var resolved = 'macchiato';
+          if (stored === 'latte') {
+            resolved = 'latte';
+          } else if (stored === 'macchiato' || stored === 'dark') {
+            resolved = 'macchiato';
           } else {
+            // 'system' or unset/empty: follow prefers-color-scheme
+            var isDark = !window.matchMedia || window.matchMedia('(prefers-color-scheme: dark)').matches;
+            resolved = isDark ? 'macchiato' : 'latte';
+          }
+          document.documentElement.setAttribute('data-theme', resolved);
+          if (stored) {
+            document.documentElement.setAttribute('data-theme-choice', stored);
+          }
+          if (resolved === 'latte') {
+            document.documentElement.classList.add('theme-latte');
+            document.documentElement.classList.remove('theme-macchiato');
+          } else {
+            document.documentElement.classList.add('theme-macchiato');
             document.documentElement.classList.remove('theme-latte');
           }
         } catch (_) {}

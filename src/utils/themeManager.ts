@@ -1,4 +1,6 @@
-export type ThemeMode = 'dark' | 'latte';
+export type ThemeChoice = 'system' | 'macchiato' | 'latte';
+export type ResolvedTheme = 'macchiato' | 'latte';
+export type ThemeMode = ThemeChoice;
 
 export const THEME_STORAGE_KEY = 'prox_orch_theme';
 
@@ -16,23 +18,53 @@ export interface ElementLike {
 }
 
 /**
- * Retrieves the persisted theme from localStorage or returns 'dark' by default.
+ * Checks system color scheme preference. Defaults to true (dark) if matchMedia is unavailable.
  */
-export function getStoredTheme(storage?: StorageLike): ThemeMode {
+export function getSystemTheme(): boolean {
+  if (typeof window !== 'undefined' && window.matchMedia) {
+    try {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches;
+    } catch {
+      return true;
+    }
+  }
+  return true;
+}
+
+/**
+ * Resolves a ThemeChoice into a concrete ResolvedTheme ('macchiato' | 'latte').
+ * Handles backward compatibility for legacy 'dark' stored values.
+ */
+export function resolveTheme(
+  choice: ThemeChoice | string | null | undefined,
+  systemIsDark: boolean = true
+): ResolvedTheme {
+  if (choice === 'latte') return 'latte';
+  if (choice === 'macchiato' || choice === 'dark') return 'macchiato';
+  return systemIsDark ? 'macchiato' : 'latte';
+}
+
+/**
+ * Retrieves the persisted theme choice from localStorage or returns 'system' by default.
+ */
+export function getStoredTheme(storage?: StorageLike): ThemeChoice {
   try {
     const s = storage || (typeof window !== 'undefined' ? window.localStorage : undefined);
-    if (!s || !s.getItem) return 'dark';
+    if (!s || !s.getItem) return 'system';
     const val = s.getItem(THEME_STORAGE_KEY);
-    return val === 'latte' ? 'latte' : 'dark';
+    if (val === 'latte') return 'latte';
+    if (val === 'macchiato' || val === 'dark') return 'macchiato';
+    if (val === 'system') return 'system';
+    return 'system';
   } catch {
-    return 'dark';
+    return 'system';
   }
 }
 
 /**
- * Persists the selected theme into localStorage.
+ * Persists the selected theme choice into localStorage.
  */
-export function setStoredTheme(theme: ThemeMode, storage?: StorageLike): void {
+export function setStoredTheme(theme: ThemeChoice, storage?: StorageLike): void {
   try {
     const s = storage || (typeof window !== 'undefined' ? window.localStorage : undefined);
     if (s && s.setItem) {
@@ -44,43 +76,95 @@ export function setStoredTheme(theme: ThemeMode, storage?: StorageLike): void {
 }
 
 /**
- * Toggles between 'dark' and 'latte' theme modes.
+ * Cycles between theme choices: system -> macchiato -> latte -> system.
  */
-export function toggleTheme(current: ThemeMode): ThemeMode {
-  return current === 'latte' ? 'dark' : 'latte';
+export function toggleTheme(current: ThemeChoice | 'dark'): ThemeChoice {
+  if (current === 'system') return 'macchiato';
+  if (current === 'macchiato') return 'latte';
+  if (current === 'latte') return 'system';
+  if (current === 'dark') return 'latte';
+  return 'system';
 }
 
 /**
- * Applies the theme data attribute and class to the document or target root element.
+ * Applies the resolved theme data attribute and class to the document or target root element.
+ * Returns the resolved concrete theme.
  */
 export function applyThemeToDocument(
-  theme: ThemeMode,
-  targetElement?: ElementLike
-): void {
+  theme: ThemeChoice | ResolvedTheme,
+  targetElement?: ElementLike,
+  systemIsDark?: boolean
+): ResolvedTheme {
   const el = targetElement || (typeof document !== 'undefined' ? document.documentElement : undefined);
-  if (!el) return;
+  const isDark = typeof systemIsDark === 'boolean' ? systemIsDark : getSystemTheme();
+  const resolved = resolveTheme(theme, isDark);
 
-  el.setAttribute('data-theme', theme);
+  if (!el) return resolved;
+
+  el.setAttribute('data-theme', resolved);
+  el.setAttribute('data-theme-choice', theme);
 
   if (el.classList) {
-    if (theme === 'latte') {
+    if (resolved === 'latte') {
       el.classList.add('theme-latte');
+      el.classList.remove('theme-macchiato');
     } else {
+      el.classList.add('theme-macchiato');
       el.classList.remove('theme-latte');
     }
   }
+
+  return resolved;
 }
 
 /**
  * Returns the human-readable label for the theme.
  */
-export function getThemeLabel(theme: ThemeMode): string {
-  return theme === 'latte' ? 'Theme: Latte' : 'Theme: Dark';
+export function getThemeLabel(theme: ThemeChoice | 'dark', resolved?: ResolvedTheme): string {
+  if (theme === 'system') {
+    return resolved ? `Theme: System (${resolved === 'macchiato' ? 'Dark' : 'Light'})` : 'Theme: System';
+  }
+  if (theme === 'macchiato') return 'Theme: Macchiato';
+  if (theme === 'latte') return 'Theme: Latte';
+  if (theme === 'dark') return 'Theme: Dark';
+  return 'Theme: System';
 }
 
 /**
- * Returns the Material Symbol icon name for the theme.
+ * Returns the Material Symbol icon name for the theme choice.
  */
-export function getThemeIcon(theme: ThemeMode): string {
-  return theme === 'latte' ? 'light_mode' : 'dark_mode';
+export function getThemeIcon(theme: ThemeChoice | 'dark'): string {
+  if (theme === 'system') return 'desktop_windows';
+  if (theme === 'latte') return 'light_mode';
+  return 'dark_mode';
 }
+
+/**
+ * Subscribes to system color scheme changes (prefers-color-scheme: dark).
+ * Returns an unsubscription function.
+ */
+export function watchSystemTheme(callback: (isDark: boolean) => void): () => void {
+  if (typeof window === 'undefined' || !window.matchMedia) {
+    return () => {};
+  }
+
+  try {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const listener = (event: MediaQueryListEvent | { matches: boolean }) => {
+      callback(event.matches);
+    };
+
+    if (mq.addEventListener) {
+      mq.addEventListener('change', listener);
+      return () => mq.removeEventListener('change', listener);
+    } else if ((mq as any).addListener) {
+      (mq as any).addListener(listener);
+      return () => (mq as any).removeListener(listener);
+    }
+  } catch {
+    // ignore matchMedia subscription failures
+  }
+
+  return () => {};
+}
+

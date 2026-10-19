@@ -51,9 +51,13 @@ import {
   type TerminalSession,
 } from './utils/terminalSessionManager.ts';
 import {
-  type ThemeMode,
+  type ThemeChoice,
+  type ResolvedTheme,
   getStoredTheme,
   setStoredTheme,
+  resolveTheme,
+  getSystemTheme,
+  watchSystemTheme,
   toggleTheme,
   applyThemeToDocument,
 } from './utils/themeManager.ts';
@@ -418,16 +422,29 @@ export default function App() {
   const [telemetry, setTelemetry] = useState<TelemetryData>(initialTelemetry);
   const [tasks, setTasks] = useState<GlobalTaskItem[]>(initialTasks);
 
-  // Theme state: dark | latte (Task 6)
-  const [theme, setTheme] = useState<ThemeMode>(() => getStoredTheme());
+  // Theme state: system | macchiato | latte with OS auto-preference (Task 8)
+  const [themeChoice, setThemeChoice] = useState<ThemeChoice>(() => getStoredTheme());
+  const [systemIsDark, setSystemIsDark] = useState<boolean>(() => getSystemTheme());
 
   useEffect(() => {
-    applyThemeToDocument(theme);
-    setStoredTheme(theme);
-  }, [theme]);
+    return watchSystemTheme((isDark) => {
+      setSystemIsDark(isDark);
+    });
+  }, []);
+
+  const resolvedTheme = resolveTheme(themeChoice, systemIsDark);
+
+  useEffect(() => {
+    applyThemeToDocument(themeChoice, undefined, systemIsDark);
+    setStoredTheme(themeChoice);
+  }, [themeChoice, systemIsDark]);
 
   const handleToggleTheme = useCallback(() => {
-    setTheme(prev => toggleTheme(prev));
+    setThemeChoice(prev => toggleTheme(prev));
+  }, []);
+
+  const handleSelectTheme = useCallback((choice: ThemeChoice) => {
+    setThemeChoice(choice);
   }, []);
 
   // Mobile sidebar state
@@ -1086,8 +1103,10 @@ export default function App() {
         isSidebarOpen={mobileSidebarOpen}
         onlineCount={nodesList.filter(n => n.status === 'online').length}
         totalCount={nodesList.length}
-        theme={theme}
+        theme={themeChoice}
+        resolvedTheme={resolvedTheme}
         onToggleTheme={handleToggleTheme}
+        onSelectTheme={handleSelectTheme}
       />
 
       {/* Left Server View Sidebar */}

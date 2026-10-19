@@ -1,6 +1,6 @@
-import React from 'react';
-import type { ThemeMode } from '../utils/themeManager.ts';
-import { getThemeIcon, getThemeLabel } from '../utils/themeManager.ts';
+import React, { useState, useRef, useEffect } from 'react';
+import type { ThemeChoice, ResolvedTheme } from '../utils/themeManager.ts';
+import { getThemeIcon, getThemeLabel, resolveTheme } from '../utils/themeManager.ts';
 
 interface HeaderProps {
   onOpenAddNode: () => void;
@@ -13,8 +13,10 @@ interface HeaderProps {
   isSidebarOpen?: boolean;
   onlineCount?: number;
   totalCount?: number;
-  theme?: ThemeMode;
+  theme?: ThemeChoice;
+  resolvedTheme?: ResolvedTheme;
   onToggleTheme?: () => void;
+  onSelectTheme?: (theme: ThemeChoice) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -28,9 +30,54 @@ export const Header: React.FC<HeaderProps> = ({
   isSidebarOpen,
   onlineCount,
   totalCount,
-  theme = 'dark',
+  theme = 'system',
+  resolvedTheme: propResolvedTheme,
   onToggleTheme,
+  onSelectTheme,
 }) => {
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const themeMenuRef = useRef<HTMLDivElement>(null);
+
+  const activeResolvedTheme = propResolvedTheme ?? resolveTheme(theme);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (themeMenuRef.current && !themeMenuRef.current.contains(event.target as Node)) {
+        setThemeMenuOpen(false);
+      }
+    }
+    if (themeMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [themeMenuOpen]);
+
+  const THEME_OPTIONS: Array<{
+    id: ThemeChoice;
+    label: string;
+    sublabel: string;
+    icon: string;
+  }> = [
+    {
+      id: 'system',
+      label: 'System Default',
+      sublabel: `Auto (${activeResolvedTheme === 'macchiato' ? 'Dark' : 'Light'})`,
+      icon: 'desktop_windows',
+    },
+    {
+      id: 'macchiato',
+      label: 'Catppuccin Macchiato',
+      sublabel: 'Dark Mode',
+      icon: 'dark_mode',
+    },
+    {
+      id: 'latte',
+      label: 'Catppuccin Latte',
+      sublabel: 'Light Mode',
+      icon: 'light_mode',
+    },
+  ];
+
   return (
     <header className="fixed top-0 left-0 right-0 z-50 h-10 bg-[#0a0d1f] flex items-center justify-between px-3 shadow-[0_1px_8px_rgba(0,0,0,0.5)] border-b border-[#26293c]">
       {/* Brand & Datacenter */}
@@ -126,19 +173,80 @@ export const Header: React.FC<HeaderProps> = ({
             <span>Terminal / SSH</span>
           </button>
 
-          {onToggleTheme && (
-            <button
-              type="button"
-              onClick={onToggleTheme}
-              className="flex items-center gap-1.5 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
-              title={`Toggle Theme (Current: ${theme === 'latte' ? 'Catppuccin Latte' : 'Dark'})`}
-              aria-label={`Toggle theme (currently ${theme === 'latte' ? 'Latte' : 'Dark'})`}
-            >
-              <span className="material-symbols-outlined text-[14px] text-[#f9c068]">
-                {getThemeIcon(theme)}
-              </span>
-              <span>{getThemeLabel(theme)}</span>
-            </button>
+          {(onToggleTheme || onSelectTheme) && (
+            <div className="relative" ref={themeMenuRef}>
+              <button
+                type="button"
+                onClick={() => setThemeMenuOpen(prev => !prev)}
+                className="flex items-center gap-1.5 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
+                title={`Theme: ${theme === 'system' ? `System Default (${activeResolvedTheme === 'macchiato' ? 'Macchiato Dark' : 'Latte Light'})` : theme === 'macchiato' ? 'Catppuccin Macchiato (Dark)' : 'Catppuccin Latte (Light)'}`}
+                aria-label={`Current theme: ${theme} (resolved: ${activeResolvedTheme}). Click to choose theme.`}
+                aria-expanded={themeMenuOpen}
+                aria-haspopup="menu"
+              >
+                <span className="material-symbols-outlined text-[14px] text-[#f9c068]">
+                  {getThemeIcon(theme)}
+                </span>
+                <span className="hidden sm:inline">
+                  {theme === 'system'
+                    ? `Auto (${activeResolvedTheme === 'macchiato' ? 'Dark' : 'Light'})`
+                    : theme === 'macchiato'
+                      ? 'Macchiato'
+                      : 'Latte'}
+                </span>
+                <span className="material-symbols-outlined text-[13px] text-[#8d909b]">
+                  {themeMenuOpen ? 'expand_less' : 'expand_more'}
+                </span>
+              </button>
+
+              {themeMenuOpen && (
+                <div
+                  className="absolute right-0 mt-1.5 w-60 bg-[#171a2d] border border-[#313447] rounded shadow-xl py-1 z-50 text-left"
+                  role="menu"
+                  aria-label="Theme selection menu"
+                >
+                  <div className="px-3 py-1.5 text-[10px] uppercase font-mono tracking-wider text-[#8d909b] border-b border-[#26293c] flex items-center justify-between">
+                    <span>Theme Preference</span>
+                    <span className="text-[#8cd6cb] font-semibold">{activeResolvedTheme}</span>
+                  </div>
+
+                  {THEME_OPTIONS.map(opt => {
+                    const isSelected = theme === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          if (onSelectTheme) {
+                            onSelectTheme(opt.id);
+                          } else if (onToggleTheme) {
+                            onToggleTheme();
+                          }
+                          setThemeMenuOpen(false);
+                        }}
+                        className={`w-full text-left px-3 py-2 flex items-center justify-between hover:bg-[#26293c] text-xs font-mono transition-colors cursor-pointer ${
+                          isSelected ? 'text-[#8aadf4] bg-[#1b1e31]' : 'text-[#dfe1fa]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className={`material-symbols-outlined text-[16px] ${isSelected ? 'text-[#8aadf4]' : 'text-[#f9c068]'}`}>
+                            {opt.icon}
+                          </span>
+                          <div className="flex flex-col">
+                            <span className="font-semibold text-xs leading-tight">{opt.label}</span>
+                            <span className="text-[10px] text-[#8d909b] leading-tight">{opt.sublabel}</span>
+                          </div>
+                        </div>
+                        {isSelected && (
+                          <span className="material-symbols-outlined text-[16px] text-[#8cd6cb]">check</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           )}
         </div>
 
