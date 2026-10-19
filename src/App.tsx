@@ -1228,7 +1228,7 @@ export default function App() {
             </div>
 
             {/* Cockpit Nested Split Layout: Sub-Sidebar + Main Control Workspace */}
-            <div className="grid grid-cols-12 gap-2 mt-2 w-full">
+            <div className="grid grid-cols-12 gap-2 mt-2 w-full items-start">
               {/* Cockpit Sub-Sidebar with Resizable Width */}
               <div className={getSubSidebarWrapperClasses(subSidebarWidth)}>
                 <CockpitSubSidebar

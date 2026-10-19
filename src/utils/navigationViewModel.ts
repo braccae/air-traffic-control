@@ -165,15 +165,15 @@ export function getSubSidebarWrapperClasses(width: SubSidebarWidth): string {
       ? 'col-span-12 lg:col-span-2 xl:col-span-2'
       : 'col-span-12 lg:col-span-3 xl:col-span-2';
 
-  return `${columnClasses} lg:sticky lg:top-[76px] lg:h-[calc(100vh-140px)] overflow-y-auto shrink-0 pr-1 scrollbar-thin`;
+  return `${columnClasses} self-start lg:sticky lg:top-[76px] lg:max-h-[calc(100vh-100px)] overflow-y-auto scrollbar-thin shrink-0`;
 }
 
 export function getWorkspaceWrapperClasses(width: SubSidebarWidth): string {
   return width === 'wide'
-    ? 'col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-2'
+    ? 'col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-2 min-w-0'
     : width === 'compact'
-    ? 'col-span-12 lg:col-span-10 xl:col-span-10 flex flex-col gap-2'
-    : 'col-span-12 lg:col-span-9 xl:col-span-10 flex flex-col gap-2';
+    ? 'col-span-12 lg:col-span-10 xl:col-span-10 flex flex-col gap-2 min-w-0'
+    : 'col-span-12 lg:col-span-9 xl:col-span-10 flex flex-col gap-2 min-w-0';
 }
 
 export interface FormattedNodeBadge {

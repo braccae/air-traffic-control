@@ -275,11 +275,11 @@ test('getSubSidebarWrapperClasses generates responsive sticky positioning and in
   // Verify sticky pinned positioning and independent scroll properties across all widths
   for (const width of ['compact', 'normal', 'wide'] as const) {
     const classes = getSubSidebarWrapperClasses(width);
+    assert.ok(classes.includes('self-start'), `Expected self-start for ${width}`);
     assert.ok(classes.includes('lg:sticky lg:top-[76px]'), `Expected lg:sticky lg:top-[76px] for ${width}`);
-    assert.ok(classes.includes('lg:h-[calc(100vh-140px)]'), `Expected responsive viewport height calculation for ${width}`);
+    assert.ok(classes.includes('lg:max-h-[calc(100vh-100px)]'), `Expected responsive viewport height calculation for ${width}`);
     assert.ok(classes.includes('overflow-y-auto'), `Expected overflow-y-auto for ${width}`);
     assert.ok(classes.includes('shrink-0'), `Expected shrink-0 for ${width}`);
-    assert.ok(classes.includes('pr-1'), `Expected pr-1 for ${width}`);
     assert.ok(classes.includes('scrollbar-thin'), `Expected scrollbar-thin for ${width}`);
   }
 
@@ -297,12 +297,15 @@ test('getSubSidebarWrapperClasses generates responsive sticky positioning and in
   const compactWorkspace = getWorkspaceWrapperClasses('compact');
   assert.ok(compactWorkspace.includes('col-span-12 lg:col-span-10 xl:col-span-10'));
   assert.ok(compactWorkspace.includes('flex flex-col gap-2'));
+  assert.ok(compactWorkspace.includes('min-w-0'));
 
   const normalWorkspace = getWorkspaceWrapperClasses('normal');
   assert.ok(normalWorkspace.includes('col-span-12 lg:col-span-9 xl:col-span-10'));
+  assert.ok(normalWorkspace.includes('min-w-0'));
 
   const wideWorkspace = getWorkspaceWrapperClasses('wide');
   assert.ok(wideWorkspace.includes('col-span-12 lg:col-span-8 xl:col-span-9'));
+  assert.ok(wideWorkspace.includes('min-w-0'));
 });
 
 test('formatNodeTypeBadge replaces generic SSH placeholders with styled node type pills', async () => {
