@@ -24,7 +24,7 @@ export const RebootConfirmModal: React.FC<RebootConfirmModalProps> = ({
     setIsStaging(true);
     try {
       const driver = getDriver('system', node) || systemDriver;
-      const task = driver.compileMutation(node, 'reboot', {
+      const task = await driver.compileMutation(node, 'reboot', {
         mode,
         message: `Safety reboot (${mode}) staged from Cockpit`,
       });

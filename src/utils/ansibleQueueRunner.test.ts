@@ -45,11 +45,18 @@ function expect<T>(actual: T) {
     toBeFalsy() {
       assert.ok(!actual);
     },
-    toContain(expected: string) {
-      assert.ok(
-        typeof actual === 'string' && actual.includes(expected),
-        `Expected ${JSON.stringify(actual)} to contain ${JSON.stringify(expected)}`
-      );
+    toContain(expected: any) {
+      if (Array.isArray(actual)) {
+        assert.ok(
+          actual.includes(expected),
+          `Expected array to contain ${JSON.stringify(expected)}`
+        );
+      } else {
+        assert.ok(
+          typeof actual === 'string' && actual.includes(expected),
+          `Expected ${JSON.stringify(actual)} to contain ${JSON.stringify(expected)}`
+        );
+      }
     },
   };
 }
@@ -468,4 +475,153 @@ describe('ansibleQueueRunner', () => {
       expect(currentQueue.isRunning).toBe(false);
     });
   });
+
+  describe('Task Schema and Legacy Deserialization', () => {
+    it('deserializes legacy SQLite task rows lacking connection block without breaking', () => {
+      const db = initQueueStore(':memory:');
+      const legacyTaskJson = JSON.stringify({
+        id: 'legacy-task-1',
+        title: 'Legacy Restart Nginx',
+        targetNodeId: 'node-legacy',
+        targetNodeName: 'legacy-host',
+        targetHostRoute: '192.168.1.50',
+        targetSshUser: 'admin',
+        targetSshPort: 2222,
+        category: 'system',
+        primaryModule: 'ansible.builtin.systemd',
+        steps: [{ name: 'Restart nginx', module: 'ansible.builtin.systemd', parameters: { name: 'nginx', state: 'restarted' } }],
+        become: true,
+        becomeMethod: 'sudo',
+        status: 'staged',
+        createdAt: 1700000000000,
+      });
+
+      // Insert directly as a legacy SQLite row
+      db.prepare(`
+        INSERT INTO ansible_queue_tasks (
+          id, title, target_node_id, target_node_name, target_host_route,
+          target_ssh_user, target_ssh_port, category, primary_module,
+          become, become_method, status, created_at, task_json, error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'legacy-task-1',
+        'Legacy Restart Nginx',
+        'node-legacy',
+        'legacy-host',
+        '192.168.1.50',
+        'admin',
+        2222,
+        'system',
+        'ansible.builtin.systemd',
+        1,
+        'sudo',
+        'staged',
+        1700000000000,
+        legacyTaskJson,
+        null,
+        1700000000000
+      );
+
+      // Re-initialize queue store to trigger row deserialization
+      initQueueStore(db);
+      const queue = getQueue();
+      const task = queue.tasks.find(t => t.id === 'legacy-task-1');
+
+      expect(task).toBeDefined();
+      expect(task?.targetHostRoute).toBe('192.168.1.50');
+      expect(task?.targetSshUser).toBe('admin');
+      expect(task?.targetSshPort).toBe(2222);
+      expect(task?.becomeMethod).toBe('sudo');
+      expect(task?.connection).toBeUndefined();
+    });
+
+    it('enqueues and serializes task with generic connection block', () => {
+      initQueueStore(':memory:');
+      const modernTask: QueuedAnsibleTask = {
+        id: 'modern-task-1',
+        title: 'Modern Tailscale Task',
+        targetNodeId: 'node-ts',
+        targetNodeName: 'worker.ts.net',
+        category: 'system',
+        primaryModule: 'ansible.builtin.systemd',
+        steps: [{ name: 'Ping', module: 'ansible.builtin.ping', parameters: {} }],
+        become: false,
+        status: 'staged',
+        createdAt: Date.now(),
+        connection: {
+          plugin: 'connection/tailscale',
+          host: '100.64.0.5',
+          port: 22,
+          user: 'core',
+          becomeMethod: 'run0',
+          proxyCommand: '/usr/local/bin/air-traffic-control-daemon proxy %h %p',
+        },
+      };
+
+      const enqueued = enqueueTask(modernTask);
+      expect(enqueued.connection?.plugin).toBe('connection/tailscale');
+      expect(enqueued.connection?.proxyCommand).toBe('/usr/local/bin/air-traffic-control-daemon proxy %h %p');
+
+      const queue = getQueue();
+      const loaded = queue.tasks.find(t => t.id === 'modern-task-1');
+      expect(loaded).toBeDefined();
+      expect(loaded?.connection?.plugin).toBe('connection/tailscale');
+      expect(loaded?.connection?.host).toBe('100.64.0.5');
+    });
+
+    it('generates ephemeral inventory with connection block and proxy command', async () => {
+      const modernTask: QueuedAnsibleTask = {
+        id: 'task-proxy-test',
+        title: 'Proxy bridge test',
+        targetNodeId: 'node-ts-2',
+        targetNodeName: 'node-ts-2',
+        category: 'system',
+        primaryModule: 'ansible.builtin.command',
+        steps: [{ name: 'uptime', module: 'ansible.builtin.command', parameters: { cmd: 'uptime' } }],
+        become: false,
+        status: 'staged',
+        createdAt: Date.now(),
+        connection: {
+          plugin: 'connection/tailscale',
+          host: '100.115.92.19',
+          port: 2222,
+          user: 'custom-user',
+          becomeMethod: 'sudo',
+          proxyCommand: 'air-traffic-control-daemon proxy %h %p',
+        },
+      };
+
+      let capturedArgs: string[] = [];
+      let capturedInventoryContent: any = null;
+
+      await executeQueueTaskOneByOne(modernTask, undefined, {
+        execCommand: async (_cmd, args) => {
+          capturedArgs = args;
+          const invIndex = args.indexOf('-i');
+          if (invIndex !== -1 && args[invIndex + 1]) {
+            const invFile = args[invIndex + 1];
+            if (fs.existsSync(invFile)) {
+              capturedInventoryContent = JSON.parse(fs.readFileSync(invFile, 'utf-8'));
+            }
+          }
+          return {
+            stdout: JSON.stringify({ plays: [], stats: { 'node-ts-2': { failures: 0, unreachable: 0, changed: 0 } } }),
+            stderr: '',
+            exitCode: 0,
+          };
+        },
+      });
+
+      expect(capturedArgs).toContain('-i');
+      expect(capturedInventoryContent).toBeDefined();
+      const hostvars = capturedInventoryContent?._meta?.hostvars?.['node-ts-2'];
+      expect(hostvars?.ansible_host).toBe('100.115.92.19');
+      expect(hostvars?.ansible_user).toBe('custom-user');
+      expect(hostvars?.ansible_port).toBe(2222);
+      expect(hostvars?.ansible_connection).toBe('ssh');
+      expect(hostvars?.ansible_become_method).toBe('sudo');
+      expect(hostvars?.ansible_ssh_common_args).toBe('-o ProxyCommand="air-traffic-control-daemon proxy %h %p"');
+    });
+  });
 });
+

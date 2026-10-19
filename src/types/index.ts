@@ -261,15 +261,24 @@ export interface QueuedAnsibleTask {
   title: string;
   targetNodeId: string;
   targetNodeName: string;
-  targetHostRoute: string;
-  targetSshUser: string;
-  targetSshPort: number;
+  targetHostRoute?: string;
+  targetSshUser?: string;
+  targetSshPort?: number;
+  connection?: {
+    plugin?: string; // 'connection/ssh', 'connection/tailscale', 'connection/local', 'connection/winrm', etc.
+    host?: string;
+    port?: number;
+    user?: string;
+    becomeMethod?: string;
+    extraArgs?: string[];
+    proxyCommand?: string;
+  };
   category: AnsibleModuleCategory;
   primaryModule: string;
   steps: AnsibleTaskStep[];
   secretsMasked?: Record<string, string>;
   become: boolean;
-  becomeMethod: 'run0' | 'sudo' | 'doas';
+  becomeMethod?: 'run0' | 'sudo' | 'doas' | string;
   status: 'staged' | 'running' | 'completed' | 'failed' | 'cancelled';
   createdAt: number;
   error?: string;

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type {
   NodeItem,
   QueuedAnsibleTask,
@@ -297,22 +299,139 @@ function formatYamlParamValue(val: any, indentLevel: number): string {
 }
 
 /**
+ * Checks if a system tailscaled daemon is active on the host machine.
+ */
+export function isSystemTailscaledActive(): boolean {
+  try {
+    if (fs.existsSync('/run/tailscale/tailscaled.sock') || fs.existsSync('/var/run/tailscale/tailscaled.sock')) {
+      return true;
+    }
+  } catch {
+    // Ignore fs check failure
+  }
+  return false;
+}
+
+/**
+ * Resolves the proxyCommand string if air-traffic-control-daemon proxy bridge is required.
+ */
+export function resolveProxyCommand(task: QueuedAnsibleTask): string | undefined {
+  if (task.connection?.proxyCommand) {
+    return task.connection.proxyCommand;
+  }
+
+  const isTailscale =
+    task.connection?.plugin === 'connection/tailscale' ||
+    (task.targetHostRoute && (task.targetHostRoute.includes('.ts.net') || task.targetHostRoute.startsWith('100.')));
+
+  if (isTailscale && !isSystemTailscaledActive()) {
+    // Find daemon binary location
+    const candidates = [
+      '/tmp/air-traffic-control-daemon',
+      path.resolve(process.cwd(), 'backend-go/air-traffic-control-daemon'),
+      '/usr/local/bin/air-traffic-control-daemon',
+    ];
+    for (const c of candidates) {
+      if (fs.existsSync(c)) {
+        return `${c} proxy %h %p`;
+      }
+    }
+    return 'air-traffic-control-daemon proxy %h %p';
+  }
+
+  return undefined;
+}
+
+/**
+ * Generates an ephemeral per-task Ansible inventory JSON content using the task's connection block.
+ */
+export function generateTaskInventory(task: QueuedAnsibleTask): string {
+  const hostName = task.targetNodeName || task.targetNodeId || 'target';
+  const conn = task.connection || {};
+
+  const hostRoute = conn.host || task.targetHostRoute || 'localhost';
+  const user = conn.user || task.targetSshUser || 'core';
+  const port = conn.port || task.targetSshPort || 22;
+
+  const hostvars: Record<string, any> = {
+    ansible_host: hostRoute,
+    ansible_user: user,
+    ansible_port: port,
+  };
+
+  if (conn.plugin) {
+    if (conn.plugin === 'connection/local') {
+      hostvars.ansible_connection = 'local';
+    } else if (conn.plugin === 'connection/winrm') {
+      hostvars.ansible_connection = 'winrm';
+    } else if (conn.plugin === 'connection/ssh' || conn.plugin === 'connection/tailscale') {
+      hostvars.ansible_connection = 'ssh';
+    }
+  }
+
+  const becomeMethod = conn.becomeMethod || task.becomeMethod;
+  if (becomeMethod) {
+    hostvars.ansible_become_method = becomeMethod;
+  }
+
+  const proxyCmd = resolveProxyCommand(task);
+  if (proxyCmd) {
+    hostvars.ansible_ssh_common_args = `-o ProxyCommand="${proxyCmd}"`;
+  }
+
+  if (conn.extraArgs && Array.isArray(conn.extraArgs) && conn.extraArgs.length > 0) {
+    hostvars.ansible_ssh_extra_args = conn.extraArgs.join(' ');
+  }
+
+  const inventoryData = {
+    _meta: {
+      hostvars: {
+        [hostName]: hostvars,
+      },
+    },
+    all: {
+      hosts: [hostName],
+    },
+  };
+
+  return JSON.stringify(inventoryData, null, 2);
+}
+
+/**
  * Compiles a QueuedAnsibleTask into an on-the-fly runnable Ansible Playbook in YAML format.
  */
 export function compileOnTheFlyPlaybook(task: QueuedAnsibleTask): string {
+  const conn = task.connection || {};
+  const host = conn.host || task.targetHostRoute || '127.0.0.1';
+  const user = conn.user || task.targetSshUser || 'core';
+  const port = conn.port || task.targetSshPort || 22;
+  const becomeMethod = conn.becomeMethod || task.becomeMethod || 'run0';
+
   const lines: string[] = [
     '---',
     `- name: ${JSON.stringify(task.title)}`,
     '  hosts: all',
     '  gather_facts: false',
     '  vars:',
-    `    ansible_host: ${JSON.stringify(task.targetHostRoute)}`,
-    `    ansible_user: ${JSON.stringify(task.targetSshUser)}`,
-    `    ansible_port: ${task.targetSshPort}`,
-    `  become: ${task.become ? 'true' : 'false'}`,
-    `  become_method: ${task.becomeMethod}`,
-    '  tasks:',
+    `    ansible_host: ${JSON.stringify(host)}`,
+    `    ansible_user: ${JSON.stringify(user)}`,
+    `    ansible_port: ${port}`,
   ];
+
+  if (conn.plugin === 'connection/local') {
+    lines.push('    ansible_connection: "local"');
+  } else if (conn.plugin === 'connection/winrm') {
+    lines.push('    ansible_connection: "winrm"');
+  }
+
+  const proxyCmd = resolveProxyCommand(task);
+  if (proxyCmd) {
+    lines.push(`    ansible_ssh_common_args: ${JSON.stringify(`-o ProxyCommand="${proxyCmd}"`)}`);
+  }
+
+  lines.push(`  become: ${task.become ? 'true' : 'false'}`);
+  lines.push(`  become_method: ${becomeMethod}`);
+  lines.push('  tasks:');
 
   for (const step of task.steps) {
     lines.push(`    - name: ${JSON.stringify(step.name)}`);

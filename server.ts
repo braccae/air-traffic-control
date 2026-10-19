@@ -2203,6 +2203,130 @@ app.post('/api/queue/execute', async (req, res) => {
   });
 });
 
+// -------------------------------------------------------------
+// Go Daemon Plugin Framework Proxy Endpoints
+// -------------------------------------------------------------
+const GO_DAEMON_BASE_URL = process.env.GO_BACKEND_URL || 'http://127.0.0.1:18090';
+
+async function proxyToGoDaemon(
+  targetPath: string,
+  method = 'GET',
+  body?: any,
+  timeoutMs = 5000
+): Promise<{ ok: boolean; status: number; data?: any; error?: string }> {
+  const url = `${GO_DAEMON_BASE_URL}${targetPath}`;
+  try {
+    const opts: RequestInit = {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    };
+    if (body && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+      opts.body = JSON.stringify(body);
+    }
+    const resp = await fetch(url, opts);
+    const contentType = resp.headers.get('content-type') || '';
+    let data: any;
+    if (contentType.includes('application/json')) {
+      data = await resp.json();
+    } else {
+      data = await resp.text();
+    }
+
+    if (!resp.ok) {
+      return {
+        ok: false,
+        status: resp.status,
+        error: typeof data === 'string' ? data : data?.error || `Daemon returned status ${resp.status}`,
+      };
+    }
+    return { ok: true, status: resp.status, data };
+  } catch (err: any) {
+    return {
+      ok: false,
+      status: 502,
+      error: `air-traffic-control-daemon unreachable at ${GO_DAEMON_BASE_URL}: ${err?.message || String(err)}`,
+    };
+  }
+}
+
+app.get('/api/plugins', async (_req, res) => {
+  const result = await proxyToGoDaemon('/api/plugins', 'GET');
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+  res.json(result.data);
+});
+
+app.get('/api/nodes/:id/plugins', async (req, res) => {
+  const { id } = req.params;
+  const result = await proxyToGoDaemon(`/api/nodes/${encodeURIComponent(id)}/plugins`, 'GET');
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+  res.json(result.data);
+});
+
+app.get('/api/nodes/:id/modules', async (req, res) => {
+  const { id } = req.params;
+  const result = await proxyToGoDaemon(`/api/nodes/${encodeURIComponent(id)}/modules`, 'GET');
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+  res.json(result.data);
+});
+
+app.get('/api/nodes/:id/plugins/:kind/:name', async (req, res) => {
+  const { id, kind, name } = req.params;
+  const result = await proxyToGoDaemon(
+    `/api/nodes/${encodeURIComponent(id)}/plugins/${encodeURIComponent(kind)}/${encodeURIComponent(name)}`,
+    'GET'
+  );
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+  res.json(result.data);
+});
+
+app.post('/api/nodes/:id/plugins/:kind/:name/actions/:action', async (req, res) => {
+  const { id, kind, name, action } = req.params;
+  const targetNode = findNode(id);
+  const result = await proxyToGoDaemon(
+    `/api/nodes/${encodeURIComponent(id)}/plugins/${encodeURIComponent(kind)}/${encodeURIComponent(name)}/actions/${encodeURIComponent(action)}`,
+    'POST',
+    req.body
+  );
+
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+
+  // Invalidate node cache upon action compilation/execution
+  hostCache.invalidateHostSections(targetNode.id);
+
+  // Return the compiled task or result
+  res.json(result.data);
+});
+
+app.post('/api/nodes/:id/plugins/refresh', async (req, res) => {
+  const { id } = req.params;
+  const targetNode = findNode(id);
+  const result = await proxyToGoDaemon(`/api/nodes/${encodeURIComponent(id)}/plugins/refresh`, 'POST', req.body);
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+  hostCache.invalidateHostSections(targetNode.id);
+  res.json(result.data);
+});
+
 app.post('/api/restic/snapshot', async (req, res) => {
   const targetNode = findNode(req.body?.host || 'likes-it-cold');
   const snapshotTask: GlobalTaskItem = {

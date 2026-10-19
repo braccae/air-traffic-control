@@ -8,7 +8,7 @@ import {
   compilePackageTask,
   compileOnTheFlyPlaybook,
 } from './ansibleQueueCompiler.ts';
-import type { NodeItem } from '../types/index.ts';
+import type { NodeItem, QueuedAnsibleTask } from '../types/index.ts';
 
 function expect<T>(actual: T) {
   return {
@@ -177,5 +177,44 @@ describe('ansibleQueueCompiler', () => {
 
     const packageTask = compilePackageTask(nodeWithDisplayName, 'git', 'present');
     expect(packageTask.targetNodeName).toBe('dev-pc');
+  });
+
+  it('compiles playbook honoring connection block with local and winrm plugins', () => {
+    const localTask: QueuedAnsibleTask = {
+      id: 'task-local',
+      title: 'Local task',
+      targetNodeId: 'localhost',
+      targetNodeName: 'localhost',
+      category: 'system',
+      primaryModule: 'ansible.builtin.command',
+      steps: [{ name: 'test', module: 'ansible.builtin.command', parameters: { cmd: 'hostname' } }],
+      become: false,
+      status: 'staged',
+      createdAt: Date.now(),
+      connection: {
+        plugin: 'connection/local',
+        host: 'localhost',
+        user: 'root',
+        port: 0,
+      },
+    };
+
+    const yaml = compileOnTheFlyPlaybook(localTask);
+    expect(yaml).toContain('ansible_connection: "local"');
+    expect(yaml).toContain('ansible_host: "localhost"');
+
+    const winrmTask: QueuedAnsibleTask = {
+      ...localTask,
+      id: 'task-winrm',
+      connection: {
+        plugin: 'connection/winrm',
+        host: '192.168.1.200',
+        user: 'Administrator',
+        port: 5986,
+      },
+    };
+    const winrmYaml = compileOnTheFlyPlaybook(winrmTask);
+    expect(winrmYaml).toContain('ansible_connection: "winrm"');
+    expect(winrmYaml).toContain('ansible_host: "192.168.1.200"');
   });
 });

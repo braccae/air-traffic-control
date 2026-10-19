@@ -212,7 +212,7 @@ export const ConnectNetworkModal: React.FC<ConnectNetworkModalProps> = ({
     setStaging(true);
     try {
       const driver = getDriver('network', resolvedNode) || networkDriver;
-      const task = driver.compileMutation(resolvedNode, 'connect_interface', {
+      const task = await driver.compileMutation(resolvedNode, 'connect_interface', {
         type: networkType,
         name: interfaceName.trim(),
         parent: parentInterface.trim() || undefined,

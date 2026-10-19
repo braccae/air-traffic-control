@@ -173,7 +173,7 @@ export const ShareEditorModal: React.FC<ShareEditorModalProps> = ({
     setStaging(true);
     try {
       const driver = getDriver('storage', node) || storageDriver;
-      const task =
+      const task = await (
         shareType === 'smb'
           ? driver.compileMutation(node, 'smb', {
               name: name.trim(),
@@ -188,7 +188,8 @@ export const ShareEditorModal: React.FC<ShareEditorModalProps> = ({
               path: trimmedPath,
               client: nfsClient.trim() || '*',
               options: nfsOptions.trim() || undefined,
-            });
+            })
+      );
 
       const res = await stageTaskInQueue(task);
       if (res.success) {

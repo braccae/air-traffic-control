@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { QueuedAnsibleTask } from '../types/index.ts';
-import { compileOnTheFlyPlaybook } from './ansibleQueueCompiler.ts';
+import { compileOnTheFlyPlaybook, generateTaskInventory } from './ansibleQueueCompiler.ts';
 
 export interface QueueExecutionResult {
   success: boolean;
@@ -249,13 +249,13 @@ export function enqueueTask(task: QueuedAnsibleTask): QueuedAnsibleTask {
     normalizedTask.title,
     normalizedTask.targetNodeId,
     normalizedTask.targetNodeName,
-    normalizedTask.targetHostRoute,
-    normalizedTask.targetSshUser,
-    normalizedTask.targetSshPort,
+    normalizedTask.targetHostRoute || '',
+    normalizedTask.targetSshUser || 'core',
+    normalizedTask.targetSshPort || 22,
     normalizedTask.category,
     normalizedTask.primaryModule,
     normalizedTask.become ? 1 : 0,
-    normalizedTask.becomeMethod,
+    normalizedTask.becomeMethod || 'run0',
     normalizedTask.status,
     normalizedTask.createdAt,
     JSON.stringify(normalizedTask),
@@ -344,14 +344,27 @@ export async function executeQueueTaskOneByOne(
   const playbookYaml = compileOnTheFlyPlaybook(task);
   fs.writeFileSync(ephemeralFile, playbookYaml, 'utf-8');
 
+  let ephemeralInventoryFile: string | null = null;
+
   try {
     let invPath = inventoryPath;
     if (!invPath) {
-      const defaultInventory = path.resolve(cwd, 'inventory/tailscale_inventory.py');
-      if (fs.existsSync(defaultInventory)) {
-        invPath = defaultInventory;
+      if (task.connection) {
+        // Generate temporary per-task inventory from the connection block
+        const inventoryDir = path.resolve(cwd, 'ansible/inventory');
+        if (!fs.existsSync(inventoryDir)) {
+          fs.mkdirSync(inventoryDir, { recursive: true });
+        }
+        ephemeralInventoryFile = path.join(inventoryDir, `.inv-${safeId}.json`);
+        fs.writeFileSync(ephemeralInventoryFile, generateTaskInventory(task), 'utf-8');
+        invPath = ephemeralInventoryFile;
       } else {
-        invPath = `${task.targetHostRoute},`;
+        const defaultInventory = path.resolve(cwd, 'inventory/tailscale_inventory.py');
+        if (fs.existsSync(defaultInventory)) {
+          invPath = defaultInventory;
+        } else {
+          invPath = `${task.targetHostRoute},`;
+        }
       }
     }
 
@@ -490,6 +503,13 @@ export async function executeQueueTaskOneByOne(
     try {
       if (fs.existsSync(ephemeralFile)) {
         fs.unlinkSync(ephemeralFile);
+      }
+    } catch {
+      // Ignore cleanup error
+    }
+    try {
+      if (ephemeralInventoryFile && fs.existsSync(ephemeralInventoryFile)) {
+        fs.unlinkSync(ephemeralInventoryFile);
       }
     } catch {
       // Ignore cleanup error

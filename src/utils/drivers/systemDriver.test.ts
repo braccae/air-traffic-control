@@ -4,17 +4,16 @@ import type { NodeItem } from '../../types/index.ts';
 import {
   registerDriver,
   getDriver,
+  getAllDrivers,
   systemDriver,
   storageDriver,
   networkDriver,
+  compileDaemonPluginMutation,
   type MutationDriver,
 } from './index.ts';
-import { SystemDriver } from './systemDriver.ts';
-import { StorageDriver } from './storageDriver.ts';
-import { NetworkDriver } from './networkDriver.ts';
 
-const systemdNode: NodeItem = {
-  id: 'node-systemd',
+const testNode: NodeItem = {
+  id: 'node-fedora',
   name: 'fedora-server',
   shortName: 'fedora-srv',
   group: 'infra',
@@ -47,91 +46,28 @@ const systemdNode: NodeItem = {
   privilegeMethod: 'run0',
 };
 
-const openrcNode: NodeItem = {
-  id: 'node-alpine',
-  name: 'alpine-gateway',
-  shortName: 'alpine-gw',
-  group: 'network',
-  datacenter: 'dc1',
-  nodeType: 'linux',
-  ip: '192.168.1.1',
-  port: 22,
-  sshUser: 'root',
-  tailscaleIp: '100.64.0.2',
-  tailscaleHost: 'alpine-gw.ts.net',
-  osDescription: 'Alpine Linux v3.20',
-  initSystem: 'openrc',
-  status: 'online',
-  uptime: '12d 8h',
-  hasGlances: false,
-  hasCockpit: false,
-  hasPodman: false,
-  hasRestic: false,
-  specs: {
-    cpu: 'AMD GX-412TC',
-    vcpus: 4,
-    ramGiB: 4,
-    motherboard: '',
-    bios: '',
-    ipmi: '',
-    ecc: '',
-    secureBoot: '',
-    iommu: '',
-  },
-  privilegeMethod: 'doas',
-};
-
-const switchNode: NodeItem = {
-  id: 'switch-core-01',
-  name: 'core-switch-01',
-  shortName: 'c-sw01',
-  group: 'network',
-  datacenter: 'dc1',
-  nodeType: 'router_switch',
-  ip: '192.168.1.254',
-  port: 22,
-  sshUser: 'admin',
-  tailscaleIp: '100.64.0.254',
-  tailscaleHost: 'c-sw01.ts.net',
-  osDescription: 'Cisco IOS-XE 17.3',
-  status: 'online',
-  uptime: '120d',
-  hasGlances: false,
-  hasCockpit: false,
-  hasPodman: false,
-  hasRestic: false,
-  specs: {
-    cpu: 'PowerPC',
-    vcpus: 1,
-    ramGiB: 2,
-    motherboard: '',
-    bios: '',
-    ipmi: '',
-    ecc: '',
-    secureBoot: '',
-    iommu: '',
-  },
-};
-
-describe('Pluggable Driver Architecture & Registry', () => {
-  it('registers and retrieves default built-in drivers', () => {
-    const sys = getDriver('system', systemdNode);
-    assert.ok(sys, 'System driver should be resolved for systemd node');
+describe('Pluggable Driver Registry & Daemon Proxy Delegation', () => {
+  it('registers and retrieves default daemon proxy drivers', () => {
+    const sys = getDriver('system', testNode);
+    assert.ok(sys, 'System driver should be resolved for node');
     assert.strictEqual(sys?.category, 'system');
 
-    const storage = getDriver('storage', systemdNode);
-    assert.ok(storage, 'Storage driver should be resolved for systemd node');
+    const storage = getDriver('storage', testNode);
+    assert.ok(storage, 'Storage driver should be resolved for node');
     assert.strictEqual(storage?.category, 'storage');
 
-    const net = getDriver('network', systemdNode);
-    assert.ok(net, 'Network driver should be resolved for systemd node');
+    const net = getDriver('network', testNode);
+    assert.ok(net, 'Network driver should be resolved for node');
     assert.strictEqual(net?.category, 'network');
+
+    const all = getAllDrivers();
+    assert.ok(all.length >= 3);
   });
 
-  it('allows registering custom mutation drivers', () => {
+  it('allows registering custom mutation drivers with higher precedence', () => {
     const customDriver: MutationDriver = {
-      category: 'custom',
-      supports: (node: NodeItem) => node.nodeType === 'router_switch',
+      category: 'custom' as any,
+      supports: (node: NodeItem) => node.id === 'node-fedora',
       compileMutation: (node, action, payload) => ({
         id: 'task-custom-1',
         title: `Custom Action ${action} on ${node.shortName}`,
@@ -140,7 +76,7 @@ describe('Pluggable Driver Architecture & Registry', () => {
         targetHostRoute: node.ip,
         targetSshUser: node.sshUser || 'admin',
         targetSshPort: node.port || 22,
-        category: 'custom',
+        category: 'system',
         primaryModule: 'custom.module',
         steps: [{ name: action, module: 'custom.module', parameters: payload }],
         become: false,
@@ -151,149 +87,160 @@ describe('Pluggable Driver Architecture & Registry', () => {
     };
 
     registerDriver(customDriver);
-    const resolved = getDriver('custom', switchNode);
+    const resolved = getDriver('custom' as any, testNode);
     assert.ok(resolved);
     assert.strictEqual(resolved?.category, 'custom');
-    assert.strictEqual(resolved?.supports(switchNode), true);
-  });
-});
-
-describe('SystemDriver', () => {
-  it('uses ansible.builtin.systemd for standard systemd nodes', () => {
-    const driver = new SystemDriver();
-    assert.strictEqual(driver.supports(systemdNode), true);
-
-    const task = driver.compileMutation(systemdNode, 'restart', {
-      service: 'podman.service',
-    });
-
-    assert.strictEqual(task.category, 'system');
-    assert.strictEqual(task.primaryModule, 'ansible.builtin.systemd');
-    assert.strictEqual(task.steps.length, 1);
-    assert.strictEqual(task.steps[0].module, 'ansible.builtin.systemd');
-    assert.strictEqual(task.steps[0].parameters.name, 'podman.service');
-    assert.strictEqual(task.steps[0].parameters.state, 'restarted');
-    assert.strictEqual(task.become, true);
-    assert.strictEqual(task.becomeMethod, 'run0');
   });
 
-  it('falls back to ansible.builtin.service for non-systemd (OpenRC / Alpine) nodes', () => {
-    const driver = new SystemDriver();
-    assert.strictEqual(driver.supports(openrcNode), true);
+  it('compileDaemonPluginMutation posts action to Go daemon endpoint and normalizes task', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      let interceptedUrl = '';
+      let interceptedMethod = '';
+      let interceptedBody: any = null;
 
-    const task = driver.compileMutation(openrcNode, 'restart', {
-      service: 'sshd',
-    });
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        interceptedUrl = String(input);
+        interceptedMethod = init?.method || 'GET';
+        interceptedBody = init?.body ? JSON.parse(String(init.body)) : null;
 
-    assert.strictEqual(task.category, 'system');
-    assert.strictEqual(task.primaryModule, 'ansible.builtin.service');
-    assert.strictEqual(task.steps.length, 1);
-    assert.strictEqual(task.steps[0].module, 'ansible.builtin.service');
-    assert.strictEqual(task.steps[0].parameters.name, 'sshd');
-    assert.strictEqual(task.steps[0].parameters.state, 'restarted');
-    assert.strictEqual(task.become, true);
-    assert.strictEqual(task.becomeMethod, 'doas');
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            name: 'Reboot node fedora-srv',
+            steps: [
+              {
+                name: 'Reboot system',
+                module: 'ansible.builtin.reboot',
+                params: { reboot_timeout: 300, msg: 'Safety reboot from Cockpit' },
+              },
+            ],
+            secretsMasked: {},
+          }),
+        } as any;
+      }) as any;
+
+      const task = await compileDaemonPluginMutation(testNode, 'system', 'service', 'reboot', {
+        timeout: 300,
+        msg: 'Safety reboot from Cockpit',
+      });
+
+      assert.strictEqual(
+        interceptedUrl,
+        `/api/nodes/${encodeURIComponent(testNode.id)}/plugins/system/service/actions/reboot`
+      );
+      assert.strictEqual(interceptedMethod, 'POST');
+      assert.strictEqual(interceptedBody?.options?.timeout, 300);
+
+      assert.strictEqual(task.targetNodeId, 'node-fedora');
+      assert.strictEqual(task.targetNodeName, 'fedora-srv');
+      assert.strictEqual(task.category, 'system');
+      assert.strictEqual(task.primaryModule, 'ansible.builtin.reboot');
+      assert.strictEqual(task.steps.length, 1);
+      assert.strictEqual(task.steps[0].module, 'ansible.builtin.reboot');
+      assert.strictEqual(task.steps[0].parameters.reboot_timeout, 300);
+      assert.strictEqual(task.connection?.plugin, 'connection/tailscale');
+      assert.strictEqual(task.status, 'staged');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
-  it('compiles system reboot mutation using ansible.builtin.reboot', () => {
-    const driver = new SystemDriver();
-    const task = driver.compileMutation(systemdNode, 'reboot', {
-      timeout: 600,
-      message: 'Scheduled kernel update reboot',
-    });
+  it('fails loudly when Go daemon endpoint returns an error without mock fallback', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => ({
+        ok: false,
+        status: 500,
+        json: async () => ({ error: 'action failed in daemon plugin' }),
+      })) as any;
 
-    assert.strictEqual(task.category, 'system');
-    assert.strictEqual(task.primaryModule, 'ansible.builtin.reboot');
-    assert.strictEqual(task.steps.length, 1);
-    assert.strictEqual(task.steps[0].module, 'ansible.builtin.reboot');
-    assert.strictEqual(task.steps[0].parameters.reboot_timeout, 600);
-    assert.strictEqual(task.steps[0].parameters.msg, 'Scheduled kernel update reboot');
-    assert.strictEqual(task.become, true);
-    assert.strictEqual(task.status, 'staged');
-  });
-});
-
-describe('StorageDriver', () => {
-  it('compiles SMB share creation with secret masking', () => {
-    const driver = new StorageDriver();
-    assert.strictEqual(driver.supports(systemdNode), true);
-
-    const task = driver.compileMutation(systemdNode, 'smb', {
-      name: 'backups',
-      path: '/tank/backups',
-      users: ['core', 'admin'],
-      passwordVaultKey: 'vault_smb_secret',
-    });
-
-    assert.strictEqual(task.category, 'storage');
-    assert.strictEqual(task.primaryModule, 'ansible.builtin.template');
-    assert.ok(task.secretsMasked);
-    assert.strictEqual(
-      task.secretsMasked?.smb_password,
-      '•••••••• (vault: vault_smb_secret)'
-    );
-    assert.strictEqual(task.steps[0].parameters.share_path, '/tank/backups');
+      await assert.rejects(
+        async () => {
+          await compileDaemonPluginMutation(testNode, 'system', 'service', 'restart', { service: 'nginx' });
+        },
+        /Daemon failed to compile action restart/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
-  it('compiles NFS share export mutation', () => {
-    const driver = new StorageDriver();
-    const task = driver.compileMutation(systemdNode, 'nfs', {
-      name: 'nfs-media',
-      path: '/tank/media',
-      client: '192.168.1.0/24',
-      options: 'rw,sync,no_subtree_check',
-    });
+  it('systemDriver delegates to compileDaemonPluginMutation', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      let calledUrl = '';
+      globalThis.fetch = (async (input: any) => {
+        calledUrl = String(input);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            name: 'Restart service podman',
+            steps: [{ name: 'restart podman', module: 'ansible.builtin.systemd', params: { name: 'podman', state: 'restarted' } }],
+          }),
+        } as any;
+      }) as any;
 
-    assert.strictEqual(task.category, 'storage');
-    assert.ok(task.steps.length >= 1);
-    assert.strictEqual(task.steps[0].module, 'ansible.builtin.lineinfile');
-    assert.strictEqual(task.steps[0].parameters.path, '/etc/exports');
-  });
-});
-
-describe('NetworkDriver', () => {
-  it('compiles Linux firewall rules using ansible.posix.firewalld', () => {
-    const driver = new NetworkDriver();
-    assert.strictEqual(driver.supports(systemdNode), true);
-
-    const task = driver.compileMutation(systemdNode, 'firewall', {
-      port: '8080',
-      proto: 'tcp',
-      zone: 'public',
-    });
-
-    assert.strictEqual(task.category, 'network');
-    assert.strictEqual(task.primaryModule, 'ansible.posix.firewalld');
-    assert.strictEqual(task.steps[0].parameters.port, '8080/tcp');
-    assert.strictEqual(task.steps[0].parameters.zone, 'public');
+      const task = await systemDriver.compileMutation(testNode, 'restart', { service: 'podman' });
+      assert.strictEqual(calledUrl, `/api/nodes/${encodeURIComponent(testNode.id)}/plugins/system/service/actions/restart`);
+      assert.strictEqual(task.steps[0].parameters.name, 'podman');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
-  it('compiles network interface configuration', () => {
-    const driver = new NetworkDriver();
-    const task = driver.compileMutation(systemdNode, 'connect_interface', {
-      name: 'wg0',
-      type: 'wireguard',
-      cidr: '10.0.0.1/24',
-    });
+  it('storageDriver delegates SMB and NFS actions to Go daemon share plugins', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      const urls: string[] = [];
+      globalThis.fetch = (async (input: any) => {
+        urls.push(String(input));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            name: 'Share action',
+            steps: [{ name: 'step', module: 'ansible.builtin.template', params: {} }],
+          }),
+        } as any;
+      }) as any;
 
-    assert.strictEqual(task.category, 'network');
-    assert.ok(task.steps.length >= 1);
-    assert.strictEqual(task.steps[0].parameters.interface, 'wg0');
+      await storageDriver.compileMutation(testNode, 'smb', { name: 'backups', path: '/tank/backups' });
+      await storageDriver.compileMutation(testNode, 'nfs', { path: '/tank/nfs', client: '*' });
+
+      assert.strictEqual(urls[0], `/api/nodes/${encodeURIComponent(testNode.id)}/plugins/share/smb/actions/create`);
+      assert.strictEqual(urls[1], `/api/nodes/${encodeURIComponent(testNode.id)}/plugins/share/nfs/actions/export`);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
-  it('supports network switch nodes with switch configuration modules', () => {
-    const driver = new NetworkDriver();
-    assert.strictEqual(driver.supports(switchNode), true);
+  it('networkDriver delegates interface and firewall actions to Go daemon', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      const urls: string[] = [];
+      globalThis.fetch = (async (input: any) => {
+        urls.push(String(input));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            name: 'Network action',
+            steps: [{ name: 'step', module: 'ansible.posix.firewalld', params: {} }],
+          }),
+        } as any;
+      }) as any;
 
-    const task = driver.compileMutation(switchNode, 'interface', {
-      name: 'GigabitEthernet0/1',
-      description: 'Uplink to Core Router',
-      vlanId: 10,
-    });
+      await networkDriver.compileMutation(testNode, 'connect_interface', { name: 'wg0', type: 'wireguard' });
+      await networkDriver.compileMutation(testNode, 'firewall', { port: '8080', proto: 'tcp' });
 
-    assert.strictEqual(task.category, 'network');
-    assert.strictEqual(task.primaryModule, 'cisco.ios.ios_config');
-    assert.strictEqual(task.steps[0].module, 'cisco.ios.ios_config');
+      assert.strictEqual(urls[0], `/api/nodes/${encodeURIComponent(testNode.id)}/plugins/network/interfaces/actions/configure`);
+      assert.strictEqual(urls[1], `/api/nodes/${encodeURIComponent(testNode.id)}/plugins/firewall/firewalld/actions/add_rule`);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 
@@ -301,13 +248,11 @@ describe('Ansible Galaxy Collection Security Guard', () => {
   it('validates safe collection names and rejects shell injection attempts', async () => {
     const { isValidCollectionName } = await import('./index.ts');
 
-    // Valid collection names
     assert.strictEqual(isValidCollectionName('ansible.posix'), true);
     assert.strictEqual(isValidCollectionName('community.general'), true);
     assert.strictEqual(isValidCollectionName('containers.podman'), true);
     assert.strictEqual(isValidCollectionName('cisco.ios'), true);
 
-    // Malicious or invalid collection names
     assert.strictEqual(isValidCollectionName('ansible.posix; rm -rf /'), false);
     assert.strictEqual(isValidCollectionName('`whoami`'), false);
     assert.strictEqual(isValidCollectionName('ansible.posix & whoami'), false);
@@ -318,4 +263,3 @@ describe('Ansible Galaxy Collection Security Guard', () => {
     assert.strictEqual(isValidCollectionName(''), false);
   });
 });
-
