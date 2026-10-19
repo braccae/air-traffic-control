@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"time"
 
+	"air-traffic-control/backend/cmd/proxy"
 	"air-traffic-control/backend/pkg/glances"
 	"air-traffic-control/backend/pkg/podman"
 	"air-traffic-control/backend/pkg/restic"
@@ -17,6 +18,9 @@ import (
 	"air-traffic-control/backend/pkg/tailscale"
 	"air-traffic-control/backend/pkg/types"
 	"air-traffic-control/backend/pkg/websocket"
+	_ "air-traffic-control/backend/plugins/connection/local"
+	_ "air-traffic-control/backend/plugins/connection/ssh"
+	_ "air-traffic-control/backend/plugins/connection/tailscale"
 )
 
 type sshWithLocalFallbackRunner struct {
@@ -274,6 +278,14 @@ func readProcLoadAvg() (float64, error) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "proxy" {
+		if err := proxy.Run(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "proxy error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	port := flag.Int("port", 8080, "HTTP and WebSocket server port")
 	flag.Parse()
 
