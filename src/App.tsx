@@ -15,6 +15,7 @@ import { GlobalTasksExecutionLog } from './components/GlobalTasksExecutionLog.ts
 import { NetworkInterfacesView } from './components/NetworkInterfacesView.tsx';
 import { FirewallView } from './components/FirewallView.tsx';
 import { ZfsManagementView } from './components/ZfsManagementView.tsx';
+import type { StorageEngineType } from './utils/zfsParser.ts';
 import { NetworkSharesView } from './components/NetworkSharesView.tsx';
 import { DisksSmartView } from './components/DisksSmartView.tsx';
 import { SystemLogsView } from './components/SystemLogsView.tsx';
@@ -422,6 +423,7 @@ export default function App() {
 
   const [telemetry, setTelemetry] = useState<TelemetryData>(initialTelemetry);
   const [tasks, setTasks] = useState<GlobalTaskItem[]>(initialTasks);
+  const [nodeStorageEngines, setNodeStorageEngines] = useState<Record<string, StorageEngineType>>({});
 
   // Theme state: system | macchiato | latte with OS auto-preference (Task 8)
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>(() => getStoredTheme());
@@ -1232,6 +1234,7 @@ export default function App() {
                 <CockpitSubSidebar
                   node={selectedNode}
                   activeItem={activeCockpitItem}
+                  storageEngine={nodeStorageEngines[selectedNode.id]}
                   onSelectItem={item => {
                     setActiveCockpitItem(item);
                     setActiveOpTab(item);
@@ -1264,8 +1267,13 @@ export default function App() {
                   <FirewallView node={selectedNode} />
                 )}
 
-                {activeOpTab === 'zfs' && (
-                  <ZfsManagementView node={selectedNode} />
+                {(activeOpTab === 'zfs' || activeCockpitItem === 'zfs' || activeOpTab === 'storage' || activeCockpitItem === 'storage') && (
+                  <ZfsManagementView
+                    node={selectedNode}
+                    onEngineDetected={engine => {
+                      setNodeStorageEngines(prev => ({ ...prev, [selectedNode.id]: engine }));
+                    }}
+                  />
                 )}
 
                 {activeOpTab === 'shares' && (

@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../types/index.ts';
+import { detectStorageEngine, type StorageEngineType } from '../utils/zfsParser.ts';
 
 interface CockpitSubSidebarProps {
   node: NodeItem;
@@ -7,6 +8,7 @@ interface CockpitSubSidebarProps {
   onSelectItem: (item: string) => void;
   onEditNode?: () => void;
   className?: string;
+  storageEngine?: StorageEngineType | 'standard';
 }
 
 export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
@@ -15,7 +17,48 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
   onSelectItem,
   onEditNode,
   className = '',
+  storageEngine,
 }) => {
+  const [internalEngine, setInternalEngine] = useState<StorageEngineType | null>(null);
+
+  useEffect(() => {
+    if (storageEngine) return;
+    let active = true;
+    fetch(`/api/nodes/${encodeURIComponent(node.id)}/storage`)
+      .then(res => res.json())
+      .then(data => {
+        if (!active || !data.success) return;
+        const det = detectStorageEngine(data.zpoolList, data.btrfs, data.findmnt);
+        setInternalEngine(det);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [node.id, storageEngine]);
+
+  const effectiveEngine = storageEngine || internalEngine || 'zfs';
+
+  const getStorageLabel = () => {
+    if (effectiveEngine === 'zfs') return 'ZFS Pools';
+    if (effectiveEngine === 'btrfs') return 'Btrfs & Storage';
+    if (effectiveEngine === 'lvm_ext') return 'LVM / Storage';
+    return 'Btrfs & Storage';
+  };
+
+  const getStorageBadge = () => {
+    if (effectiveEngine === 'zfs') return 'ONLINE';
+    if (effectiveEngine === 'btrfs') return 'BTRFS';
+    if (effectiveEngine === 'lvm_ext') return 'LVM/EXT';
+    return 'NATIVE';
+  };
+
+  const getStorageIcon = () => {
+    if (effectiveEngine === 'zfs') return 'inventory_2';
+    if (effectiveEngine === 'btrfs') return 'folder_managed';
+    return 'storage';
+  };
+
   return (
     <aside className={`flex flex-col gap-2 w-full scrollbar-thin ${className}`.trim()}>
       {/* Cockpit Tree Groupings */}
@@ -102,16 +145,16 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
               type="button"
               onClick={() => onSelectItem('zfs')}
               className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
-                activeItem === 'zfs'
+                activeItem === 'zfs' || activeItem === 'storage'
                   ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
                   : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
               }`}
             >
               <span className="flex items-center gap-1.5">
-                <span className="material-symbols-outlined text-[14px]">inventory_2</span>
-                <span>ZFS Pools</span>
+                <span className="material-symbols-outlined text-[14px]">{getStorageIcon()}</span>
+                <span>{getStorageLabel()}</span>
               </span>
-              <span className="font-mono text-[10px] text-[#8cd6cb]">ONLINE</span>
+              <span className="font-mono text-[10px] text-[#8cd6cb]">{getStorageBadge()}</span>
             </button>
 
             <button

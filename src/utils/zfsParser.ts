@@ -456,3 +456,248 @@ export function parseZfsDatasets(raw?: string): ZfsDatasetItem[] {
 
   return datasets;
 }
+
+export interface StorageMountItem {
+  target: string;
+  source: string;
+  fstype: string;
+  size?: string;
+  used?: string;
+  avail?: string;
+  options?: string;
+}
+
+export interface BtrfsDevice {
+  devid: string;
+  size?: string;
+  used?: string;
+  path: string;
+}
+
+export interface BtrfsFilesystem {
+  label: string;
+  uuid: string;
+  totalDevices: number;
+  fsBytesUsed?: string;
+  devices: BtrfsDevice[];
+  mountpoints?: string[];
+}
+
+export type StorageEngineType = 'zfs' | 'btrfs' | 'lvm_ext' | 'none';
+
+export function parseStorageMounts(raw?: string): StorageMountItem[] {
+  if (!raw || typeof raw !== 'string') return [];
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === 'NO_FINDMNT' || trimmed.includes('command not found')) {
+    return [];
+  }
+
+  // Attempt JSON parsing first (from `findmnt -J`)
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const list = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.filesystems)
+        ? parsed.filesystems
+        : [];
+
+      return list
+        .map((item: any) => ({
+          target: String(item.target || item.TARGET || ''),
+          source: String(item.source || item.SOURCE || ''),
+          fstype: String(item.fstype || item.FSTYPE || ''),
+          size: item.size || item.SIZE ? String(item.size || item.SIZE) : undefined,
+          used: item.used || item.USED ? String(item.used || item.USED) : undefined,
+          avail: item.avail || item.AVAIL ? String(item.avail || item.AVAIL) : undefined,
+          options: item.options || item.OPTIONS ? String(item.options || item.OPTIONS) : undefined,
+        }))
+        .filter((item: StorageMountItem) => item.target || item.source);
+    } catch {
+      // Fallback to text parsing
+    }
+  }
+
+  // Fallback: parse plain text findmnt table
+  const lines = trimmed.split('\n');
+  const results: StorageMountItem[] = [];
+
+  for (const line of lines) {
+    const trimmedLine = line.trim();
+    if (!trimmedLine || trimmedLine.startsWith('TARGET') || trimmedLine.startsWith('---')) continue;
+
+    const tokens = trimmedLine.split(/\s+/);
+    if (tokens.length >= 3) {
+      results.push({
+        target: tokens[0],
+        source: tokens[1],
+        fstype: tokens[2],
+        options: tokens[3],
+        size: tokens[4],
+        used: tokens[5],
+        avail: tokens[6],
+      });
+    }
+  }
+
+  return results;
+}
+
+export function parseBtrfsFilesystems(btrfsRaw?: string, findmntRaw?: string): BtrfsFilesystem[] {
+  const mounts = parseStorageMounts(findmntRaw);
+  const filesystems: BtrfsFilesystem[] = [];
+
+  if (btrfsRaw && typeof btrfsRaw === 'string') {
+    const trimmed = btrfsRaw.trim();
+    if (
+      trimmed &&
+      !trimmed.includes('NO_BTRFS') &&
+      !trimmed.includes('command not found') &&
+      !trimmed.includes('ERROR: not a btrfs filesystem')
+    ) {
+      const lines = trimmed.split('\n');
+      let currentFs: BtrfsFilesystem | null = null;
+
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine) continue;
+
+        // Label: 'data-vault' uuid: ... or Label: none uuid: ...
+        const labelMatch = trimmedLine.match(/^Label:\s*(?:'([^']*)'|"([^"]*)"|(\S+))\s+uuid:\s*([a-fA-F0-9\-]+)/);
+        if (labelMatch) {
+          if (currentFs) {
+            filesystems.push(currentFs);
+          }
+          currentFs = {
+            label: labelMatch[1] ?? labelMatch[2] ?? labelMatch[3] ?? 'none',
+            uuid: labelMatch[4],
+            totalDevices: 1,
+            devices: [],
+            mountpoints: [],
+          };
+          continue;
+        }
+
+        if (!currentFs) continue;
+
+        // Total devices 2 FS bytes used 609.81GiB
+        const devTotalMatch = trimmedLine.match(/Total devices\s+(\d+)(?:\s+FS bytes used\s+(\S+))?/i);
+        if (devTotalMatch) {
+          currentFs.totalDevices = parseInt(devTotalMatch[1], 10);
+          if (devTotalMatch[2]) {
+            currentFs.fsBytesUsed = devTotalMatch[2];
+          }
+          continue;
+        }
+
+        // devid 1 size 1.00TiB used 400.00GiB path /dev/sdb1
+        const devMatch = trimmedLine.match(/devid\s+(\d+)\s+size\s+(\S+)\s+used\s+(\S+)\s+path\s+(\S+)/);
+        if (devMatch) {
+          currentFs.devices.push({
+            devid: devMatch[1],
+            size: devMatch[2],
+            used: devMatch[3],
+            path: devMatch[4],
+          });
+          continue;
+        }
+      }
+
+      if (currentFs) {
+        filesystems.push(currentFs);
+      }
+    }
+  }
+
+  // Associate mountpoints from findmnt with parsed filesystems
+  if (filesystems.length > 0 && mounts.length > 0) {
+    for (const fs of filesystems) {
+      const matchedMounts = mounts.filter(m => {
+        if (m.fstype !== 'btrfs') return false;
+        // Matches if source starts with device path (e.g. /dev/sdb1[/@data])
+        if (fs.devices.some(d => m.source.startsWith(d.path))) return true;
+        // If single btrfs filesystem exists, any btrfs mount belongs to it
+        if (filesystems.length === 1) return true;
+        // Check uuid/label in source
+        if (fs.label !== 'none' && m.source.includes(fs.label)) return true;
+        if (m.source.includes(fs.uuid)) return true;
+        return false;
+      });
+
+      const uniqueMounts = Array.from(new Set(matchedMounts.map(m => m.target)));
+      fs.mountpoints = uniqueMounts;
+    }
+    return filesystems;
+  }
+
+  if (filesystems.length > 0) {
+    return filesystems;
+  }
+
+  // Fallback: If btrfs command gave nothing (e.g. unprivileged user), derive from findmnt if btrfs mounts exist
+  const btrfsMounts = mounts.filter(m => m.fstype === 'btrfs');
+  if (btrfsMounts.length > 0) {
+    const deviceGroups = new Map<string, string[]>();
+    for (const m of btrfsMounts) {
+      const baseDev = m.source.replace(/\[.*\]$/, '');
+      const list = deviceGroups.get(baseDev) || [];
+      if (!list.includes(m.target)) {
+        list.push(m.target);
+      }
+      deviceGroups.set(baseDev, list);
+    }
+
+    const derived: BtrfsFilesystem[] = [];
+    let idx = 1;
+    for (const [devPath, mountList] of deviceGroups.entries()) {
+      derived.push({
+        label: 'none',
+        uuid: `derived-btrfs-${idx++}`,
+        totalDevices: 1,
+        devices: [
+          {
+            devid: '1',
+            path: devPath,
+          },
+        ],
+        mountpoints: mountList,
+      });
+    }
+    return derived;
+  }
+
+  return [];
+}
+
+export function detectStorageEngine(
+  zpoolListRaw?: string,
+  btrfsRaw?: string,
+  findmntRaw?: string
+): StorageEngineType {
+  const pools = parseZfsPools(zpoolListRaw);
+  if (pools.length > 0) {
+    return 'zfs';
+  }
+
+  const btrfsFs = parseBtrfsFilesystems(btrfsRaw, findmntRaw);
+  if (btrfsFs.length > 0) {
+    return 'btrfs';
+  }
+
+  const mounts = parseStorageMounts(findmntRaw);
+  if (mounts.some(m => m.fstype === 'btrfs')) {
+    return 'btrfs';
+  }
+
+  const hasLvmOrExt = mounts.some(m =>
+    ['ext4', 'ext3', 'ext2', 'xfs'].includes(m.fstype) ||
+    m.source.includes('/dev/mapper/') ||
+    m.source.includes('/dev/dm-')
+  );
+  if (hasLvmOrExt) {
+    return 'lvm_ext';
+  }
+
+  return 'none';
+}
+

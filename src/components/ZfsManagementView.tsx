@@ -3,25 +3,28 @@ import type { NodeItem } from '../types/index.ts';
 import {
   parseZfsPools,
   parseZfsDatasets,
+  parseBtrfsFilesystems,
+  parseStorageMounts,
+  detectStorageEngine,
   type ZfsPoolItem,
   type ZfsDatasetItem,
+  type BtrfsFilesystem,
+  type StorageMountItem,
+  type StorageEngineType,
 } from '../utils/zfsParser.ts';
 
 interface ZfsManagementViewProps {
   node: NodeItem;
+  onEngineDetected?: (engine: StorageEngineType) => void;
 }
 
-export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node }) => {
+export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node, onEngineDetected }) => {
   const [loading, setLoading] = useState(false);
   const [pools, setPools] = useState<ZfsPoolItem[]>([]);
   const [datasets, setDatasets] = useState<ZfsDatasetItem[]>([]);
-  const [btrfsSubvols, setBtrfsSubvols] = useState<Array<{
-    name: string;
-    path: string;
-    device: string;
-    fstype: string;
-    size: string;
-  }>>([]);
+  const [btrfsFilesystems, setBtrfsFilesystems] = useState<BtrfsFilesystem[]>([]);
+  const [mounts, setMounts] = useState<StorageMountItem[]>([]);
+  const [engine, setEngine] = useState<StorageEngineType>('none');
   const [notice, setNotice] = useState<string>('');
 
   const handleScrubPool = async (poolName: string) => {
@@ -54,40 +57,30 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node }) =>
         const zpoolListOut = data.zpoolList || '';
         const zpoolStatusOut = data.zpoolStatus || '';
         const zfsOut = data.zfsList || '';
+        const btrfsOut = data.btrfs || '';
+        const findmntOut = data.findmnt || '';
 
         const parsedPools = parseZfsPools(zpoolListOut, zpoolStatusOut);
         const parsedDs = parseZfsDatasets(zfsOut);
+        const parsedBtrfs = parseBtrfsFilesystems(btrfsOut, findmntOut);
+        const parsedMounts = parseStorageMounts(findmntOut);
+        const detectedEngine = detectStorageEngine(zpoolListOut, btrfsOut, findmntOut);
 
-        const hasZfs = parsedPools.length > 0 || parsedDs.length > 0;
+        setEngine(detectedEngine);
+        onEngineDetected?.(detectedEngine);
 
-        if (hasZfs) {
+        if (detectedEngine === 'zfs') {
           setPools(parsedPools);
           setDatasets(parsedDs);
-          setBtrfsSubvols([]);
+          setBtrfsFilesystems([]);
+          setMounts([]);
           setNotice('');
         } else {
           setPools([]);
           setDatasets([]);
-
-          if (node.shortName === 'likes-it-cold') {
-            setBtrfsSubvols([
-              { name: 'large-slow_storage (media)', path: '/var/mnt/media', device: '/dev/mapper/large-slow_storage', fstype: 'btrfs (subvol=/media)', size: '3.2 TB' },
-              { name: 'large-slow_storage (scratch)', path: '/var/mnt/scratch', device: '/dev/mapper/large-slow_storage', fstype: 'btrfs (subvol=/scratch)', size: '3.2 TB' },
-              { name: 'cached-data_main (cloud)', path: '/var/pants-place-cloud', device: '/dev/mapper/cached-data_main', fstype: 'btrfs (subvol=/pants-place-cloud)', size: '2.0 TB' },
-              { name: 'nvme0n1p4 (root)', path: '/sysroot', device: '/dev/nvme0n1p4', fstype: 'xfs (ostree root)', size: '205.5 GB' },
-            ]);
-            setNotice(`Host likes-it-cold does not have active ZFS pools. Host is utilizing Btrfs subvolumes with LVM write-caching and XFS root partitions.`);
-          } else if (node.shortName === 'ping') {
-            setBtrfsSubvols([
-              { name: 'almalinux-root', path: '/', device: '/dev/mapper/almalinux-root', fstype: 'xfs (system root)', size: '70 GB' },
-              { name: 'almalinux-home', path: '/home', device: '/dev/mapper/almalinux-home', fstype: 'xfs (user storage)', size: '159.3 GB' },
-              { name: 'almalinux-swap', path: '[SWAP]', device: '/dev/mapper/almalinux-swap', fstype: 'swap space', size: '7.6 GB' },
-              { name: 'nvme0n1p2 (boot)', path: '/boot', device: '/dev/nvme0n1p2', fstype: 'xfs', size: '1.0 GB' },
-            ]);
-            setNotice(`Host ping uses standard LVM XFS filesystems on Toshiba NVMe SSD. No ZFS pools found.`);
-          } else {
-            setNotice(`Host ${node.shortName} uses standard XFS / ext4 filesystems. No ZFS pools found.`);
-          }
+          setBtrfsFilesystems(parsedBtrfs);
+          setMounts(parsedMounts);
+          setNotice('No active OpenZFS pools found on host. Displaying native Btrfs / LVM filesystems.');
         }
       })
       .catch(() => {
@@ -105,19 +98,35 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node }) =>
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#26293c]">
         <div className="flex items-center gap-2">
-          <span className="material-symbols-outlined text-[#8cd6cb] text-[22px]">inventory_2</span>
+          <span className="material-symbols-outlined text-[#8cd6cb] text-[22px]">
+            {engine === 'zfs' ? 'inventory_2' : engine === 'btrfs' ? 'folder_managed' : 'storage'}
+          </span>
           <div>
             <h3 className="font-sans text-sm text-[#dfe1fa] font-bold">
-              ZFS Pools &amp; Storage Architecture ({node.shortName})
+              {engine === 'zfs'
+                ? `ZFS Pools & Storage Architecture (${node.shortName})`
+                : engine === 'btrfs'
+                ? `Btrfs Storage Architecture (${node.shortName})`
+                : `Native Storage & Filesystems (${node.shortName})`}
             </h3>
             <p className="font-mono text-[11px] text-[#8d909b]">
-              Kernel ZFS pools, Btrfs subvolume pools, and LVM filesystem allocation
+              {engine === 'zfs'
+                ? 'Kernel OpenZFS pools, dataset hierarchies, and scrub telemetry'
+                : engine === 'btrfs'
+                ? 'Btrfs multi-device storage pools, subvolumes, and active mounts'
+                : 'Native Linux filesystems, LVM volumes, and mountpoint allocation'}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2 font-mono text-xs">
           <span className="px-2 py-0.5 bg-[#8cd6cb]/15 text-[#8cd6cb] rounded border border-[#8cd6cb]/30 font-bold">
-            {pools.length > 0 ? 'Engine: OpenZFS' : node.shortName === 'likes-it-cold' ? 'Engine: Btrfs + LVM' : 'Engine: XFS + LVM'}
+            {engine === 'zfs'
+              ? 'Engine: OpenZFS'
+              : engine === 'btrfs'
+              ? 'Engine: Btrfs'
+              : engine === 'lvm_ext'
+              ? 'Engine: LVM / XFS'
+              : 'Engine: Standard Storage'}
           </span>
           <button
             type="button"
@@ -144,7 +153,7 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node }) =>
         </div>
       )}
 
-      {/* Real ZFS Pools (the-freezer) */}
+      {/* Real ZFS Pools (when active) */}
       {pools.length > 0 && (
         <div>
           <h4 className="font-mono text-xs text-[#8d909b] font-bold uppercase pb-2">Active ZFS Storage Pools</h4>
@@ -253,41 +262,134 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node }) =>
         </div>
       )}
 
-      {/* Real Btrfs Subvolume Pools & LVM Partitions (likes-it-cold, ping) */}
-      {btrfsSubvols.length > 0 && (
-        <div>
-          <h4 className="font-mono text-xs text-[#8d909b] font-bold uppercase pb-2">
-            Active Filesystem Pools &amp; Mount Mappings
-          </h4>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-            {btrfsSubvols.map(subvol => (
-              <div key={subvol.path} className="bg-[#0a0d1f] p-3 rounded border border-[#26293c] flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-xs font-bold text-[#b0c9ff] flex items-center gap-1.5">
-                      <span className="material-symbols-outlined text-[15px] text-[#8cd6cb]">folder_managed</span>
-                      {subvol.name}
-                    </span>
-                    <span className="text-[11px] font-bold text-[#dfe1fa]">{subvol.size}</span>
-                  </div>
-                  <div className="mt-2 text-[11px] font-mono text-[#8d909b] space-y-0.5">
-                    <div className="flex justify-between">
-                      <span>Mountpoint:</span>
-                      <span className="text-[#8cd6cb] font-semibold">{subvol.path}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>Underlying Device:</span>
-                      <span className="text-[#dfe1fa]">{subvol.device}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>FSType / Subvolume:</span>
-                      <span className="text-[#ffd97d]">{subvol.fstype}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
+      {/* Native Storage & Filesystem Allocation (when no ZFS pools exist) */}
+      {pools.length === 0 && (
+        <div className="space-y-4">
+          <div className="border-b border-[#26293c] pb-2">
+            <h4 className="font-mono text-xs text-[#8d909b] font-bold uppercase">
+              Native Storage &amp; Filesystem Allocation
+            </h4>
+            <p className="font-mono text-[11px] text-[#8d909b] mt-0.5">
+              Host block storage devices, Btrfs subvolumes, and Linux filesystem mountpoints
+            </p>
           </div>
+
+          {/* Btrfs Storage Pools Cards */}
+          {btrfsFilesystems.length > 0 && (
+            <div>
+              <h5 className="font-mono text-xs text-[#b0c9ff] font-semibold pb-2 flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[15px] text-[#8cd6cb]">folder_managed</span>
+                <span>Btrfs Storage Pools ({btrfsFilesystems.length})</span>
+              </h5>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {btrfsFilesystems.map(fs => (
+                  <div key={fs.uuid} className="bg-[#0a0d1f] p-3 rounded-lg border border-[#26293c] flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono text-sm font-bold text-[#b0c9ff] flex items-center gap-1.5">
+                          <span className="material-symbols-outlined text-[16px] text-[#8cd6cb]">dns</span>
+                          {fs.label !== 'none' ? `pool: ${fs.label}` : `uuid: ${fs.uuid.slice(0, 8)}...`}
+                        </span>
+                        <span className="px-2 py-0.5 bg-[#8cd6cb]/20 text-[#8cd6cb] font-mono text-[10px] font-bold rounded border border-[#8cd6cb]/40">
+                          BTRFS
+                        </span>
+                      </div>
+                      <p className="font-mono text-[11px] text-[#8d909b] mt-0.5 truncate">
+                        UUID: {fs.uuid}
+                      </p>
+                      <div className="grid grid-cols-2 gap-2 mt-3 font-mono text-xs bg-[#171a2d] p-2 rounded border border-[#26293c]">
+                        <div>
+                          <span className="text-[#8d909b] text-[10px] block">DEVICES</span>
+                          <span className="text-[#dfe1fa] font-bold">{fs.totalDevices} device{fs.totalDevices > 1 ? 's' : ''}</span>
+                        </div>
+                        <div>
+                          <span className="text-[#8cd6cb] text-[10px] block">FS BYTES USED</span>
+                          <span className="text-[#8cd6cb] font-bold">{fs.fsBytesUsed || 'N/A'}</span>
+                        </div>
+                      </div>
+                      {/* Member devices */}
+                      {fs.devices && fs.devices.length > 0 && (
+                        <div className="mt-2.5 pt-2 border-t border-[#26293c]/60 flex flex-wrap items-center gap-1.5">
+                          <span className="text-[10px] font-mono text-[#8d909b]">Devices:</span>
+                          {fs.devices.map(dev => (
+                            <span
+                              key={dev.path}
+                              className="px-1.5 py-0.5 bg-[#171a2d] text-[10px] font-mono rounded border border-[#26293c] text-[#dfe1fa] flex items-center gap-1"
+                            >
+                              <span className="text-[#8cd6cb] font-semibold">{dev.path}</span>
+                              {dev.size && <span className="text-[#8d909b]">({dev.size})</span>}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {/* Associated Mountpoints */}
+                      {fs.mountpoints && fs.mountpoints.length > 0 && (
+                        <div className="mt-2.5 pt-2 border-t border-[#26293c]/60 flex flex-wrap items-center gap-1.5">
+                          <span className="text-[10px] font-mono text-[#8d909b]">Mounts:</span>
+                          {fs.mountpoints.map(mp => (
+                            <span
+                              key={mp}
+                              className="px-1.5 py-0.5 bg-[#26293c]/50 text-[10px] font-mono rounded text-[#b0c9ff]"
+                            >
+                              {mp}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Mounted Filesystems Table */}
+          {mounts.length > 0 && (
+            <div>
+              <h5 className="font-mono text-xs text-[#b0c9ff] font-semibold pb-1 flex items-center justify-between">
+                <span>Mounted Filesystem Allocation ({mounts.length} mounts)</span>
+              </h5>
+              <div className="overflow-x-auto font-mono text-xs rounded border border-[#26293c]">
+                <table className="w-full text-left">
+                  <thead className="bg-[#0a0d1f] text-[#8d909b] text-[10px] uppercase border-b border-[#26293c]">
+                    <tr className="h-7">
+                      <th className="px-3">Mountpoint (Target)</th>
+                      <th className="px-3">Source Device / Subvolume</th>
+                      <th className="px-3">FSType</th>
+                      <th className="px-3">Size</th>
+                      <th className="px-3">Used</th>
+                      <th className="px-3">Available</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#26293c]/60">
+                    {mounts.map(m => (
+                      <tr key={`${m.target}-${m.source}`} className="h-8 hover:bg-[#26293c]/40 transition-colors">
+                        <td className="px-3 font-semibold text-[#dfe1fa] flex items-center gap-1">
+                          <span className="material-symbols-outlined text-[13px] text-[#b0c9ff]">folder</span>
+                          {m.target}
+                        </td>
+                        <td className="px-3 text-[#b0c9ff] truncate max-w-xs" title={m.source}>{m.source}</td>
+                        <td className="px-3">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#26293c] text-[#ffd97d]">
+                            {m.fstype}
+                          </span>
+                        </td>
+                        <td className="px-3 text-[#dfe1fa]">{m.size || '-'}</td>
+                        <td className="px-3 text-[#8cd6cb] font-bold">{m.used || '-'}</td>
+                        <td className="px-3 text-[#c3c6d2]">{m.avail || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {!loading && btrfsFilesystems.length === 0 && mounts.length === 0 && (
+            <div className="bg-[#0a0d1f] p-6 rounded border border-[#26293c] text-center font-mono text-xs text-[#8d909b]">
+              No active filesystems or storage pools detected on this host.
+            </div>
+          )}
         </div>
       )}
     </section>

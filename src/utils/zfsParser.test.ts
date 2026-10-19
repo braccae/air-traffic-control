@@ -5,6 +5,9 @@ import {
   parseZpoolStatus,
   parseZfsPools,
   parseZfsDatasets,
+  parseBtrfsFilesystems,
+  parseStorageMounts,
+  detectStorageEngine,
 } from './zfsParser.ts';
 
 const SAMPLE_ZPOOL_LIST = `tank\t7.27T\t4.22T\t3.05T\t-\t-\t18%\t58%\t1.00x\tONLINE\t-
@@ -226,5 +229,145 @@ errors: No known data errors`;
 
   const replacingDevs = pool.devices.filter(d => d.role === 'replacing-0');
   assert.equal(replacingDevs.length, 2);
+});
+
+const SAMPLE_FINDMNT_JSON = JSON.stringify({
+  filesystems: [
+    {
+      target: '/',
+      source: '/dev/mapper/rootvg-rootlv',
+      fstype: 'xfs',
+      options: 'rw,relatime,attr2,inode64,logbufs=8,logbsize=32k,noquota',
+      size: '70G',
+      used: '15.4G',
+      avail: '54.6G',
+    },
+    {
+      target: '/home',
+      source: '/dev/mapper/rootvg-homelv',
+      fstype: 'xfs',
+      options: 'rw,relatime,attr2,inode64,logbufs=8,logbsize=32k,noquota',
+      size: '150G',
+      used: '42G',
+      avail: '108G',
+    },
+    {
+      target: '/mnt/btrfs-data',
+      source: '/dev/sdb1[/@data]',
+      fstype: 'btrfs',
+      options: 'rw,noatime,compress=zstd:3,subvol=/@data',
+      size: '1.8T',
+      used: '800G',
+      avail: '1.0T',
+    },
+  ],
+});
+
+const SAMPLE_BTRFS_SHOW = `Label: 'data-vault'  uuid: 4a2b9c8d-7e6f-5a4b-3c2d-1e0f9a8b7c6d
+	Total devices 2 FS bytes used 609.81GiB
+	devid    1 size 1.00TiB used 400.00GiB path /dev/sdb1
+	devid    2 size 1.00TiB used 400.00GiB path /dev/sdc1
+
+Label: none  uuid: 11223344-5566-7788-99aa-bbccddeeff00
+	Total devices 1 FS bytes used 25.10GiB
+	devid    1 size 100.00GiB used 30.00GiB path /dev/nvme0n1p3
+`;
+
+test('parseStorageMounts parses JSON findmnt output correctly', () => {
+  const mounts = parseStorageMounts(SAMPLE_FINDMNT_JSON);
+  assert.equal(mounts.length, 3);
+  assert.equal(mounts[0].target, '/');
+  assert.equal(mounts[0].source, '/dev/mapper/rootvg-rootlv');
+  assert.equal(mounts[0].fstype, 'xfs');
+  assert.equal(mounts[0].size, '70G');
+  assert.equal(mounts[0].used, '15.4G');
+  assert.equal(mounts[0].avail, '54.6G');
+
+  assert.equal(mounts[2].target, '/mnt/btrfs-data');
+  assert.equal(mounts[2].fstype, 'btrfs');
+});
+
+test('parseStorageMounts parses plain text fallback findmnt output', () => {
+  const textOut = `TARGET SOURCE FSTYPE OPTIONS
+/ /dev/sda2 ext4 rw,relatime
+/var/log /dev/sda3 ext4 rw,relatime`;
+  const mounts = parseStorageMounts(textOut);
+  assert.equal(mounts.length, 2);
+  assert.equal(mounts[0].target, '/');
+  assert.equal(mounts[0].source, '/dev/sda2');
+  assert.equal(mounts[0].fstype, 'ext4');
+});
+
+test('parseStorageMounts handles empty or corrupted input gracefully', () => {
+  assert.deepEqual(parseStorageMounts(''), []);
+  assert.deepEqual(parseStorageMounts('   '), []);
+  assert.deepEqual(parseStorageMounts('INVALID_JSON {{{'), []);
+});
+
+test('parseBtrfsFilesystems parses multi-device and labeled filesystems with mounts', () => {
+  const filesystems = parseBtrfsFilesystems(SAMPLE_BTRFS_SHOW, SAMPLE_FINDMNT_JSON);
+  assert.equal(filesystems.length, 2);
+
+  const vault = filesystems.find(f => f.label === 'data-vault')!;
+  assert.ok(vault);
+  assert.equal(vault.uuid, '4a2b9c8d-7e6f-5a4b-3c2d-1e0f9a8b7c6d');
+  assert.equal(vault.totalDevices, 2);
+  assert.equal(vault.fsBytesUsed, '609.81GiB');
+  assert.equal(vault.devices.length, 2);
+  assert.equal(vault.devices[0].path, '/dev/sdb1');
+  assert.equal(vault.devices[1].path, '/dev/sdc1');
+  assert.deepEqual(vault.mountpoints, ['/mnt/btrfs-data']);
+
+  const unlabelled = filesystems.find(f => f.label === 'none')!;
+  assert.ok(unlabelled);
+  assert.equal(unlabelled.uuid, '11223344-5566-7788-99aa-bbccddeeff00');
+  assert.equal(unlabelled.devices.length, 1);
+});
+
+test('parseBtrfsFilesystems handles empty or NO_BTRFS strings', () => {
+  assert.deepEqual(parseBtrfsFilesystems(''), []);
+  assert.deepEqual(parseBtrfsFilesystems('NO_BTRFS'), []);
+  assert.deepEqual(parseBtrfsFilesystems('command not found'), []);
+});
+
+test('parseBtrfsFilesystems derives filesystems from findmnt if btrfsRaw is unavailable', () => {
+  const btrfsOnlyFindmnt = JSON.stringify({
+    filesystems: [
+      {
+        target: '/home',
+        source: '/dev/nvme1n1p2[/@home]',
+        fstype: 'btrfs',
+        size: '500G',
+      },
+    ],
+  });
+  const filesystems = parseBtrfsFilesystems('NO_BTRFS', btrfsOnlyFindmnt);
+  assert.equal(filesystems.length, 1);
+  assert.equal(filesystems[0].devices[0].path, '/dev/nvme1n1p2');
+  assert.deepEqual(filesystems[0].mountpoints, ['/home']);
+});
+
+test('detectStorageEngine correctly identifies zfs, btrfs, lvm_ext, or none', () => {
+  // 1. ZFS present
+  const engineZfs = detectStorageEngine(SAMPLE_ZPOOL_LIST, SAMPLE_BTRFS_SHOW, SAMPLE_FINDMNT_JSON);
+  assert.equal(engineZfs, 'zfs');
+
+  // 2. Btrfs present (no ZFS)
+  const engineBtrfs = detectStorageEngine('', SAMPLE_BTRFS_SHOW, SAMPLE_FINDMNT_JSON);
+  assert.equal(engineBtrfs, 'btrfs');
+
+  // 3. LVM/Ext present (no ZFS, no Btrfs)
+  const lvmFindmnt = JSON.stringify({
+    filesystems: [
+      { target: '/', source: '/dev/mapper/rootvg-rootlv', fstype: 'xfs' },
+      { target: '/boot', source: '/dev/sda1', fstype: 'ext4' },
+    ],
+  });
+  const engineLvm = detectStorageEngine('NO_ZPOOL_LIST', 'NO_BTRFS', lvmFindmnt);
+  assert.equal(engineLvm, 'lvm_ext');
+
+  // 4. None detected
+  const engineNone = detectStorageEngine('', 'NO_BTRFS', '');
+  assert.equal(engineNone, 'none');
 });
 
