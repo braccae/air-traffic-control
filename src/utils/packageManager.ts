@@ -132,7 +132,8 @@ export function buildCheckUpdatesCommand(manager: PackageManager): string {
  * Generates the command to apply available updates.
  */
 export function buildApplyUpdatesCommand(manager: PackageManager, packages?: string[]): string {
-  const pkgs = packages?.filter(p => p.trim().length > 0);
+  const SAFE_PKG_NAME = /^[a-zA-Z0-9_\-\.\+@:~]+$/;
+  const pkgs = packages?.map(p => p.trim()).filter(p => p.length > 0 && SAFE_PKG_NAME.test(p));
   const pkgList = pkgs && pkgs.length > 0 ? pkgs.join(' ') : '';
 
   switch (manager) {

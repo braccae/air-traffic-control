@@ -102,6 +102,11 @@ describe('packageManager - Command Construction', () => {
     assert.strictEqual(buildApplyUpdatesCommand('apk'), 'apk upgrade');
     assert.strictEqual(buildApplyUpdatesCommand('apk', ['musl']), 'apk add --upgrade musl');
 
+    assert.strictEqual(
+      buildApplyUpdatesCommand('dnf', ['curl', 'evil; rm -rf /', 'valid-pkg_1.0+b1']),
+      'dnf upgrade -y curl valid-pkg_1.0+b1'
+    );
+
     assert.strictEqual(buildApplyUpdatesCommand('rpm-ostree'), 'rpm-ostree upgrade');
     assert.strictEqual(buildApplyUpdatesCommand('bootc'), 'bootc upgrade');
   });

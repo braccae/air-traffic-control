@@ -115,6 +115,83 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
       .finally(() => setLoadingPlaybooks(false));
   }, []);
 
+  // Fetch real cluster storage and shares from active nodes
+  const [liveStorage, setLiveStorage] = useState<{
+    zfsPools: Array<{ name: string; host: string; size: string; health: string }>;
+    shares: Array<{ name: string; host: string; type: string; path: string }>;
+    loading: boolean;
+  }>({ zfsPools: [], shares: [], loading: true });
+
+  useEffect(() => {
+    const storageNodes = nodes.filter(n => n.status === 'online').slice(0, 5);
+    if (storageNodes.length === 0) {
+      setLiveStorage({ zfsPools: [], shares: [], loading: false });
+      return;
+    }
+
+    Promise.allSettled(
+      storageNodes.map(async node => {
+        const [storageRes, sharesRes] = await Promise.allSettled([
+          fetch(`/api/nodes/${encodeURIComponent(node.id)}/storage`).then(r => r.json()),
+          fetch(`/api/nodes/${encodeURIComponent(node.id)}/shares`).then(r => r.json()),
+        ]);
+        return {
+          node,
+          storage: storageRes.status === 'fulfilled' ? storageRes.value : null,
+          shares: sharesRes.status === 'fulfilled' ? sharesRes.value : null,
+        };
+      })
+    ).then(results => {
+      const zfsPools: Array<{ name: string; host: string; size: string; health: string }> = [];
+      const shares: Array<{ name: string; host: string; type: string; path: string }> = [];
+
+      for (const res of results) {
+        if (res.status !== 'fulfilled' || !res.value) continue;
+        const { node, storage, shares: sharesData } = res.value;
+
+        if (storage?.success && typeof storage.zpoolList === 'string' && storage.zpoolList.trim().length > 0 && !storage.zpoolList.includes('NO_ZPOOL')) {
+          const lines = storage.zpoolList.trim().split('\n');
+          for (const line of lines) {
+            const parts = line.trim().split(/\s+/);
+            if (parts.length >= 2 && parts[0] !== 'NAME') {
+              zfsPools.push({
+                name: parts[0],
+                host: node.shortName || node.name,
+                size: parts[1] || 'Unknown',
+                health: parts[6] || parts[parts.length - 1] || 'ONLINE',
+              });
+            }
+          }
+        }
+
+        if (sharesData?.success) {
+          if (Array.isArray(sharesData.nfsExports)) {
+            for (const exp of sharesData.nfsExports.slice(0, 2)) {
+              shares.push({
+                name: exp.path || 'NFS Export',
+                host: node.shortName || node.name,
+                type: 'NFS',
+                path: exp.path,
+              });
+            }
+          }
+          if (Array.isArray(sharesData.smbShares)) {
+            for (const smb of sharesData.smbShares.slice(0, 2)) {
+              shares.push({
+                name: smb.name || 'SMB Share',
+                host: node.shortName || node.name,
+                type: 'Samba',
+                path: smb.path,
+              });
+            }
+          }
+        }
+      }
+
+      setLiveStorage({ zfsPools, shares, loading: false });
+    });
+  }, [nodes]);
+
   const pveCount = nodes.filter(n => n.group === 'tag:pve' || n.badge === 'PVE').length;
   const vmCount = nodes.filter(n => n.group === 'tag:vm' || n.badge === 'VM').length;
   const lxcCount = nodes.filter(n => n.nodeType === 'lxc' || n.badge === 'LXC').length;
@@ -550,18 +627,18 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
                 Enterprise RAID-Z2 &amp; mirrored pools with scheduled scrubbing and snapshot protection.
               </p>
               <div className="space-y-1 font-mono text-[10px] text-[#c3c6d2] bg-[#121528] p-2 rounded border border-[#26293c]">
-                <div className="flex justify-between">
-                  <span className="text-[#8d909b]">tank (likes-it-cold):</span>
-                  <span className="text-[#8cd6cb]">1.0 TB / RAID-Z2</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-[#8d909b]">rpool (root system):</span>
-                  <span className="text-[#8cd6cb]">250 GB / Mirror</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-[#8d909b]">Scrub Status:</span>
-                  <span className="text-[#8cd6cb]">0 errors, healthy</span>
-                </div>
+                {liveStorage.loading ? (
+                  <div className="text-[#8d909b] animate-pulse">Probing node storage pools...</div>
+                ) : liveStorage.zfsPools.length === 0 ? (
+                  <div className="text-[#8d909b]">No ZFS pools on probed hosts (native Btrfs/LVM in use)</div>
+                ) : (
+                  liveStorage.zfsPools.slice(0, 3).map((p, idx) => (
+                    <div key={idx} className="flex justify-between">
+                      <span className="text-[#8d909b] truncate">{p.name} ({p.host}):</span>
+                      <span className="text-[#8cd6cb] font-bold">{p.size} / {p.health}</span>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </div>
@@ -575,25 +652,25 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
                   Network Shares (NFS/SMB)
                 </span>
                 <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#21263d] text-[#b0c9ff] border border-[#b0c9ff]/30">
-                  ACTIVE
+                  {liveStorage.shares.length > 0 ? 'ACTIVE' : 'READY'}
                 </span>
               </div>
               <p className="text-[11px] text-[#8d909b] mb-2 leading-tight">
                 Shared filesystem exports configured via `/etc/exports.d` and atomic `smb.conf`.
               </p>
               <div className="space-y-1 font-mono text-[10px] text-[#c3c6d2] bg-[#121528] p-2 rounded border border-[#26293c]">
-                <div className="flex justify-between">
-                  <span className="text-[#8d909b]">NFS :2049 Export:</span>
-                  <span className="text-[#dfe1fa]">/tank/media (rw,sync)</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-[#8d909b]">Samba :445 Shares:</span>
-                  <span className="text-[#dfe1fa]">[data], [backups]</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-[#8d909b]">Auth / Security:</span>
-                  <span className="text-[#8cd6cb]">Strict PAM / User isolation</span>
-                </div>
+                {liveStorage.loading ? (
+                  <div className="text-[#8d909b] animate-pulse">Probing export shares...</div>
+                ) : liveStorage.shares.length === 0 ? (
+                  <div className="text-[#8d909b]">No active NFS/SMB exports discovered</div>
+                ) : (
+                  liveStorage.shares.slice(0, 3).map((s, idx) => (
+                    <div key={idx} className="flex justify-between">
+                      <span className="text-[#8d909b] truncate">{s.type} ({s.host}):</span>
+                      <span className="text-[#dfe1fa] truncate max-w-[120px]">{s.path || s.name}</span>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </div>
