@@ -6,6 +6,7 @@ import {
   type PackageCheckResult,
   isKernelOrSystemUpdate,
 } from '../utils/packageManager.ts';
+import { safeFetchJson } from '../utils/apiDefensive.ts';
 
 interface PackageUpdatesViewProps {
   node: NodeItem;
@@ -28,14 +29,13 @@ export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, on
     setError(null);
     setStatusMessage(null);
     try {
-      const res = await fetch(
+      const result = await safeFetchJson<PackageCheckResult>(
         `/api/nodes/${encodeURIComponent(node.id)}/packages/check${refresh ? '?refresh=true' : ''}`
       );
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setCheckResult(data);
+      if (result.success && result.data) {
+        setCheckResult(result.data);
       } else {
-        setError(data.error || 'Failed to check for updates on host');
+        setError(result.error || 'Failed to check for updates on host');
       }
     } catch (err: any) {
       setError(err?.message || 'Network error querying package updates');
@@ -53,23 +53,25 @@ export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, on
     setApplying(true);
     setError(null);
     try {
-      const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/packages/apply`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          manager: checkResult?.manager,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setAppliedTaskId(data.taskId);
-        setStatusMessage(data.message || `Updates dispatched to ${node.name}`);
+      const result = await safeFetchJson<{ success: boolean; taskId: string; message?: string }>(
+        `/api/nodes/${encodeURIComponent(node.id)}/packages/apply`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            manager: checkResult?.manager,
+          }),
+        }
+      );
+      if (result.success && result.data) {
+        setAppliedTaskId(result.data.taskId);
+        setStatusMessage(result.data.message || `Updates dispatched to ${node.name}`);
         // Refresh updates listing after dispatching
         setTimeout(() => {
           fetchUpdates(true);
         }, 2500);
       } else {
-        setError(data.error || 'Failed to apply package updates');
+        setError(result.error || 'Failed to apply package updates');
       }
     } catch (err: any) {
       setError(err?.message || 'Network error applying updates');

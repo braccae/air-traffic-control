@@ -12,6 +12,7 @@ import {
   type StorageMountItem,
   type StorageEngineType,
 } from '../utils/zfsParser.ts';
+import { safeFetchJson } from '../utils/apiDefensive.ts';
 
 interface ZfsManagementViewProps {
   node: NodeItem;
@@ -29,64 +30,72 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node, onEn
 
   const handleScrubPool = async (poolName: string) => {
     try {
-      const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/zfs/${encodeURIComponent(poolName)}/scrub`, {
-        method: 'POST',
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.success !== false) {
+      const result = await safeFetchJson<{ success?: boolean; error?: string }>(
+        `/api/nodes/${encodeURIComponent(node.id)}/zfs/${encodeURIComponent(poolName)}/scrub`,
+        { method: 'POST' }
+      );
+      if (result.success) {
         setNotice(`Scrub initiated successfully on pool ${poolName}.`);
         loadStorage(true);
       } else {
-        setNotice(`Failed to start scrub on pool ${poolName}: ${data.error || 'HTTP ' + res.status}`);
+        setNotice(`Failed to start scrub on pool ${poolName}: ${result.error || 'HTTP ' + result.status}`);
       }
     } catch (err: any) {
       setNotice(`Failed to start scrub on pool ${poolName}: ${err?.message || 'Network error'}`);
     }
   };
 
-  const loadStorage = (refresh = false) => {
+  const loadStorage = async (refresh = false) => {
     setLoading(true);
-    fetch(`/api/nodes/${encodeURIComponent(node.id)}/storage${refresh ? '?refresh=true' : ''}`)
-      .then(res => res.json())
-      .then(data => {
-        if (!data.success) {
-          setNotice('Storage probe could not contact host.');
-          return;
-        }
+    try {
+      const result = await safeFetchJson<{
+        success: boolean;
+        zpoolList?: string;
+        zpoolStatus?: string;
+        zfsList?: string;
+        btrfs?: string;
+        findmnt?: string;
+      }>(`/api/nodes/${encodeURIComponent(node.id)}/storage${refresh ? '?refresh=true' : ''}`);
 
-        const zpoolListOut = data.zpoolList || '';
-        const zpoolStatusOut = data.zpoolStatus || '';
-        const zfsOut = data.zfsList || '';
-        const btrfsOut = data.btrfs || '';
-        const findmntOut = data.findmnt || '';
+      if (!result.success || !result.data) {
+        setNotice(result.error || 'Storage probe could not contact host.');
+        return;
+      }
 
-        const parsedPools = parseZfsPools(zpoolListOut, zpoolStatusOut);
-        const parsedDs = parseZfsDatasets(zfsOut);
-        const parsedBtrfs = parseBtrfsFilesystems(btrfsOut, findmntOut);
-        const parsedMounts = parseStorageMounts(findmntOut);
-        const detectedEngine = detectStorageEngine(zpoolListOut, btrfsOut, findmntOut);
+      const data = result.data;
+      const zpoolListOut = data.zpoolList || '';
+      const zpoolStatusOut = data.zpoolStatus || '';
+      const zfsOut = data.zfsList || '';
+      const btrfsOut = data.btrfs || '';
+      const findmntOut = data.findmnt || '';
 
-        setEngine(detectedEngine);
-        onEngineDetected?.(detectedEngine);
+      const parsedPools = parseZfsPools(zpoolListOut, zpoolStatusOut);
+      const parsedDs = parseZfsDatasets(zfsOut);
+      const parsedBtrfs = parseBtrfsFilesystems(btrfsOut, findmntOut);
+      const parsedMounts = parseStorageMounts(findmntOut);
+      const detectedEngine = detectStorageEngine(zpoolListOut, btrfsOut, findmntOut);
 
-        if (detectedEngine === 'zfs') {
-          setPools(parsedPools);
-          setDatasets(parsedDs);
-          setBtrfsFilesystems([]);
-          setMounts([]);
-          setNotice('');
-        } else {
-          setPools([]);
-          setDatasets([]);
-          setBtrfsFilesystems(parsedBtrfs);
-          setMounts(parsedMounts);
-          setNotice('No active OpenZFS pools found on host. Displaying native Btrfs / LVM filesystems.');
-        }
-      })
-      .catch(() => {
-        setNotice(`Unable to load storage data for ${node.shortName}.`);
-      })
-      .finally(() => setLoading(false));
+      setEngine(detectedEngine);
+      onEngineDetected?.(detectedEngine);
+
+      if (detectedEngine === 'zfs') {
+        setPools(parsedPools);
+        setDatasets(parsedDs);
+        setBtrfsFilesystems([]);
+        setMounts([]);
+        setNotice('');
+      } else {
+        setPools([]);
+        setDatasets([]);
+        setBtrfsFilesystems(parsedBtrfs);
+        setMounts(parsedMounts);
+        setNotice('No active OpenZFS pools found on host. Displaying native Btrfs / LVM filesystems.');
+      }
+    } catch {
+      setNotice(`Unable to load storage data for ${node.shortName}.`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {

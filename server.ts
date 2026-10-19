@@ -2043,6 +2043,14 @@ setInterval(async () => {
 }, 10000);
 
 async function startServer() {
+  // Explicit API 404 catch-all: any unhandled /api/* request must return JSON 404, never falling through to Vite/index.html
+  app.all(['/api', '/api/*'], (req, res) => {
+    res.status(404).json({
+      success: false,
+      error: `API route not found: ${req.method} ${req.path}`,
+    });
+  });
+
   const isProd = process.env.NODE_ENV === 'production';
   if (!isProd) {
     const vite = await createViteServer({

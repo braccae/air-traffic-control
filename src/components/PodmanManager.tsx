@@ -14,6 +14,7 @@ import {
   groupStandaloneContainersByUser,
   filterUserContainerGroups,
 } from '../utils/podmanViewModel.ts';
+import { safeFetchJson } from '../utils/apiDefensive.ts';
 
 interface PodmanManagerProps {
   selectedNode?: NodeItem;
@@ -54,11 +55,19 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
 
   const hostParam = selectedNode?.id || selectedNode?.tailscaleHost || 'likes-it-cold';
 
-  const loadContainers = () => {
+  const loadContainers = async () => {
     setLoading(true);
-    fetch(`/api/nodes/${encodeURIComponent(hostParam)}/containers`)
-      .then(res => res.json())
-      .then(data => {
+    try {
+      const res = await safeFetchJson<{
+        probedUsers?: UnprivilegedPodmanUser[];
+        rootPods?: PodItem[];
+        hasDocker?: boolean;
+        dockerContainers?: ContainerItem[];
+        rootContainers?: any[];
+      }>(`/api/nodes/${encodeURIComponent(hostParam)}/containers`);
+
+      if (res.success && res.data) {
+        const data = res.data;
         if (Array.isArray(data?.probedUsers)) {
           setProbedUsers(data.probedUsers);
         }
@@ -96,9 +105,12 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
             }))
           );
         }
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
+      }
+    } catch {
+      // Defensive fallback
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -107,8 +119,8 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
     loadContainers();
   }, [hostParam]);
 
-  const handleContainerAction = (container: ContainerItem, action: 'restart' | 'stop' | 'start') => {
-    fetch('/api/podman/action', {
+  const handleContainerAction = async (container: ContainerItem, action: 'restart' | 'stop' | 'start') => {
+    await safeFetchJson('/api/podman/action', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -118,10 +130,9 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
         user: container.user,
         uid: container.uid,
       }),
-    }).then(() => {
-      onRestartPod(`${container.name} (${action})`);
-      loadContainers();
     });
+    onRestartPod(`${container.name} (${action})`);
+    loadContainers();
   };
 
   const handleCreatePodSubmit = (e: React.FormEvent) => {
