@@ -221,11 +221,59 @@ test('maskSensitiveValue correctly masks secrets and leaves harmless values inta
   // Custom maskedSecrets map
   const maskedSecrets = { vault_pass: 'veryConfidential' };
   assert.strictEqual(maskSensitiveValue('custom_field', 'my veryConfidential value', maskedSecrets), '••••••••');
+
+  // Vault annotation preservation
+  const vaultSecrets = {
+    smb_password: '•••••••• (vault: smb_share_secret)',
+    api_token: '•••••••• (vault: vault_app_token)',
+  };
+  assert.strictEqual(
+    maskSensitiveValue('smb_password', 'secretVal', vaultSecrets),
+    '•••••••• (vault: smb_share_secret)'
+  );
+  assert.strictEqual(
+    maskSensitiveValue('api_token', 'tokenVal', vaultSecrets),
+    '•••••••• (vault: vault_app_token)'
+  );
   
   // Non-sensitive values
   assert.strictEqual(maskSensitiveValue('state', 'started'), 'started');
   assert.strictEqual(maskSensitiveValue('name', 'nginx'), 'nginx');
   assert.strictEqual(maskSensitiveValue('enabled', true), 'true');
+});
+
+test('TaskQueueTab preserves and displays vault secret badges in parameter breakdown', () => {
+  const taskWithVaultSecret: QueuedAnsibleTask = {
+    ...sampleTasks[0],
+    id: 'task-vault-test',
+    secretsMasked: {
+      smb_password: '•••••••• (vault: smb_share_secret)',
+    },
+    steps: [
+      {
+        name: 'Mount cifs share with vault password',
+        module: 'ansible.builtin.template',
+        parameters: {
+          smb_password: 'superSecretValue',
+        },
+      },
+    ],
+  };
+
+  const html = renderToString(
+    React.createElement(TaskQueueTab, {
+      queue: [taskWithVaultSecret],
+      isRunning: false,
+      defaultExpandedIds: ['task-vault-test'],
+      onRunNextTask: () => {},
+      onExecuteAll: () => {},
+      onDeleteTask: () => {},
+      onClearQueue: () => {},
+    })
+  );
+
+  assert.ok(!html.includes('superSecretValue'), 'Plaintext secret must never appear in HTML output');
+  assert.ok(html.includes('•••••••• (vault: smb_share_secret)'), 'Vault annotation must be preserved and rendered');
 });
 
 test('TaskQueueTab action props function as expected when invoked', () => {

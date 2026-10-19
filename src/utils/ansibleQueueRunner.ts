@@ -199,6 +199,17 @@ export function enqueueTask(task: QueuedAnsibleTask): QueuedAnsibleTask {
   const normalizedTask: QueuedAnsibleTask = {
     ...task,
     id: task.id || `task-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    title: task.title || 'Ansible Task',
+    targetNodeId: task.targetNodeId || 'localhost',
+    targetNodeName: task.targetNodeName || task.targetNodeId || 'localhost',
+    targetHostRoute: task.targetHostRoute || task.targetNodeName || task.targetNodeId || '127.0.0.1',
+    targetSshUser: task.targetSshUser || 'core',
+    targetSshPort: task.targetSshPort || 22,
+    category: task.category || 'system',
+    primaryModule: task.primaryModule || task.steps?.[0]?.module || 'ansible.builtin.command',
+    steps: task.steps || [],
+    become: task.become !== undefined ? Boolean(task.become) : true,
+    becomeMethod: (task.becomeMethod as any) || 'run0',
     status: task.status || 'staged',
     createdAt: task.createdAt || Date.now(),
   };

@@ -226,6 +226,33 @@ describe('ansibleQueueRunner', () => {
       expect(state.tasks[1].id).toBe('task-allow-firewall-8080');
     });
 
+    it('handles partially-specified tasks without throwing SQLite constraint errors', () => {
+      // Partial task omitting targetNodeName, targetSshUser, targetSshPort, category, primaryModule, becomeMethod
+      const partialTask = {
+        title: 'Minimal Partial Task',
+        targetNodeId: 'node-partial-1',
+        targetHostRoute: '100.64.0.5',
+      } as any;
+
+      const enqueued = enqueueTask(partialTask);
+      expect(enqueued.id).toBeDefined();
+      expect(enqueued.targetNodeName).toBe('node-partial-1');
+      expect(enqueued.targetSshUser).toBe('core');
+      expect(enqueued.targetSshPort).toBe(22);
+      expect(enqueued.category).toBe('system');
+      expect(enqueued.primaryModule).toBe('ansible.builtin.command');
+      expect(enqueued.become).toBe(true);
+      expect(enqueued.becomeMethod).toBe('run0');
+      expect(enqueued.status).toBe('staged');
+      expect(enqueued.createdAt).toBeDefined();
+
+      const state = getQueue();
+      expect(state.tasks.length).toBe(1);
+      expect(state.tasks[0].id).toBe(enqueued.id);
+      expect(state.tasks[0].targetNodeName).toBe('node-partial-1');
+      expect(state.tasks[0].targetSshUser).toBe('core');
+    });
+
     it('updates task status and records error message on failure', () => {
       enqueueTask(sampleTask1);
       const updated = updateTaskStatus('task-restart-caddy', 'failed', 'Service unit missing');

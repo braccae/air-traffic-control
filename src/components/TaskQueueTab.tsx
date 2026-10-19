@@ -15,14 +15,21 @@ export interface TaskQueueTabProps {
  * Masks secrets or passwords in parameter keys and values.
  */
 export function maskSensitiveValue(key: string, val: any, maskedSecrets?: Record<string, string>): string {
+  if (maskedSecrets && key in maskedSecrets) {
+    const masked = maskedSecrets[key];
+    if (typeof masked === 'string' && (masked.includes('••••••••') || masked.includes('vault:'))) {
+      return masked;
+    }
+    return '••••••••';
+  }
+
   const lowerKey = key.toLowerCase();
   const isSensitiveKey =
     lowerKey.includes('password') ||
     lowerKey.includes('secret') ||
     lowerKey.includes('token') ||
     lowerKey.includes('credential') ||
-    lowerKey.includes('privkey') ||
-    (maskedSecrets && key in maskedSecrets);
+    lowerKey.includes('privkey');
 
   if (isSensitiveKey) {
     return '••••••••';

@@ -154,4 +154,28 @@ describe('ansibleQueueCompiler', () => {
     const yaml = compileOnTheFlyPlaybook(task);
     expect(yaml).toContain('become_method: sudo');
   });
+
+  it('prioritizes node.shortName over node.name for clean targetNodeName inventory targeting', () => {
+    const nodeWithDisplayName: NodeItem = {
+      ...mockNode,
+      id: 'node-dev-pc',
+      name: 'dev-pc (local workstation)',
+      shortName: 'dev-pc',
+    };
+
+    const serviceTask = compileServiceTask(nodeWithDisplayName, 'nginx', 'restarted');
+    expect(serviceTask.targetNodeName).toBe('dev-pc');
+
+    const firewallTask = compileFirewallTask(nodeWithDisplayName, '80', 'tcp');
+    expect(firewallTask.targetNodeName).toBe('dev-pc');
+
+    const shareTask = compileShareTask(nodeWithDisplayName, 'share', '/path', ['user']);
+    expect(shareTask.targetNodeName).toBe('dev-pc');
+
+    const containerTask = compileContainerTask(nodeWithDisplayName, 'redis', 'start');
+    expect(containerTask.targetNodeName).toBe('dev-pc');
+
+    const packageTask = compilePackageTask(nodeWithDisplayName, 'git', 'present');
+    expect(packageTask.targetNodeName).toBe('dev-pc');
+  });
 });
