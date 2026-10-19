@@ -33,10 +33,13 @@ import { ContainerLogsModal } from './components/modals/ContainerLogsModal.tsx';
 import { RebootConfirmModal } from './components/modals/RebootConfirmModal.tsx';
 import { SearchModal } from './components/modals/SearchModal.tsx';
 import { GroupVarsModal } from './components/modals/GroupVarsModal.tsx';
+import { DatacenterGlobalView } from './components/DatacenterGlobalView.tsx';
 import {
   updateNodeSettings,
   getSubSidebarWrapperClasses,
   getWorkspaceWrapperClasses,
+  type SidebarViewMode,
+  type DatacenterSection,
 } from './utils/navigationViewModel.ts';
 import {
   createTerminalSession,
@@ -409,6 +412,8 @@ export default function App() {
   const [activeTopTab, setActiveTopTab] = useState('summary');
   const [activeOpTab, setActiveOpTab] = useState('overview');
   const [activeCockpitItem, setActiveCockpitItem] = useState('overview');
+  const [selectedViewMode, setSelectedViewMode] = useState<SidebarViewMode>('nodes');
+  const [datacenterSection, setDatacenterSection] = useState<DatacenterSection>('overview');
 
   const [telemetry, setTelemetry] = useState<TelemetryData>(initialTelemetry);
   const [tasks, setTasks] = useState<GlobalTaskItem[]>(initialTasks);
@@ -887,6 +892,7 @@ export default function App() {
   // Handlers
   const handleSelectNode = (node: NodeItem) => {
     setSelectedNode(node);
+    setSelectedViewMode('nodes');
     setMobileSidebarOpen(false);
   };
 
@@ -1094,6 +1100,10 @@ export default function App() {
         onSelectHostGroup={setSelectedHostGroup}
         isOpenMobile={mobileSidebarOpen}
         onCloseMobile={() => setMobileSidebarOpen(false)}
+        viewMode={selectedViewMode}
+        onSelectViewMode={setSelectedViewMode}
+        selectedDatacenterSection={datacenterSection}
+        onSelectDatacenterSection={setDatacenterSection}
       />
 
       {/* Top Sub-nav Bar */}
@@ -1103,10 +1113,12 @@ export default function App() {
           onSelectTopTab={tabId => {
             setActiveTopTab(tabId);
             if (tabId === 'summary') {
+              setSelectedViewMode('nodes');
               setActiveOpTab('overview');
               setActiveCockpitItem('overview');
             }
             if (tabId === 'mesh') {
+              setSelectedViewMode('nodes');
               setActiveOpTab('tailscale');
               setActiveCockpitItem('tailscale');
             }
@@ -1126,7 +1138,27 @@ export default function App() {
         <main className={`relative pt-18 pb-48 w-full px-3 min-h-screen ${
           highContrast ? 'bg-[#080a16]' : 'bg-[#0f1224]'
         }`}>
-          <div className="flex flex-col w-full">
+          {selectedViewMode === 'datacenter' ? (
+            <DatacenterGlobalView
+              datacenterName={selectedNode?.datacenter || 'leo-banjo.ts.net'}
+              nodes={nodesList}
+              tasks={tasks}
+              activeSection={datacenterSection}
+              onSelectNode={handleSelectNode}
+              onOpenPlaybookModal={playbookName => {
+                setSelectedPlaybookForEdit(playbookName);
+                setPlaybookOpen(true);
+              }}
+              onOpenPlaybookEditor={playbookName => handleOpenPlaybookEditor(playbookName)}
+              onOpenGroupVars={() => setGroupVarsOpen(true)}
+              onToggleTasksDrawer={() => {
+                const el = document.getElementById('global-tasks-drawer');
+                el?.scrollIntoView({ behavior: 'smooth' });
+              }}
+              onRunPlaybookQuick={(playbook, target) => handleRunPlaybook(playbook, target || 'tag:host')}
+            />
+          ) : (
+            <div className="flex flex-col w-full">
             {/* Secondary Context Bar & System Breadcrumb */}
             <div className={`flex flex-col shadow-md rounded-t border ${
               highContrast ? 'bg-[#121528] border-[#383c54]' : 'bg-[#171a2d] border-[#26293c]'
@@ -1493,7 +1525,8 @@ export default function App() {
               </div>
             </div>
           </div>
-        </main>
+        )}
+      </main>
       </div>
 
       {/* Fixed Bottom Global Tasks & Execution Log with Unified Window Dock */}

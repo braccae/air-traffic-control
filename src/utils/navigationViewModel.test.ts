@@ -305,4 +305,150 @@ test('getSubSidebarWrapperClasses generates responsive sticky positioning and in
   assert.ok(wideWorkspace.includes('col-span-12 lg:col-span-8 xl:col-span-9'));
 });
 
+test('formatNodeTypeBadge replaces generic SSH placeholders with styled node type pills', async () => {
+  const { formatNodeTypeBadge } = await import('./navigationViewModel.ts');
+
+  // Generic SSH badge on Linux node -> 'Linux'
+  const linuxWithSshBadge = formatNodeTypeBadge({
+    ...sampleNodes[0],
+    badge: 'SSH',
+    nodeType: 'linux',
+  });
+  assert.equal(linuxWithSshBadge.label, 'Linux');
+  assert.ok(linuxWithSshBadge.badgeClasses.includes('text-[#b0c9ff]'));
+
+  // Generic TS-SSH badge on Linux node -> 'Linux'
+  const linuxWithTsSsh = formatNodeTypeBadge({
+    ...sampleNodes[0],
+    badge: 'TS-SSH',
+    nodeType: 'linux',
+  });
+  assert.equal(linuxWithTsSsh.label, 'Linux');
+
+  // Node with LXC type -> 'LXC' with cyan styling
+  const lxcNode = formatNodeTypeBadge({
+    ...sampleNodes[0],
+    badge: 'SSH',
+    nodeType: 'lxc',
+  });
+  assert.equal(lxcNode.label, 'LXC');
+  assert.ok(lxcNode.badgeClasses.includes('text-[#8cd6cb]'));
+
+  // Node with PVE group -> 'PVE' with distinct styling
+  const pveNode = formatNodeTypeBadge({
+    ...sampleNodes[0],
+    badge: 'SSH',
+    group: 'tag:pve',
+    nodeType: 'linux',
+  });
+  assert.equal(pveNode.label, 'PVE');
+  assert.ok(pveNode.badgeClasses.includes('text-[#ffb4ab]'));
+
+  // Node with VM group -> 'VM' with purple styling
+  const vmNode = formatNodeTypeBadge({
+    ...sampleNodes[0],
+    badge: 'SSH',
+    group: 'tag:vm',
+    nodeType: 'linux',
+  });
+  assert.equal(vmNode.label, 'VM');
+  assert.ok(vmNode.badgeClasses.includes('text-[#d9b9ff]'));
+
+  // Node with explicit non-generic badge preserved (e.g. GPU, LOCAL, SWITCH)
+  const gpuNode = formatNodeTypeBadge({
+    ...sampleNodes[0],
+    badge: 'GPU',
+    nodeType: 'linux',
+  });
+  assert.equal(gpuNode.label, 'GPU');
+  assert.ok(gpuNode.badgeClasses.includes('text-[#f2b9ff]'));
+
+  const localNode = formatNodeTypeBadge({
+    ...sampleNodes[0],
+    badge: 'LOCAL',
+    nodeType: 'linux',
+  });
+  assert.equal(localNode.label, 'LOCAL');
+  assert.ok(localNode.badgeClasses.includes('text-[#93c5fd]'));
+});
+
+test('shouldShowSshUser suppresses common default users core and root and preserves custom users', async () => {
+  const { shouldShowSshUser } = await import('./navigationViewModel.ts');
+
+  // Default / placeholder users should be suppressed
+  assert.equal(shouldShowSshUser('core'), false);
+  assert.equal(shouldShowSshUser('CORE'), false);
+  assert.equal(shouldShowSshUser('root'), false);
+  assert.equal(shouldShowSshUser('ROOT'), false);
+  assert.equal(shouldShowSshUser(''), false);
+  assert.equal(shouldShowSshUser(undefined), false);
+
+  // Custom / non-standard users should be shown
+  assert.equal(shouldShowSshUser('pants'), true);
+  assert.equal(shouldShowSshUser('ansible'), true);
+  assert.equal(shouldShowSshUser('deploy'), true);
+  assert.equal(shouldShowSshUser('admin'), true);
+});
+
+test('formatNodeIpBadge extracts tailscaleIp or LAN ip correctly', async () => {
+  const { formatNodeIpBadge } = await import('./navigationViewModel.ts');
+
+  const withTs = { ...sampleNodes[0], tailscaleIp: '100.105.71.49', ip: '192.168.8.249' };
+  assert.equal(formatNodeIpBadge(withTs), '100.105.71.49');
+
+  const withoutTs = { ...sampleNodes[0], tailscaleIp: '', ip: '192.168.1.100' };
+  assert.equal(formatNodeIpBadge(withoutTs), '192.168.1.100');
+});
+
+test('getDatacenterNavSections returns all 5 navigation sections with accurate metadata and badges', async () => {
+  const { getDatacenterNavSections } = await import('./navigationViewModel.ts');
+
+  const sections = getDatacenterNavSections(4, 2);
+  assert.equal(sections.length, 5);
+
+  const sectionIds = sections.map(s => s.id);
+  assert.deepEqual(sectionIds, ['overview', 'playbooks', 'vars_vault', 'tasks', 'storage']);
+
+  const playbooksSec = sections.find(s => s.id === 'playbooks');
+  assert.equal(playbooksSec?.badge, '4 playbooks');
+
+  const varsSec = sections.find(s => s.id === 'vars_vault');
+  assert.equal(varsSec?.badge, 'Encrypted');
+
+  const tasksSec = sections.find(s => s.id === 'tasks');
+  assert.equal(tasksSec?.badge, '2 active');
+});
+
+test('calculateClusterHealthScore accurately computes score, online counts, and status labels', async () => {
+  const { calculateClusterHealthScore } = await import('./navigationViewModel.ts');
+
+  // All online
+  const healthy = calculateClusterHealthScore(sampleNodes);
+  assert.equal(healthy.score, 100);
+  assert.equal(healthy.onlineCount, 4);
+  assert.equal(healthy.totalCount, 4);
+  assert.equal(healthy.statusLabel, 'HEALTHY');
+
+  // Degraded (3 out of 4 online = 75%)
+  const degradedNodes = [
+    ...sampleNodes.slice(0, 3),
+    { ...sampleNodes[3], status: 'stopped' as const },
+  ];
+  const degraded = calculateClusterHealthScore(degradedNodes);
+  assert.equal(degraded.score, 75);
+  assert.equal(degraded.statusLabel, 'DEGRADED');
+
+  // Critical (1 out of 4 online = 25%)
+  const criticalNodes = [
+    sampleNodes[0],
+    { ...sampleNodes[1], status: 'stopped' as const },
+    { ...sampleNodes[2], status: 'stopped' as const },
+    { ...sampleNodes[3], status: 'stopped' as const },
+  ];
+  const critical = calculateClusterHealthScore(criticalNodes);
+  assert.equal(critical.score, 25);
+  assert.equal(critical.statusLabel, 'CRITICAL');
+});
+
+
 

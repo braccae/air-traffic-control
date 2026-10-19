@@ -176,3 +176,140 @@ export function getWorkspaceWrapperClasses(width: SubSidebarWidth): string {
     : 'col-span-12 lg:col-span-9 xl:col-span-10 flex flex-col gap-2';
 }
 
+export interface FormattedNodeBadge {
+  label: string;
+  badgeClasses: string;
+}
+
+export function formatNodeTypeBadge(node: NodeItem): FormattedNodeBadge {
+  const rawBadge = (node.badge || '').trim();
+  const isGenericSsh = rawBadge.toUpperCase() === 'SSH' || rawBadge.toUpperCase() === 'TS-SSH';
+
+  let label = '';
+  if (rawBadge && !isGenericSsh) {
+    label = rawBadge;
+  } else if (node.nodeType === 'lxc' || node.name.toLowerCase().includes('lxc-')) {
+    label = 'LXC';
+  } else if (node.nodeType === 'k3s' || node.name.toLowerCase().includes('k3s-')) {
+    label = 'K3S';
+  } else if (node.nodeType === 'pbs') {
+    label = 'PBS';
+  } else if (node.nodeType === 'windows') {
+    label = 'WIN';
+  } else if (node.nodeType === 'router_switch') {
+    label = 'NET';
+  } else if (node.group === 'tag:pve' || node.name.toLowerCase().includes('pve-')) {
+    label = 'PVE';
+  } else if (node.group === 'tag:vm' || node.name.toLowerCase().includes('vm-')) {
+    label = 'VM';
+  } else {
+    label = 'Linux';
+  }
+
+  const upper = label.toUpperCase();
+  let badgeClasses = 'bg-[#182030] text-[#b0c9ff] border border-[#b0c9ff]/20';
+  if (upper === 'PVE') {
+    badgeClasses = 'bg-[#311c1c] text-[#ffb4ab] border border-[#ffb4ab]/30';
+  } else if (upper === 'LXC' || upper === 'K3S') {
+    badgeClasses = 'bg-[#1b2a38] text-[#8cd6cb] border border-[#8cd6cb]/30';
+  } else if (upper === 'VM') {
+    badgeClasses = 'bg-[#291e3b] text-[#d9b9ff] border border-[#d9b9ff]/30';
+  } else if (upper === 'GPU') {
+    badgeClasses = 'bg-[#2d1b38] text-[#f2b9ff] border border-[#f2b9ff]/30';
+  } else if (upper === 'NET' || upper === 'SWITCH' || upper === 'VYOS') {
+    badgeClasses = 'bg-[#2d281b] text-[#ffd580] border border-[#ffd580]/30';
+  } else if (upper === 'LOCAL') {
+    badgeClasses = 'bg-[#1e293b] text-[#93c5fd] border border-[#93c5fd]/30';
+  }
+
+  return { label, badgeClasses };
+}
+
+export function shouldShowSshUser(sshUser?: string): boolean {
+  if (!sshUser) return false;
+  const normalized = sshUser.trim().toLowerCase();
+  return normalized !== 'core' && normalized !== 'root' && normalized !== '';
+}
+
+export function formatNodeIpBadge(node: NodeItem): string {
+  if (node.tailscaleIp) return node.tailscaleIp;
+  if (node.ip) return node.ip;
+  return '';
+}
+
+export type SidebarViewMode = 'nodes' | 'datacenter';
+
+export type DatacenterSection = 'overview' | 'playbooks' | 'vars_vault' | 'tasks' | 'storage';
+
+export interface DatacenterNavSection {
+  id: DatacenterSection;
+  title: string;
+  icon: string;
+  description: string;
+  badge?: string;
+}
+
+export function getDatacenterNavSections(playbooksCount = 4, tasksCount = 0): DatacenterNavSection[] {
+  return [
+    {
+      id: 'overview',
+      title: 'Overview & Mesh',
+      icon: 'cloud_queue',
+      description: 'Datacenter topology & mesh summary',
+    },
+    {
+      id: 'playbooks',
+      title: 'Ansible Playbooks',
+      icon: 'play_arrow',
+      description: 'Cluster automation & orchestration',
+      badge: `${playbooksCount} playbooks`,
+    },
+    {
+      id: 'vars_vault',
+      title: 'Vars & Vault Secrets',
+      icon: 'key',
+      description: 'Group variables and encrypted vault',
+      badge: 'Encrypted',
+    },
+    {
+      id: 'tasks',
+      title: 'Global Tasks & Executions',
+      icon: 'task_alt',
+      description: 'Live job queue & operational logs',
+      badge: tasksCount > 0 ? `${tasksCount} active` : undefined,
+    },
+    {
+      id: 'storage',
+      title: 'Cluster Storage & Pools',
+      icon: 'storage',
+      description: 'ZFS, NFS, and Samba storage',
+    },
+  ];
+}
+
+export function calculateClusterHealthScore(nodes: NodeItem[]): {
+  score: number;
+  onlineCount: number;
+  totalCount: number;
+  statusLabel: string;
+  statusColor: string;
+} {
+  const total = nodes.length;
+  if (total === 0) {
+    return { score: 100, onlineCount: 0, totalCount: 0, statusLabel: 'HEALTHY', statusColor: 'text-[#8cd6cb]' };
+  }
+  const online = nodes.filter(n => n.status === 'online').length;
+  const score = Math.round((online / total) * 100);
+  let statusLabel = 'HEALTHY';
+  let statusColor = 'text-[#8cd6cb]';
+  if (score < 75) {
+    statusLabel = 'CRITICAL';
+    statusColor = 'text-[#ffb4ab]';
+  } else if (score < 95) {
+    statusLabel = 'DEGRADED';
+    statusColor = 'text-[#ffd580]';
+  }
+  return { score, onlineCount: online, totalCount: total, statusLabel, statusColor };
+}
+
+
