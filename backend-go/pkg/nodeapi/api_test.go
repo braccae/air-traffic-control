@@ -764,3 +764,96 @@ iommu_group
 		}
 	})
 }
+
+// TestAPICreatePreservesWhitespace locks in Express' `req.body.x || default`
+// semantics: a truthy (even whitespace-padded) string is stored verbatim, and
+// only an empty string falls back. Trimming here would silently rewrite a node
+// name the operator typed.
+func TestAPICreatePreservesWhitespace(t *testing.T) {
+	server, store, _, _ := setupTestServer(t, nil)
+
+	payload := `{"id":"node-padded","name":"  Padded Host  ","group":"  tag:worker  ","sshUser":"  core  "}`
+	resp, err := http.Post(server.URL+"/api/nodes", "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST /api/nodes failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	rec, found, err := store.GetHostByID("node-padded")
+	if err != nil || !found {
+		t.Fatalf("expected persisted host, found=%v err=%v", found, err)
+	}
+	obj, err := ParseObject(rec.NodeJSON)
+	if err != nil {
+		t.Fatalf("parse node json: %v", err)
+	}
+	if s, _ := obj.GetString("name"); s != "  Padded Host  " {
+		t.Errorf("name must be stored verbatim like Express, got %q", s)
+	}
+	// shortName still splits on the first space, matching
+	// namedNode.split(' ')[0] on the untrimmed name.
+	if s, _ := obj.GetString("shortName"); s != "" {
+		t.Errorf("expected empty leading token from the untrimmed name, got %q", s)
+	}
+	if s, _ := obj.GetString("group"); s != "  tag:worker  " {
+		t.Errorf("group must be stored verbatim, got %q", s)
+	}
+}
+
+// TestAPICreateEmptyStringFallsBack covers the falsy half of `||`: an empty
+// string falls back to the default, and shortName derives from 'node'.
+func TestAPICreateEmptyStringFallsBack(t *testing.T) {
+	server, _, _, _ := setupTestServer(t, nil)
+
+	resp, err := http.Post(server.URL+"/api/nodes", "application/json", strings.NewReader(`{"name":"","ip":""}`))
+	if err != nil {
+		t.Fatalf("POST /api/nodes failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var out struct {
+		Node struct {
+			Name      string `json:"name"`
+			ShortName string `json:"shortName"`
+			IP        string `json:"ip"`
+		} `json:"node"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Node.Name != "New Node" {
+		t.Errorf("expected default name New Node, got %q", out.Node.Name)
+	}
+	if out.Node.ShortName != "node" {
+		t.Errorf("expected shortName node, got %q", out.Node.ShortName)
+	}
+	if out.Node.IP != "192.168.8.200" {
+		t.Errorf("expected default ip, got %q", out.Node.IP)
+	}
+}
+
+// TestAPICreateMalformedJSON: express.json() rejects a malformed body with 400
+// before the route runs, so the Go handler must not fall back to defaults.
+func TestAPICreateMalformedJSON(t *testing.T) {
+	server, store, _, _ := setupTestServer(t, nil)
+
+	resp, err := http.Post(server.URL+"/api/nodes", "application/json", strings.NewReader(`{"name":`))
+	if err != nil {
+		t.Fatalf("POST /api/nodes failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+	hosts, err := store.GetAllHosts()
+	if err != nil {
+		t.Fatalf("GetAllHosts: %v", err)
+	}
+	if len(hosts) != 0 {
+		t.Errorf("malformed body must not create a node, got %d hosts", len(hosts))
+	}
+}

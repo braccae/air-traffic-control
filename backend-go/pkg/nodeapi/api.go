@@ -197,79 +197,83 @@ func (a *API) HandleCreate(w http.ResponseWriter, r *http.Request) {
 
 	body := NewObject()
 	if len(bodyBytes) > 0 {
-		if parsed, err := ParseObject(bodyBytes); err == nil {
-			body = parsed
+		parsed, err := ParseObject(bodyBytes)
+		if err != nil {
+			// Express' express.json() rejects a malformed body with 400 before
+			// the route runs; match that status instead of silently creating a
+			// node from defaults.
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "invalid json payload"})
+			return
 		}
+		body = parsed
 	}
 
 	newNode := NewObject()
 
 	// 1. id
 	id := fmt.Sprintf("node-%d", a.now().UnixMilli())
-	if s, ok := body.GetString("id"); ok && strings.TrimSpace(s) != "" {
-		id = strings.TrimSpace(s)
+	if s, ok := body.GetString("id"); ok && s != "" {
+		id = s
 	}
 	newNode.SetString("id", id)
 
 	// 2. name
 	name := "New Node"
-	if s, ok := body.GetString("name"); ok && strings.TrimSpace(s) != "" {
-		name = strings.TrimSpace(s)
+	if s, ok := body.GetString("name"); ok && s != "" {
+		name = s
 	}
 	newNode.SetString("name", name)
 
-	// 3. shortName
-	nameForShort := name
+	// 3. shortName — Express: (req.body.name || 'node').split(' ')[0]
+	nameForShort := "node"
 	if s, ok := body.GetString("name"); ok && s != "" {
 		nameForShort = s
-	} else if !body.Has("name") {
-		nameForShort = "node"
 	}
 	shortName := strings.Split(nameForShort, " ")[0]
-	if s, ok := body.GetString("shortName"); ok && strings.TrimSpace(s) != "" {
-		shortName = strings.TrimSpace(s)
+	if s, ok := body.GetString("shortName"); ok && s != "" {
+		shortName = s
 	}
 	newNode.SetString("shortName", shortName)
 
 	// 4. group
 	group := "tag:host"
-	if s, ok := body.GetString("group"); ok && strings.TrimSpace(s) != "" {
-		group = strings.TrimSpace(s)
+	if s, ok := body.GetString("group"); ok && s != "" {
+		group = s
 	}
 	newNode.SetString("group", group)
 
 	// 5. datacenter
 	datacenter := "leo-banjo.ts.net"
-	if s, ok := body.GetString("datacenter"); ok && strings.TrimSpace(s) != "" {
-		datacenter = strings.TrimSpace(s)
+	if s, ok := body.GetString("datacenter"); ok && s != "" {
+		datacenter = s
 	}
 	newNode.SetString("datacenter", datacenter)
 
 	// 6. nodeType
 	nodeType := "linux"
-	if s, ok := body.GetString("nodeType"); ok && strings.TrimSpace(s) != "" {
-		nodeType = strings.TrimSpace(s)
+	if s, ok := body.GetString("nodeType"); ok && s != "" {
+		nodeType = s
 	}
 	newNode.SetString("nodeType", nodeType)
 
 	// 7. badge
 	badge := "SSH"
-	if s, ok := body.GetString("badge"); ok && strings.TrimSpace(s) != "" {
-		badge = strings.TrimSpace(s)
+	if s, ok := body.GetString("badge"); ok && s != "" {
+		badge = s
 	}
 	newNode.SetString("badge", badge)
 
 	// 8. badgeColor
 	badgeColor := "text-[#8cd6cb]"
-	if s, ok := body.GetString("badgeColor"); ok && strings.TrimSpace(s) != "" {
-		badgeColor = strings.TrimSpace(s)
+	if s, ok := body.GetString("badgeColor"); ok && s != "" {
+		badgeColor = s
 	}
 	newNode.SetString("badgeColor", badgeColor)
 
 	// 9. ip
 	ip := "192.168.8.200"
-	if s, ok := body.GetString("ip"); ok && strings.TrimSpace(s) != "" {
-		ip = strings.TrimSpace(s)
+	if s, ok := body.GetString("ip"); ok && s != "" {
+		ip = s
 	}
 	newNode.SetString("ip", ip)
 
@@ -284,15 +288,15 @@ func (a *API) HandleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// 11. sshUser
 	sshUser := "core"
-	if s, ok := body.GetString("sshUser"); ok && strings.TrimSpace(s) != "" {
-		sshUser = strings.TrimSpace(s)
+	if s, ok := body.GetString("sshUser"); ok && s != "" {
+		sshUser = s
 	}
 	newNode.SetString("sshUser", sshUser)
 
 	// 12. authMethod
 	authMethod := "ssh-ed25519 (ssh-agent)"
-	if s, ok := body.GetString("authMethod"); ok && strings.TrimSpace(s) != "" {
-		authMethod = strings.TrimSpace(s)
+	if s, ok := body.GetString("authMethod"); ok && s != "" {
+		authMethod = s
 	}
 	newNode.SetString("authMethod", authMethod)
 
@@ -312,42 +316,42 @@ func (a *API) HandleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// 16. tailscaleIp
 	tailscaleIp := "100.100.100.100"
-	if s, ok := body.GetString("tailscaleIp"); ok && strings.TrimSpace(s) != "" {
-		tailscaleIp = strings.TrimSpace(s)
-	} else if s, ok := body.GetString("ip"); ok && strings.TrimSpace(s) != "" {
-		tailscaleIp = strings.TrimSpace(s)
+	if s, ok := body.GetString("tailscaleIp"); ok && s != "" {
+		tailscaleIp = s
+	} else if s, ok := body.GetString("ip"); ok && s != "" {
+		tailscaleIp = s
 	}
 	newNode.SetString("tailscaleIp", tailscaleIp)
 
 	// 17. tailscaleHost
 	nameForTsHost := "node"
-	if s, ok := body.GetString("name"); ok && strings.TrimSpace(s) != "" {
-		nameForTsHost = strings.TrimSpace(s)
+	if s, ok := body.GetString("name"); ok && s != "" {
+		nameForTsHost = s
 	}
 	tailscaleHost := fmt.Sprintf("%s.leo-banjo.ts.net", strings.ToLower(nameForTsHost))
-	if s, ok := body.GetString("tailscaleHost"); ok && strings.TrimSpace(s) != "" {
-		tailscaleHost = strings.TrimSpace(s)
+	if s, ok := body.GetString("tailscaleHost"); ok && s != "" {
+		tailscaleHost = s
 	}
 	newNode.SetString("tailscaleHost", tailscaleHost)
 
 	// 18. osDescription
 	osDescription := "AlmaLinux 10.2 / Linux"
-	if s, ok := body.GetString("osDescription"); ok && strings.TrimSpace(s) != "" {
-		osDescription = strings.TrimSpace(s)
+	if s, ok := body.GetString("osDescription"); ok && s != "" {
+		osDescription = s
 	}
 	newNode.SetString("osDescription", osDescription)
 
 	// 19. status
 	status := "online"
-	if s, ok := body.GetString("status"); ok && strings.TrimSpace(s) != "" {
-		status = strings.TrimSpace(s)
+	if s, ok := body.GetString("status"); ok && s != "" {
+		status = s
 	}
 	newNode.SetString("status", status)
 
 	// 20. uptime
 	uptime := "1m"
-	if s, ok := body.GetString("uptime"); ok && strings.TrimSpace(s) != "" {
-		uptime = strings.TrimSpace(s)
+	if s, ok := body.GetString("uptime"); ok && s != "" {
+		uptime = s
 	}
 	newNode.SetString("uptime", uptime)
 
@@ -366,8 +370,8 @@ func (a *API) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	} else {
 		specsObj := NewObject()
 		cpu := "Multi-core x86_64"
-		if s, ok := body.GetString("cpu"); ok && strings.TrimSpace(s) != "" {
-			cpu = strings.TrimSpace(s)
+		if s, ok := body.GetString("cpu"); ok && s != "" {
+			cpu = s
 		}
 		specsObj.SetString("cpu", cpu)
 
@@ -391,8 +395,8 @@ func (a *API) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		specsObj.SetString("bios", "UEFI 2.8")
 
 		ipmi := "DHCP"
-		if s, ok := body.GetString("ipmi"); ok && strings.TrimSpace(s) != "" {
-			ipmi = strings.TrimSpace(s)
+		if s, ok := body.GetString("ipmi"); ok && s != "" {
+			ipmi = s
 		}
 		specsObj.SetString("ipmi", ipmi)
 
