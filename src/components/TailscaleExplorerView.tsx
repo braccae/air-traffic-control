@@ -5,16 +5,15 @@ import {
   Radio,
   ArrowDownUp,
   Search,
-  ExternalLink,
   RefreshCw,
   Copy,
   Check,
   Zap,
-  Globe,
-  Clock,
-  Key,
+  Settings2,
 } from 'lucide-react';
 import { formatBytes } from '../utils/orchestrator.ts';
+import type { NodeItem } from '../types/index.ts';
+import { compileDaemonPluginMutation, stageTaskInQueue } from '../utils/drivers/index.ts';
 
 interface PeerData {
   ID?: string;
@@ -33,17 +32,173 @@ interface PeerData {
   TxBytes?: number;
   LastHandshake?: string;
   LastSeen?: string;
-  KeyExpiry?: string;
   ExitNode?: boolean;
   ExitNodeOption?: boolean;
+  isSelf?: boolean;
+}
+
+export interface TailscaleFeaturePrefs {
+  acceptDNS: boolean;
+  acceptRoutes: boolean;
+  ssh: boolean;
+  advertiseExitNode: boolean;
+  advertiseRoutes: string;
+  exitNode: string;
+  hostname: string;
+}
+
+export interface TailscaleReadPayload {
+  backendState?: string;
+  magicDNSSuffix?: string;
+  health?: string[];
+  self?: {
+    id?: string;
+    hostName?: string;
+    dnsName?: string;
+    tailscaleIPs?: string[];
+    online?: boolean;
+    os?: string;
+    tags?: string[];
+    exitNode?: boolean;
+  } | null;
+  peers?: Array<{
+    key?: string;
+    hostName?: string;
+    dnsName?: string;
+    tailscaleIPs?: string[];
+    online?: boolean;
+    active?: boolean;
+    os?: string;
+    relay?: string;
+    curAddr?: string;
+    rxBytes?: number;
+    txBytes?: number;
+    lastSeen?: string;
+    lastHandshake?: string;
+    exitNode?: boolean;
+    exitNodeOption?: boolean;
+    allowedIPs?: string[];
+    tags?: string[];
+  }>;
+  prefs?: Partial<TailscaleFeaturePrefs>;
+}
+
+const EMPTY_PREFS: TailscaleFeaturePrefs = {
+  acceptDNS: false,
+  acceptRoutes: false,
+  ssh: false,
+  advertiseExitNode: false,
+  advertiseRoutes: '',
+  exitNode: '',
+  hostname: '',
+};
+
+/**
+ * Maps the Go daemon's structured `network/tailscale` read payload into the
+ * card `PeerData` shape plus the current feature preferences. Pure — safe to
+ * unit test without a live host. Never fabricates state: absent fields default.
+ */
+export function mapTailscalePayload(payload: TailscaleReadPayload): {
+  peers: PeerData[];
+  prefs: TailscaleFeaturePrefs;
+  backendState: string;
+  magicDNSSuffix: string;
+  selfName: string;
+} {
+  const peers: PeerData[] = [];
+
+  const self = payload?.self;
+  if (self) {
+    peers.push({
+      ID: self.id,
+      HostName: self.hostName || 'self',
+      DNSName: self.dnsName || '',
+      TailscaleIPs: self.tailscaleIPs || [],
+      Online: !!self.online,
+      OS: self.os || '',
+      Tags: self.tags,
+      isDirect: true,
+      Relay: '',
+      ExitNode: !!self.exitNode,
+      isSelf: true,
+    });
+  }
+
+  for (const p of payload?.peers || []) {
+    peers.push({
+      ID: p.key,
+      HostName: p.hostName || (p.dnsName ? p.dnsName.split('.')[0] : 'peer'),
+      DNSName: p.dnsName || '',
+      TailscaleIPs: p.tailscaleIPs || [],
+      Online: !!p.online,
+      OS: p.os || '',
+      Tags: p.tags,
+      Active: !!p.active,
+      Relay: p.relay || '',
+      isDirect: !p.relay,
+      CurAddr: p.curAddr || '',
+      AllowedIPs: p.allowedIPs || [],
+      RxBytes: p.rxBytes,
+      TxBytes: p.txBytes,
+      LastHandshake: p.lastHandshake,
+      LastSeen: p.lastSeen,
+      ExitNode: !!p.exitNode,
+      ExitNodeOption: !!p.exitNodeOption,
+      isSelf: false,
+    });
+  }
+
+  return {
+    peers,
+    prefs: { ...EMPTY_PREFS, ...(payload?.prefs || {}) },
+    backendState: payload?.backendState || '',
+    magicDNSSuffix: payload?.magicDNSSuffix || '',
+    selfName: self?.hostName || '',
+  };
+}
+
+/**
+ * Compiles a Tailscale feature action via the Go daemon and stages it into the
+ * Ansible mutation queue. Fails loudly (Zero-Mock Policy) when the daemon is
+ * unreachable or rejects the action.
+ */
+export async function stageTailscaleFeature(
+  node: NodeItem,
+  action: string,
+  options: Record<string, any>
+): Promise<{ success: boolean; title?: string; error?: string }> {
+  try {
+    const task = await compileDaemonPluginMutation(node, 'network', 'tailscale', action, options);
+    const res = await stageTaskInQueue(task);
+    if (!res.success) {
+      return { success: false, error: res.error || 'Failed to stage task in queue' };
+    }
+    return { success: true, title: res.task?.title };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to compile/stage Tailscale feature' };
+  }
 }
 
 interface TailscaleExplorerViewProps {
   onOpenTerminalForHost?: (hostIp: string) => void;
+  node?: NodeItem;
 }
+
+const FEATURE_TOGGLES: Array<{
+  action: string;
+  prefsKey: keyof TailscaleFeaturePrefs;
+  label: string;
+  hint: string;
+}> = [
+  { action: 'set_accept_dns', prefsKey: 'acceptDNS', label: 'Accept DNS', hint: 'tailscale set --accept-dns' },
+  { action: 'set_accept_routes', prefsKey: 'acceptRoutes', label: 'Accept Routes', hint: 'tailscale set --accept-routes' },
+  { action: 'set_ssh', prefsKey: 'ssh', label: 'Tailscale SSH', hint: 'tailscale set --ssh' },
+  { action: 'set_advertise_exit_node', prefsKey: 'advertiseExitNode', label: 'Advertise Exit Node', hint: 'tailscale set --advertise-exit-node' },
+];
 
 export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
   onOpenTerminalForHost,
+  node,
 }) => {
   const [peers, setPeers] = useState<PeerData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -55,15 +210,40 @@ export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
   const [pinging, setPinging] = useState(false);
   const [copiedIp, setCopiedIp] = useState<string | null>(null);
 
+  // Feature-configuration state (only meaningful when a node is selected).
+  const [prefs, setPrefs] = useState<TailscaleFeaturePrefs>(EMPTY_PREFS);
+  const [prefsLoaded, setPrefsLoaded] = useState(false);
+  const [featureInputs, setFeatureInputs] = useState({ advertiseRoutes: '', exitNode: '', hostname: '' });
+  const [applying, setApplying] = useState<string | null>(null);
+  const [featureNotice, setFeatureNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
   const fetchPeers = async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/tailscale/peers');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (data.peers) {
-        setPeers(data.peers);
+      if (node?.id) {
+        const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/plugins/network/tailscale`);
+        if (!res.ok) {
+          const detail = await res.text().catch(() => '');
+          throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ''}`);
+        }
+        const payload: TailscaleReadPayload = await res.json();
+        const mapped = mapTailscalePayload(payload);
+        setPeers(mapped.peers);
+        setPrefs(mapped.prefs);
+        setPrefsLoaded(true);
+        setFeatureInputs({
+          advertiseRoutes: mapped.prefs.advertiseRoutes || '',
+          exitNode: mapped.prefs.exitNode || '',
+          hostname: mapped.prefs.hostname || '',
+        });
+      } else {
+        const res = await fetch('/api/tailscale/peers');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.peers) {
+          setPeers(data.peers);
+        }
       }
     } catch (err: any) {
       setError(err?.message || 'Failed to query live Tailscale peers');
@@ -74,7 +254,24 @@ export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
 
   useEffect(() => {
     fetchPeers();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node?.id]);
+
+  const applyFeature = async (action: string, options: Record<string, any>, label: string) => {
+    if (!node) return;
+    setApplying(action);
+    setFeatureNotice(null);
+    const res = await stageTailscaleFeature(node, action, options);
+    setApplying(null);
+    if (res.success) {
+      setFeatureNotice({
+        kind: 'ok',
+        text: `${label} staged in the Ansible queue for ${node.name}. Run the mutation queue to apply it.`,
+      });
+    } else {
+      setFeatureNotice({ kind: 'err', text: res.error || `Failed to stage ${label}` });
+    }
+  };
 
   const handlePing = async (targetIpOrHost: string) => {
     setPinging(true);
@@ -108,7 +305,6 @@ export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
     setTimeout(() => setCopiedIp(null), 2000);
   };
 
-  // Filter peers
   const filteredPeers = peers.filter((p) => {
     const q = search.toLowerCase();
     const matchesSearch =
@@ -140,10 +336,12 @@ export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
         <div>
           <h2 className="text-lg font-bold text-white flex items-center gap-2">
             <Shield className="w-5 h-5 text-[#58a6ff]" />
-            Tailscale Mesh Explorer (leo-banjo.ts.net)
+            {node ? `Tailscale Mesh — ${node.name}` : 'Tailscale Mesh Explorer (leo-banjo.ts.net)'}
           </h2>
           <p className="text-xs text-gray-400 font-mono mt-0.5">
-            Full mesh telemetry & WireGuard endpoints across all cluster nodes
+            {node
+              ? `Peers visible from ${node.tailscaleHost || node.ip || node.name} and its Tailscale feature configuration`
+              : 'Full mesh telemetry & WireGuard endpoints across all cluster nodes'}
           </p>
         </div>
 
@@ -159,6 +357,115 @@ export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
           </button>
         </div>
       </div>
+
+      {error && (
+        <div className="bg-[#3d1518] border border-[#f85149]/50 rounded-lg p-3 font-mono text-xs text-[#ff7b72]">
+          Failed to read Tailscale state from {node?.name || 'host'}: {error}
+        </div>
+      )}
+
+      {/* Feature Configuration Panel — primary focus for a selected node */}
+      {node && (
+        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+          <div className="flex items-center gap-2 border-b border-[#30363d] pb-2 mb-3">
+            <Settings2 className="w-4 h-4 text-[#58a6ff]" />
+            <h3 className="text-sm font-bold text-white">Feature Configuration</h3>
+            <span className="text-[11px] font-mono text-gray-400">
+              applies to <span className="text-[#79c0ff]">{node.name}</span> via the Ansible mutation queue
+            </span>
+          </div>
+
+          {!prefsLoaded && (
+            <p className="text-[11px] font-mono text-gray-500 mb-3">
+              Current preferences unavailable on this node (tailscale debug prefs returned nothing) — toggles
+              reflect defaults. Values are still applied exactly when staged.
+            </p>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {FEATURE_TOGGLES.map((feat) => {
+              const current = !!prefs[feat.prefsKey] as boolean;
+              const busy = applying === feat.action;
+              return (
+                <div
+                  key={feat.action}
+                  className="flex items-center justify-between gap-3 bg-[#0d1117] border border-[#30363d] rounded p-2.5"
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs font-mono text-gray-200">{feat.label}</div>
+                    <div className="text-[10px] font-mono text-gray-500 truncate">{feat.hint}</div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono border ${
+                        current
+                          ? 'bg-[#238636]/20 border-[#238636]/50 text-[#3fb950]'
+                          : 'bg-[#21262d] border-[#30363d] text-gray-400'
+                      }`}
+                    >
+                      {current ? 'enabled' : 'disabled'}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        applyFeature(feat.action, { enabled: !current }, `${feat.label} → ${!current ? 'enabled' : 'disabled'}`)
+                      }
+                      className="px-2 py-1 bg-[#1f6feb]/20 hover:bg-[#1f6feb]/40 text-[#58a6ff] rounded text-[11px] font-mono border border-[#1f6feb]/40 transition-colors disabled:opacity-50"
+                    >
+                      {busy ? 'Staging…' : !current ? 'Enable' : 'Disable'}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+            {([
+              { action: 'set_advertise_routes', key: 'advertiseRoutes' as const, label: 'Advertise Routes', placeholder: '10.0.0.0/8,192.168.0.0/24', optionName: 'routes' },
+              { action: 'set_exit_node', key: 'exitNode' as const, label: 'Exit Node', placeholder: 'auto:any or 100.x.y.z', optionName: 'exitNode' },
+              { action: 'set_hostname', key: 'hostname' as const, label: 'Hostname', placeholder: 'my-node', optionName: 'hostname' },
+            ]).map((field) => {
+              const busy = applying === field.action;
+              return (
+                <div key={field.action} className="bg-[#0d1117] border border-[#30363d] rounded p-2.5">
+                  <label className="text-xs font-mono text-gray-200 block mb-1.5">{field.label}</label>
+                  <input
+                    type="text"
+                    value={featureInputs[field.key]}
+                    onChange={(e) => setFeatureInputs((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                    placeholder={field.placeholder}
+                    className="w-full bg-[#010409] border border-[#30363d] rounded px-2 py-1 text-[11px] font-mono text-gray-200 placeholder-gray-600 focus:outline-none focus:border-[#58a6ff]"
+                  />
+                  <button
+                    type="button"
+                    disabled={busy || !featureInputs[field.key].trim()}
+                    onClick={() =>
+                      applyFeature(field.action, { [field.optionName]: featureInputs[field.key].trim() }, `${field.label} = ${featureInputs[field.key].trim()}`)
+                    }
+                    className="mt-2 w-full px-2 py-1 bg-[#1f6feb]/20 hover:bg-[#1f6feb]/40 text-[#58a6ff] rounded text-[11px] font-mono border border-[#1f6feb]/40 transition-colors disabled:opacity-40"
+                  >
+                    {busy ? 'Staging…' : 'Stage Change'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          {featureNotice && (
+            <div
+              className={`mt-3 rounded p-2 font-mono text-[11px] border ${
+                featureNotice.kind === 'ok'
+                  ? 'bg-[#238636]/15 border-[#238636]/50 text-[#3fb950]'
+                  : 'bg-[#3d1518] border-[#f85149]/50 text-[#ff7b72]'
+              }`}
+            >
+              {featureNotice.text}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono">
@@ -261,6 +568,11 @@ export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
       )}
 
       {/* Peers List / Grid */}
+      {filteredPeers.length === 0 && !loading && !error && (
+        <div className="text-center text-xs font-mono text-gray-500 py-8 border border-dashed border-[#30363d] rounded-lg">
+          No peers reported{node ? ` by ${node.name}` : ''}.
+        </div>
+      )}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
         {filteredPeers.map((peer) => {
           const isDirect = peer.isDirect;
@@ -286,10 +598,14 @@ export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
                     <h3 className="font-mono font-bold text-white text-sm truncate max-w-[170px]">
                       {cleanName}
                     </h3>
+                    {peer.isSelf && (
+                      <span className="px-1.5 py-0.5 rounded bg-[#58a6ff]/20 border border-[#58a6ff]/50 text-[#58a6ff] text-[10px] font-mono">
+                        Self
+                      </span>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-1">
-                    {/* Connection type badge */}
                     {isDirect ? (
                       <span className="px-1.5 py-0.5 rounded bg-[#238636]/20 border border-[#238636]/50 text-[#3fb950] text-[10px] font-mono flex items-center gap-1">
                         <Wifi className="w-3 h-3" /> Direct
@@ -341,7 +657,6 @@ export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
                     </div>
                   )}
 
-                  {/* Transfer stats */}
                   {(peer.RxBytes !== undefined || peer.TxBytes !== undefined) && (
                     <div className="flex items-center justify-between text-[11px] pt-1 border-t border-[#30363d]/50">
                       <span className="text-gray-500 flex items-center gap-1">
@@ -353,14 +668,12 @@ export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
                     </div>
                   )}
 
-                  {/* Subnet Routes */}
                   {peer.AllowedIPs && peer.AllowedIPs.length > 1 && (
                     <div className="text-[10px] text-gray-500 truncate pt-1">
                       Routes: {peer.AllowedIPs.filter((ip) => ip !== primaryIp).join(', ')}
                     </div>
                   )}
 
-                  {/* Tags */}
                   {peer.Tags && peer.Tags.length > 0 && (
                     <div className="flex flex-wrap gap-1 pt-1.5">
                       {peer.Tags.map((tag) => (
