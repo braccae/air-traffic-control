@@ -31,7 +31,8 @@ import (
 	_ "air-traffic-control/backend/plugins/share/nfs"
 	_ "air-traffic-control/backend/plugins/share/smb"
 
-	// Container plugin
+	// Container plugins
+	_ "air-traffic-control/backend/plugins/container/docker"
 	_ "air-traffic-control/backend/plugins/container/podman"
 
 	// Backup plugin
