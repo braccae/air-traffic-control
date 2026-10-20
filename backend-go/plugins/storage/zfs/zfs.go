@@ -64,19 +64,21 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 
 	// Count pools
 	poolOut, err := r.RunCommand(ctx, "zpool list -H -o name 2>/dev/null || true")
-	if err == nil && strings.TrimSpace(poolOut) != "" {
+	if err == nil && strings.TrimSpace(poolOut) != "" && !strings.Contains(strings.ToLower(poolOut), "no pools") {
 		pools := strings.Fields(strings.TrimSpace(poolOut))
-		return plugin.Detection{
-			Detected: true,
-			Status:   fmt.Sprintf("%d pool(s)", len(pools)),
-			Details:  fmt.Sprintf("Pools: %s", strings.Join(pools, ", ")),
-		}, nil
+		if len(pools) > 0 {
+			return plugin.Detection{
+				Detected: true,
+				Status:   fmt.Sprintf("%d pool(s)", len(pools)),
+				Details:  fmt.Sprintf("Pools: %s", strings.Join(pools, ", ")),
+			}, nil
+		}
 	}
 
 	return plugin.Detection{
-		Detected: true,
-		Status:   "ONLINE",
-		Details:  "ZFS binaries detected, no active pools imported",
+		Detected: false,
+		Status:   "NO_POOLS",
+		Details:  "ZFS binaries present, but no active pools imported",
 	}, nil
 }
 

@@ -463,7 +463,12 @@ export default function App() {
 
   const handleSelectViewMode = (mode: SidebarViewMode) => {
     setSelectedViewMode(mode);
-    writeDatacenterHash(mode === 'datacenter' ? datacenterRoute : null);
+    if (mode === 'datacenter') {
+      setDatacenterRoute(DEFAULT_DATACENTER_ROUTE);
+      writeDatacenterHash(DEFAULT_DATACENTER_ROUTE);
+    } else {
+      writeDatacenterHash(null);
+    }
   };
 
   useEffect(() => {
@@ -1433,38 +1438,6 @@ export default function App() {
                 onPowerOff={() => setRebootModalOpen(true)}
                 onEditNode={() => setEditNodeTarget(selectedNode)}
               />
-
-              <div className="flex items-center justify-between border-t border-[#26293c] px-3 py-1.5 bg-[#121528] text-xs font-mono">
-                <div className="flex items-center gap-2 text-[#dfe1fa]">
-                  <span className="material-symbols-outlined text-[#8cd6cb] text-[16px]">tune</span>
-                  <span className="font-bold text-[#b0c9ff]">ACTIVE COCKPIT SECTION:</span>
-                  <span className="px-2 py-0.5 rounded bg-[#26293c] text-[#8cd6cb] font-bold border border-[#8cd6cb]/30 uppercase tracking-wider text-[11px]">
-                    {activeCockpitItem}
-                  </span>
-                </div>
-
-                {/* UX Controls: High Contrast & Sidebar Resizing */}
-                <div className="flex items-center gap-1.5 font-mono text-[10px] text-[#8d909b] shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setHighContrast(!highContrast)}
-                    className="px-2 py-0.5 rounded bg-[#1f2238] hover:bg-[#2c304d] text-[#b0c9ff] cursor-pointer border border-[#3b405e]"
-                    title="Toggle high contrast UI"
-                  >
-                    Contrast: {highContrast ? 'HIGH' : 'STANDARD'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSubSidebarWidth(w => (w === 'normal' ? 'wide' : w === 'wide' ? 'compact' : 'normal'));
-                    }}
-                    className="px-2 py-0.5 rounded bg-[#1f2238] hover:bg-[#2c304d] text-[#8cd6cb] cursor-pointer border border-[#3b405e]"
-                    title="Resize Sub-sidebar panel"
-                  >
-                    Sidebar: {subSidebarWidth.toUpperCase()}
-                  </button>
-                </div>
-              </div>
             </div>
 
             {/* Cockpit Nested Split Layout: Sub-Sidebar + Main Control Workspace */}
@@ -2025,6 +1998,8 @@ export default function App() {
         onSelectAccentColor={setAccentColor}
         highContrast={highContrast}
         onToggleHighContrast={() => setHighContrast(prev => !prev)}
+        subSidebarWidth={subSidebarWidth}
+        onSelectSubSidebarWidth={setSubSidebarWidth}
         reducedMotion={reducedMotion}
         onToggleReducedMotion={() => setReducedMotion(prev => !prev)}
       />

@@ -300,46 +300,6 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
             Podman &amp; Container Runtime ({selectedNode?.shortName || 'host'})
           </span>
 
-          {/* Tab selector */}
-          <div className="flex items-center bg-[#26293c] p-0.5 rounded font-mono text-xs border border-[#434750]/40">
-            <button
-              type="button"
-              onClick={() => setActiveTab('all')}
-              className={`px-2 py-0.5 rounded cursor-pointer transition-colors ${
-                activeTab === 'all'
-                  ? 'bg-[#35384c] text-[#dfe1fa] font-bold shadow-xs'
-                  : 'text-[#8d909b] hover:text-[#dfe1fa]'
-              }`}
-            >
-              All ({statusCounts.all + (hasDocker ? dockerContainers.length : 0)})
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('podman')}
-              className={`px-2 py-0.5 rounded cursor-pointer transition-colors ${
-                activeTab === 'podman'
-                  ? 'bg-[#35384c] text-[#8cd6cb] font-bold shadow-xs'
-                  : 'text-[#8d909b] hover:text-[#8cd6cb]'
-              }`}
-            >
-              Podman Hierarchy ({statusCounts.all})
-            </button>
-            {hasDocker && (
-              <button
-                type="button"
-                onClick={() => setActiveTab('docker')}
-                className={`px-2 py-0.5 rounded cursor-pointer transition-colors flex items-center gap-1 ${
-                  activeTab === 'docker'
-                    ? 'bg-[#35384c] text-[#b0c9ff] font-bold shadow-xs'
-                    : 'text-[#8d909b] hover:text-[#b0c9ff]'
-                }`}
-              >
-                <span className="material-symbols-outlined text-[13px]">deployed_code</span>
-                <span>Docker Engine ({dockerContainers.length})</span>
-              </button>
-            )}
-          </div>
-
           {/* Status filter buttons */}
           <div className="flex items-center bg-[#313447] px-2 py-0.5 rounded font-mono text-xs gap-2 border border-[#434750]/40">
             <button
