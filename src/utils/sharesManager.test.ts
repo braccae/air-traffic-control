@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import React from 'react';
+import { renderToString } from 'react-dom/server';
+import type { NodeItem } from '../types/index.ts';
+import { NetworkSharesView } from '../components/NetworkSharesView.tsx';
 import {
   escapeShellSingleQuote,
   sanitizeUsername,
@@ -260,4 +264,68 @@ test('filterSharesByScope on an empty list stays empty for every scope', () => {
   assert.deepEqual(filterSharesByScope([], 'smb'), []);
   assert.deepEqual(filterSharesByScope([], 'nfs'), []);
   assert.deepEqual(filterSharesByScope([], 'all'), []);
+});
+
+// --- Render-level (UI) scoping: the SMB tab must not present NFS chrome, and vice versa ---
+
+const sharesViewNode: NodeItem = {
+  id: 'node-shares-test',
+  name: 'Test Samba Host',
+  shortName: 'samba-1',
+  group: 'servers',
+  datacenter: 'dc1',
+  nodeType: 'linux',
+  ip: '192.168.1.100',
+  port: 22,
+  tailscaleIp: '100.64.0.1',
+  tailscaleHost: 'samba-1.ts.net',
+  osDescription: 'Fedora 40',
+  status: 'online',
+  uptime: '2 days',
+  hasGlances: true,
+  hasCockpit: false,
+  hasPodman: false,
+  hasRestic: false,
+  specs: {
+    cpu: 'AMD Ryzen',
+    vcpus: 8,
+    ramGiB: 32,
+    motherboard: 'ASRock Rack',
+    bios: 'v1.2',
+    ipmi: 'none',
+    ecc: 'yes',
+    secureBoot: 'disabled',
+    iommu: 'enabled',
+  },
+};
+
+test('NetworkSharesView scope=smb renders only SMB chrome (no NFS labels)', () => {
+  const html = renderToString(
+    React.createElement(NetworkSharesView, { node: sharesViewNode, scope: 'smb' })
+  );
+  assert.ok(html.includes('Samba / SMB Shares (samba-1)'), 'SMB title expected');
+  assert.ok(html.includes('Add SMB Share'), 'SMB add button expected');
+  assert.ok(html.includes('Manage Users &amp; Passwords'), 'SMB user mgmt expected');
+  assert.ok(html.includes('Reload Daemon'), 'SMB daemon reload expected');
+  assert.strictEqual(html.includes('NFS Exports'), false, 'NFS title must NOT appear in SMB tab');
+  assert.strictEqual(html.includes('Add NFS Export'), false, 'NFS add button must NOT appear in SMB tab');
+});
+
+test('NetworkSharesView scope=nfs hides SMB-only settings', () => {
+  const html = renderToString(
+    React.createElement(NetworkSharesView, { node: sharesViewNode, scope: 'nfs' })
+  );
+  assert.ok(html.includes('NFS Exports (samba-1)'), 'NFS title expected');
+  assert.ok(html.includes('Add NFS Export'), 'NFS add button expected');
+  assert.strictEqual(html.includes('Manage Users &amp; Passwords'), false, 'SMB user mgmt must be hidden in NFS tab');
+  assert.strictEqual(html.includes('Reload Daemon'), false, 'SMB daemon reload must be hidden in NFS tab');
+  assert.strictEqual(html.includes('Samba / SMB Shares'), false, 'SMB title must NOT appear in NFS tab');
+});
+
+test('NetworkSharesView defaults to the combined scope when no scope is given', () => {
+  const html = renderToString(
+    React.createElement(NetworkSharesView, { node: sharesViewNode })
+  );
+  assert.ok(html.includes('Network File Shares: NFS &amp; Samba (samba-1)'), 'Combined title expected by default');
+  assert.ok(html.includes('Add Share'), 'Generic add button expected by default');
 });
