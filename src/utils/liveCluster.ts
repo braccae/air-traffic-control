@@ -546,14 +546,14 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
     const memParts = (sections[1] || '').split(/\s+/);
     const memTotalMb = glancesPayload && glancesPayload.mem.total > 0
       ? +(glancesPayload.mem.total / (1024 * 1024)).toFixed(0)
-      : (Number.parseFloat(memParts[0]) || node.specs.ramGiB * 1024);
+      : (Number.parseFloat(memParts[0]) || (node.specs?.ramGiB ? node.specs.ramGiB * 1024 : 8192));
     const memUsedMb = glancesPayload && glancesPayload.mem.used > 0
       ? +(glancesPayload.mem.used / (1024 * 1024)).toFixed(0)
       : (Number.parseFloat(memParts[1]) || memTotalMb * 0.35);
     const memCacheMb = Number.parseFloat(memParts[2]) || memTotalMb * 0.15;
 
-    const vCpus = Number.parseInt(sections[2] || '', 10) || node.specs.vcpus;
-    const cpuModel = sections[3] || node.specs.cpu;
+    const vCpus = Number.parseInt(sections[2] || '', 10) || node.specs?.vcpus || 4;
+    const cpuModel = sections[3] || node.specs?.cpu || 'x86_64 Host Node';
     const uptimeRaw = (sections[4] || '').replace(/^up\s+/i, '').trim() || node.uptime;
     const osPretty = sections[5] || node.osDescription;
 
@@ -625,10 +625,10 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
     };
   } catch {
     return {
-      cpuModel: node.specs.cpu,
-      vCpus: node.specs.vcpus,
-      memoryTotalGiB: node.specs.ramGiB,
-      memoryUsedGiB: +(node.specs.ramGiB * 0.4).toFixed(1),
+      cpuModel: node.specs?.cpu || 'x86_64 Host Node',
+      vCpus: node.specs?.vcpus || 4,
+      memoryTotalGiB: node.specs?.ramGiB || 8,
+      memoryUsedGiB: +((node.specs?.ramGiB || 8) * 0.4).toFixed(1),
       zfsScrubStatus: `Host: ${node.shortName} (Cached)`,
       metricsSource: 'cockpit-bridge',
     };

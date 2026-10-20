@@ -615,7 +615,7 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
                         <div className="flex items-center justify-between">
                           <span>Specs:</span>
                           <span className="text-[#dfe1fa]">
-                            {node.specs.vcpus} vCPUs • {node.specs.ramGiB} GB
+                            {node.specs?.vcpus ?? '—'} vCPUs • {node.specs?.ramGiB ?? '—'} GB
                           </span>
                         </div>
                         <div className="flex items-center justify-between">

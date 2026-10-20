@@ -267,27 +267,27 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
           <span className="material-symbols-outlined text-[#b0c9ff] text-[16px]">developer_board</span>
           <div className="flex flex-col min-w-0">
             <span className="font-mono text-[11px] text-[#dfe1fa] font-semibold truncate">
-              {node.specs.motherboard}
+              {node.specs?.motherboard || 'Standard Server Platform'}
             </span>
-            <span className="font-mono text-[9px] text-[#8d909b]">BIOS: {node.specs.bios}</span>
+            <span className="font-mono text-[9px] text-[#8d909b]">BIOS: {node.specs?.bios || 'UEFI'}</span>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-1 mt-0.5 bg-[#0a0d1f]/60 p-1.5 rounded font-mono text-[9px] border border-[#26293c]/50">
           <div>
             <span className="text-[#8d909b]">IPMI/BMC:</span>{' '}
-            <span className="text-[#8cd6cb]">{node.specs.ipmi}</span>
+            <span className="text-[#8cd6cb]">{node.specs?.ipmi || 'N/A'}</span>
           </div>
           <div>
             <span className="text-[#8d909b]">ECC:</span>{' '}
-            <span className="text-[#8cd6cb]">{node.specs.ecc}</span>
+            <span className="text-[#8cd6cb]">{node.specs?.ecc || 'N/A'}</span>
           </div>
           <div>
             <span className="text-[#8d909b]">SecureBoot:</span>{' '}
-            <span className="text-[#dfe1fa]">{node.specs.secureBoot}</span>
+            <span className="text-[#dfe1fa]">{node.specs?.secureBoot || 'N/A'}</span>
           </div>
           <div>
             <span className="text-[#8d909b]">IOMMU:</span>{' '}
-            <span className="text-[#8cd6cb]">{node.specs.iommu}</span>
+            <span className="text-[#8cd6cb]">{node.specs?.iommu || 'N/A'}</span>
           </div>
         </div>
       </div>

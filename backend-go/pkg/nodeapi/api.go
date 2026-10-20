@@ -22,32 +22,39 @@ import (
 	"time"
 
 	"air-traffic-control/backend/pkg/hostcache"
+	"air-traffic-control/backend/pkg/tailscale"
 )
 
 // Store defines persistence operations required by the node API.
 type Store interface {
+	SeedHostsIfEmpty(initialHosts []hostcache.NodeRecord) ([]hostcache.NodeRecord, error)
 	GetAllHosts() ([]hostcache.NodeRecord, error)
 	GetHostByID(id string) (hostcache.NodeRecord, bool, error)
 	UpsertHost(rec hostcache.NodeRecord) error
+	UpsertHosts(nodes []hostcache.NodeRecord) error
 	DeleteHost(id string) (bool, error)
+	GetAllTagChunks() ([]hostcache.TagChunk, error)
 }
 
 // Options configures the node API surface.
 type Options struct {
-	Store     Store
-	Runner    CommandRunner
-	Broadcast func(event map[string]any)
-	Now       func() time.Time
-	Fallback  http.Handler
+	Store           Store
+	Runner          CommandRunner
+	Broadcast       func(event map[string]any)
+	Now             func() time.Time
+	Fallback        http.Handler
+	TailscaleStatus func() (*tailscale.Status, error)
+	SeedBaseline    bool
 }
 
 // API handles node CRUD and hardware probing requests.
 type API struct {
-	store     Store
-	runner    CommandRunner
-	broadcast func(event map[string]any)
-	now       func() time.Time
-	fallback  http.Handler
+	store           Store
+	runner          CommandRunner
+	broadcast       func(event map[string]any)
+	now             func() time.Time
+	fallback        http.Handler
+	tailscaleStatus func() (*tailscale.Status, error)
 }
 
 // New creates and validates a new node API instance.
@@ -59,13 +66,24 @@ func New(opts Options) (*API, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &API{
-		store:     opts.Store,
-		runner:    opts.Runner,
-		broadcast: opts.Broadcast,
-		now:       now,
-		fallback:  opts.Fallback,
-	}, nil
+	tsStatus := opts.TailscaleStatus
+	if tsStatus == nil {
+		tsStatus = tailscale.GetLocalStatus
+	}
+	api := &API{
+		store:           opts.Store,
+		runner:          opts.Runner,
+		broadcast:       opts.Broadcast,
+		now:             now,
+		fallback:        opts.Fallback,
+		tailscaleStatus: tsStatus,
+	}
+
+	if opts.SeedBaseline {
+		_ = api.SeedAndSyncBaseline()
+	}
+
+	return api, nil
 }
 
 // Register mounts the /api/nodes/ subtree on mux.
@@ -129,6 +147,10 @@ func (a *API) handleNodesSubtree(w http.ResponseWriter, r *http.Request) {
 	if sub == "" {
 		if r.Method == http.MethodPost {
 			a.HandleCreate(w, r)
+			return
+		}
+		if r.Method == http.MethodGet {
+			a.HandleList(w, r)
 			return
 		}
 		a.notFound(w, r)

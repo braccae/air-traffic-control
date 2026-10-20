@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"air-traffic-control/backend/pkg/hostcache"
+	"air-traffic-control/backend/pkg/tailscale"
 )
 
 type stubRunner struct {
@@ -53,13 +54,7 @@ func setupTestServer(t *testing.T, runner CommandRunner) (*httptest.Server, *hos
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			api.HandleCreate(w, r)
-			return
-		}
-		api.notFound(w, r)
-	})
+	mux.HandleFunc("/api/nodes", api.HandleNodes)
 	api.Register(mux)
 
 	server := httptest.NewServer(mux)
@@ -855,5 +850,251 @@ func TestAPICreateMalformedJSON(t *testing.T) {
 	}
 	if len(hosts) != 0 {
 		t.Errorf("malformed body must not create a node, got %d hosts", len(hosts))
+	}
+}
+
+func TestGETNodesSeedsBaselineAndPopulatesSpecs(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hosts-cache.sqlite")
+	store, err := hostcache.Open(dbPath)
+	if err != nil {
+		t.Fatalf("hostcache.Open: %v", err)
+	}
+	defer store.Close()
+
+	api, err := New(Options{
+		Store:        store,
+		SeedBaseline: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/nodes", api.HandleNodes)
+	api.Register(mux)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/nodes")
+	if err != nil {
+		t.Fatalf("GET /api/nodes: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var nodes []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+		t.Fatalf("decode nodes: %v", err)
+	}
+
+	if len(nodes) != 8 {
+		t.Fatalf("expected 8 baseline nodes, got %d", len(nodes))
+	}
+
+	for _, n := range nodes {
+		id, _ := n["id"].(string)
+		shortName, _ := n["shortName"].(string)
+		badge, _ := n["badge"].(string)
+		badgeColor, _ := n["badgeColor"].(string)
+		sshUser, _ := n["sshUser"].(string)
+		tags, _ := n["tags"].([]any)
+
+		if shortName == "" || badge == "" || badgeColor == "" || sshUser == "" || len(tags) == 0 {
+			t.Errorf("node %s missing metadata fields: %+v", id, n)
+		}
+
+		specs, ok := n["specs"].(map[string]any)
+		if !ok || specs == nil {
+			t.Fatalf("node %s has nil/missing specs", id)
+		}
+
+		checkNonEmpty := func(field string) {
+			val, _ := specs[field].(string)
+			if strings.TrimSpace(val) == "" {
+				t.Errorf("node %s missing specs.%s", id, field)
+			}
+		}
+
+		checkPositive := func(field string) {
+			val, _ := specs[field].(float64)
+			if val <= 0 {
+				t.Errorf("node %s invalid specs.%s: %v", id, field, specs[field])
+			}
+		}
+
+		checkNonEmpty("motherboard")
+		checkNonEmpty("bios")
+		checkNonEmpty("cpu")
+		checkPositive("vcpus")
+		checkPositive("ramGiB")
+		checkNonEmpty("ipmi")
+		checkNonEmpty("ecc")
+		checkNonEmpty("secureBoot")
+		checkNonEmpty("iommu")
+	}
+}
+
+func TestGETNodesRepairsMissingSpecsOnCustomNode(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hosts-cache.sqlite")
+	store, err := hostcache.Open(dbPath)
+	if err != nil {
+		t.Fatalf("hostcache.Open: %v", err)
+	}
+	defer store.Close()
+
+	// Insert legacy record without specs
+	legacyJSON := `{"id":"node-custom-legacy","name":"custom-server","ip":"192.168.1.90"}`
+	err = store.UpsertHost(hostcache.NodeRecord{
+		ID:       "node-custom-legacy",
+		Name:     "custom-server",
+		IP:       "192.168.1.90",
+		NodeJSON: json.RawMessage(legacyJSON),
+	})
+	if err != nil {
+		t.Fatalf("UpsertHost: %v", err)
+	}
+
+	api, err := New(Options{
+		Store:        store,
+		SeedBaseline: false,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/nodes", api.HandleNodes)
+	api.Register(mux)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/nodes")
+	if err != nil {
+		t.Fatalf("GET /api/nodes: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var nodes []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+		t.Fatalf("decode nodes: %v", err)
+	}
+
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(nodes))
+	}
+
+	n := nodes[0]
+	specs, ok := n["specs"].(map[string]any)
+	if !ok || specs == nil {
+		t.Fatalf("expected specs to be populated on legacy node, got %+v", n)
+	}
+
+	if mb, _ := specs["motherboard"].(string); mb == "" {
+		t.Errorf("expected non-empty motherboard, got %q", mb)
+	}
+	if cpu, _ := specs["cpu"].(string); cpu == "" {
+		t.Errorf("expected non-empty cpu, got %q", cpu)
+	}
+	if bios, _ := specs["bios"].(string); bios == "" {
+		t.Errorf("expected non-empty bios, got %q", bios)
+	}
+}
+
+func TestGETNodesRefreshPreservesSpecs(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hosts-cache.sqlite")
+	store, err := hostcache.Open(dbPath)
+	if err != nil {
+		t.Fatalf("hostcache.Open: %v", err)
+	}
+	defer store.Close()
+
+	fakeStatus := func() (*tailscale.Status, error) {
+		st := &tailscale.Status{}
+		st.Self.HostName = "dev-pc"
+		st.Self.DNSName = "dev-pc.leo-banjo.ts.net."
+		st.Self.TailscaleIPs = []string{"100.97.159.101"}
+		st.Self.Online = true
+
+		st.Peer = map[string]tailscale.PeerStatus{
+			"likes-it-cold": {
+				ID:           "node-likes-it-cold",
+				HostName:     "likes-it-cold",
+				DNSName:      "likes-it-cold.leo-banjo.ts.net.",
+				TailscaleIPs: []string{"100.105.71.49"},
+				Addrs:        []string{"192.168.8.249:41641"},
+				Online:       true,
+			},
+			"ping": {
+				ID:           "node-ping",
+				HostName:     "ping",
+				DNSName:      "ping.leo-banjo.ts.net.",
+				TailscaleIPs: []string{"100.73.87.87"},
+				Addrs:        []string{"10.0.0.88:41641"},
+				Online:       false,
+			},
+		}
+		return st, nil
+	}
+
+	api, err := New(Options{
+		Store:           store,
+		SeedBaseline:    true,
+		TailscaleStatus: fakeStatus,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/nodes", api.HandleNodes)
+	api.Register(mux)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/nodes?refresh=true")
+	if err != nil {
+		t.Fatalf("GET /api/nodes?refresh=true: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var nodes []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+		t.Fatalf("decode nodes: %v", err)
+	}
+
+	var pingNode map[string]any
+	for _, n := range nodes {
+		if id, _ := n["id"].(string); id == "node-ping" {
+			pingNode = n
+			break
+		}
+	}
+
+	if pingNode == nil {
+		t.Fatalf("node-ping not found in refreshed nodes")
+	}
+
+	if st, _ := pingNode["status"].(string); st != "stopped" {
+		t.Errorf("expected ping status to be updated to stopped, got %q", st)
+	}
+	if ip, _ := pingNode["ip"].(string); ip != "10.0.0.88" {
+		t.Errorf("expected ping ip to be updated to 10.0.0.88 from Addrs, got %q", ip)
+	}
+
+	specs, ok := pingNode["specs"].(map[string]any)
+	if !ok || specs == nil {
+		t.Fatalf("node-ping lost specs during refresh!")
+	}
+	if mb, _ := specs["motherboard"].(string); mb != "Dell 0Y7WYT (OptiPlex 7040)" {
+		t.Errorf("expected Dell motherboard specs preserved, got %q", mb)
+	}
+	if cpu, _ := specs["cpu"].(string); cpu != "Intel(R) Core(TM) i5-6500 CPU @ 3.20GHz" {
+		t.Errorf("expected Intel CPU specs preserved, got %q", cpu)
 	}
 }

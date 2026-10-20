@@ -135,3 +135,17 @@ test('CockpitSubSidebar renders detected plugins grouped dynamically by section/
   assert.ok(html.includes('Podman Containers'), 'Must render Podman Containers tab');
   assert.ok(html.includes('4 running'), 'Must render 4 running status badge');
 });
+
+test('CockpitSubSidebar renders safely without throwing when node.specs is undefined', () => {
+  const nodeWithoutSpecs = { ...mockNode, specs: undefined as any };
+  assert.doesNotThrow(() => {
+    const html = renderToString(
+      React.createElement(CockpitSubSidebar, {
+        node: nodeWithoutSpecs,
+        activeItem: 'overview',
+        onSelectItem: () => {},
+      })
+    );
+    assert.ok(html.includes('Standard Server Platform') && html.includes('UEFI'));
+  });
+});
