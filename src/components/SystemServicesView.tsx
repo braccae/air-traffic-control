@@ -7,11 +7,71 @@ export interface ServiceUnitItem {
   active: string;
   sub: string;
   description: string;
+  /** systemd unit-file state: enabled / disabled / static / masked / ... */
+  unitFileState?: string;
+  enabled?: boolean;
+  /** which manager owns the unit: "system" or "user" */
+  scope?: 'system' | 'user';
 }
 
 export interface ServiceReadResponse {
   manager?: string;
   services?: ServiceUnitItem[];
+  warnings?: string[];
+}
+
+/** GET /api/nodes/:id/systemd/units — systemd's own JSON unit listing. */
+interface SystemdUnitListResponse {
+  nodeId: string;
+  manager: string;
+  scope: string;
+  units: ServiceUnitItem[];
+  warnings?: string[];
+}
+
+/** GET /api/nodes/:id/systemd/unit — per-unit property projection. */
+export interface SystemdUnitState {
+  unit: string;
+  scope: string;
+  description?: string;
+  loadState: string;
+  activeState: string;
+  subState: string;
+  unitFileState?: string;
+  enabled: boolean;
+  result?: string;
+  fragmentPath?: string;
+  dropInPaths?: string[];
+  mainPid?: number;
+  nRestarts?: number;
+  activeEnterTimestamp?: string;
+  stateChangeTimestamp?: string;
+  inactiveEnterTimestamp?: string;
+}
+
+interface SystemdUnitDetailResponse {
+  nodeId: string;
+  scope: string;
+  state: SystemdUnitState;
+}
+
+/** GET /api/nodes/:id/systemd/journal — structured journald records. */
+export interface SystemdJournalEntry {
+  timestamp: string;
+  priority: number;
+  level: string;
+  unit?: string;
+  identifier?: string;
+  pid?: string;
+  message: string;
+}
+
+interface SystemdJournalResponse {
+  nodeId: string;
+  scope: string;
+  unit?: string;
+  count: number;
+  entries: SystemdJournalEntry[];
 }
 
 interface SystemServicesViewProps {
@@ -33,12 +93,36 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [showRebootModal, setShowRebootModal] = useState(false);
+  const [scopeFilter, setScopeFilter] = useState<'all' | 'system' | 'user'>('all');
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [selectedUnit, setSelectedUnit] = useState<ServiceUnitItem | null>(null);
+  const [unitState, setUnitState] = useState<SystemdUnitState | null>(null);
+  const [unitStateError, setUnitStateError] = useState<string | null>(null);
+  const [journal, setJournal] = useState<SystemdJournalEntry[]>([]);
+  const [journalError, setJournalError] = useState<string | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
+  // Unit list comes from the daemon's systemd routes, which read systemd's own
+  // JSON (list-units + list-unit-files) for both the system and user managers.
+  // The plugin endpoint remains the fallback for non-systemd init systems.
   const fetchServices = async () => {
     if (!node?.id) return;
     setLoading(true);
     setError(null);
     try {
+      const sysdRes = await fetch(
+        `/api/nodes/${encodeURIComponent(node.id)}/systemd/units?scope=all`
+      );
+      if (sysdRes.ok) {
+        const data: SystemdUnitListResponse = await sysdRes.json();
+        if (Array.isArray(data.units)) {
+          setServices(data.units);
+          setManager(data.manager || 'systemd');
+          setWarnings(Array.isArray(data.warnings) ? data.warnings : []);
+          return;
+        }
+      }
+
       const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/plugins/system/service`);
       if (!res.ok) {
         const text = await res.text();
@@ -50,6 +134,7 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
       } else {
         setServices([]);
       }
+      setWarnings(Array.isArray(data.warnings) ? data.warnings : []);
       if (data.manager) {
         setManager(data.manager);
       }
@@ -60,11 +145,57 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
     }
   };
 
+  // Per-unit detail: systemd property state plus that unit's journal.
+  const loadUnitDetail = async (unit: ServiceUnitItem) => {
+    if (!node?.id) return;
+    const scope = unit.scope === 'user' ? 'user' : 'system';
+    setSelectedUnit(unit);
+    setUnitState(null);
+    setJournal([]);
+    setUnitStateError(null);
+    setJournalError(null);
+    setDetailLoading(true);
+    try {
+      const [stateRes, journalRes] = await Promise.all([
+        fetch(
+          `/api/nodes/${encodeURIComponent(node.id)}/systemd/unit?unit=${encodeURIComponent(unit.unit)}&scope=${scope}`
+        ),
+        fetch(
+          `/api/nodes/${encodeURIComponent(node.id)}/systemd/journal?unit=${encodeURIComponent(unit.unit)}&scope=${scope}&lines=200`
+        ),
+      ]);
+
+      if (stateRes.ok) {
+        const detail: SystemdUnitDetailResponse = await stateRes.json();
+        setUnitState(detail.state);
+      } else {
+        const errJson = await stateRes.json().catch(() => ({}));
+        setUnitStateError(errJson.error || `Failed to read unit state (HTTP ${stateRes.status})`);
+      }
+
+      if (journalRes.ok) {
+        const data: SystemdJournalResponse = await journalRes.json();
+        setJournal(Array.isArray(data.entries) ? data.entries : []);
+      } else {
+        const errJson = await journalRes.json().catch(() => ({}));
+        setJournalError(errJson.error || `Failed to read journal (HTTP ${journalRes.status})`);
+      }
+    } catch (err: any) {
+      setUnitStateError(err?.message || 'Failed to read unit detail');
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchServices();
   }, [node?.id]);
 
-  const handleServiceAction = async (unitName: string, actionName: string) => {
+  const handleServiceAction = async (
+    unitName: string,
+    actionName: string,
+    scope: 'system' | 'user' = 'system'
+  ) => {
     setActionInProgress(`${actionName}:${unitName}`);
     setToastMessage(null);
     try {
@@ -73,7 +204,7 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ options: { name: unitName } }),
+          body: JSON.stringify({ options: { name: unitName, scope } }),
         }
       );
 
@@ -95,7 +226,7 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
           targetSshUser: node.sshUser || 'core',
           targetSshPort: node.port || 22,
           category: 'system',
-          primaryModule: taskSpec.steps?.[0]?.module || 'ansible.builtin.systemd',
+          primaryModule: taskSpec.steps?.[0]?.module || 'ansible.builtin.systemd_service',
           steps: taskSpec.steps || [],
           become: true,
           status: 'staged',
@@ -151,7 +282,7 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
           targetSshUser: node.sshUser || 'core',
           targetSshPort: node.port || 22,
           category: 'system',
-          primaryModule: 'ansible.builtin.systemd',
+          primaryModule: 'ansible.builtin.systemd_service',
           steps: taskSpec.steps || [],
           become: true,
           status: 'staged',
@@ -234,6 +365,9 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
   // Filtered services
   const filteredServices = useMemo(() => {
     return services.filter(s => {
+      // Manager scope filter
+      if (scopeFilter !== 'all' && (s.scope || 'system') !== scopeFilter) return false;
+
       // Status filter
       if (statusFilter === 'running' && !(s.active === 'active' && (s.sub === 'running' || s.sub === 'exited'))) return false;
       if (statusFilter === 'failed' && !(s.active === 'failed' || s.sub === 'failed')) return false;
@@ -310,6 +444,15 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Non-fatal read warnings (e.g. no reachable user manager) */}
+      {warnings.length > 0 && (
+        <div className="p-2 rounded text-[10px] bg-[#2a2414] text-[#e8c78c] border border-[#e8c78c]/30 flex flex-col gap-1">
+          {warnings.map(w => (
+            <span key={w}>⚠ {w}</span>
+          ))}
+        </div>
+      )}
 
       {/* Toast Notice */}
       {toastMessage && (
@@ -417,6 +560,25 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
           )}
         </div>
 
+        {/* Manager scope filter: system units vs the user manager's units */}
+        <div className="flex items-center gap-1 shrink-0">
+          {(['all', 'system', 'user'] as const).map(s => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setScopeFilter(s)}
+              className={`px-1.5 py-0.5 rounded text-[9px] uppercase font-bold border cursor-pointer transition-colors ${
+                scopeFilter === s
+                  ? 'bg-[#21263d] text-[#b0c9ff] border-[#b0c9ff]/50'
+                  : 'bg-[#171a2d] text-[#8d909b] border-[#26293c] hover:text-[#dfe1fa]'
+              }`}
+              title={s === 'user' ? 'Units from the per-user systemd manager' : s === 'system' ? 'Units from the host systemd manager' : 'All units from both managers'}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+
         <div className="text-[10px] text-[#8d909b] shrink-0 font-medium">
           Showing {filteredServices.length} of {totalCount} units
         </div>
@@ -471,11 +633,28 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
                       key={srv.unit}
                       className="hover:bg-[#1b1e31] transition-colors group"
                     >
-                      <td className="py-2 px-3 font-semibold text-[#dfe1fa] flex items-center gap-2 min-w-[200px]">
-                        <span className="material-symbols-outlined text-[14px] text-[#8d909b]">
-                          settings_suggest
-                        </span>
-                        <span className="truncate">{srv.unit}</span>
+                      <td className="py-2 px-3 font-semibold text-[#dfe1fa] min-w-[220px]">
+                        <button
+                          type="button"
+                          onClick={() => loadUnitDetail(srv)}
+                          className="flex items-center gap-2 cursor-pointer text-left hover:text-[#b0c9ff] transition-colors"
+                          title={`Open ${srv.unit} state and journal`}
+                        >
+                          <span className="material-symbols-outlined text-[14px] text-[#8d909b]">
+                            settings_suggest
+                          </span>
+                          <span className="truncate">{srv.unit}</span>
+                          {srv.scope === 'user' && (
+                            <span className="px-1 rounded text-[8px] uppercase font-bold bg-[#26293c] text-[#b0c9ff] border border-[#b0c9ff]/30">
+                              user
+                            </span>
+                          )}
+                          {srv.unitFileState && (
+                            <span className="px-1 rounded text-[8px] uppercase font-bold bg-[#1f2238] text-[#8d909b] border border-[#26293c]">
+                              {srv.unitFileState}
+                            </span>
+                          )}
+                        </button>
                       </td>
                       <td className="py-2 px-3 whitespace-nowrap">
                         <span
@@ -507,10 +686,20 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
                       </td>
                       <td className="py-2 px-3 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1">
+                          {/* Journal / detail */}
+                          <button
+                            type="button"
+                            onClick={() => loadUnitDetail(srv)}
+                            className="p-1 rounded bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] text-[10px] cursor-pointer transition-colors"
+                            title={`Show ${srv.unit} state and journal`}
+                          >
+                            <span className="material-symbols-outlined text-[13px]">description</span>
+                          </button>
+
                           {/* Restart Button */}
                           <button
                             type="button"
-                            onClick={() => handleServiceAction(srv.unit, 'restart')}
+                            onClick={() => handleServiceAction(srv.unit, 'restart', srv.scope || 'system')}
                             disabled={inProgress}
                             className="p-1 rounded bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] text-[10px] cursor-pointer disabled:opacity-40 transition-colors"
                             title={`Restart ${srv.unit}`}
@@ -524,7 +713,7 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
                           {isRunning ? (
                             <button
                               type="button"
-                              onClick={() => handleServiceAction(srv.unit, 'stop')}
+                              onClick={() => handleServiceAction(srv.unit, 'stop', srv.scope || 'system')}
                               disabled={inProgress}
                               className="p-1 rounded bg-[#331114] hover:bg-[#4d161a] text-[#ffb4ab] text-[10px] cursor-pointer disabled:opacity-40 transition-colors"
                               title={`Stop ${srv.unit}`}
@@ -536,7 +725,7 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
                           ) : (
                             <button
                               type="button"
-                              onClick={() => handleServiceAction(srv.unit, 'start')}
+                              onClick={() => handleServiceAction(srv.unit, 'start', srv.scope || 'system')}
                               disabled={inProgress}
                               className="p-1 rounded bg-[#0f231e] hover:bg-[#193a32] text-[#8cd6cb] text-[10px] cursor-pointer disabled:opacity-40 transition-colors"
                               title={`Start ${srv.unit}`}
@@ -547,16 +736,28 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
                             </button>
                           )}
 
-                          {/* Enable / Disable */}
-                          <button
-                            type="button"
-                            onClick={() => handleServiceAction(srv.unit, 'enable')}
-                            disabled={inProgress}
-                            className="px-1.5 py-0.5 rounded bg-[#26293c] hover:bg-[#35384c] text-[#c3c6d2] hover:text-[#dfe1fa] text-[9px] uppercase font-bold cursor-pointer disabled:opacity-40 transition-colors"
-                            title={`Enable ${srv.unit} on boot`}
-                          >
-                            Enable
-                          </button>
+                          {/* Enable / Disable, driven by systemd's unit-file state */}
+                          {srv.enabled ? (
+                            <button
+                              type="button"
+                              onClick={() => handleServiceAction(srv.unit, 'disable', srv.scope || 'system')}
+                              disabled={inProgress}
+                              className="px-1.5 py-0.5 rounded bg-[#26293c] hover:bg-[#35384c] text-[#c3c6d2] hover:text-[#dfe1fa] text-[9px] uppercase font-bold cursor-pointer disabled:opacity-40 transition-colors"
+                              title={`Disable ${srv.unit} at boot`}
+                            >
+                              Disable
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleServiceAction(srv.unit, 'enable', srv.scope || 'system')}
+                              disabled={inProgress}
+                              className="px-1.5 py-0.5 rounded bg-[#26293c] hover:bg-[#35384c] text-[#c3c6d2] hover:text-[#dfe1fa] text-[9px] uppercase font-bold cursor-pointer disabled:opacity-40 transition-colors"
+                              title={`Enable ${srv.unit} at boot`}
+                            >
+                              Enable
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -564,6 +765,137 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
                 })}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* Unit detail drawer: systemd property state + that unit's journal */}
+      {selectedUnit && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#171a2d] border border-[#26293c] rounded-lg w-full max-w-4xl max-h-[85vh] flex flex-col gap-3 p-4 shadow-xl overflow-hidden">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 text-[#dfe1fa]">
+                  <span className="material-symbols-outlined text-[18px] text-[#8cd6cb]">description</span>
+                  <h4 className="text-sm font-bold break-all">{selectedUnit.unit}</h4>
+                  <span className="px-1.5 py-0.2 rounded text-[9px] uppercase font-bold bg-[#26293c] text-[#b0c9ff] border border-[#b0c9ff]/30">
+                    {unitState?.scope || selectedUnit.scope || 'system'}
+                  </span>
+                </div>
+                <p className="text-[10px] text-[#8d909b] mt-0.5">
+                  state from systemctl show, journal from journalctl -o json
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedUnit(null)}
+                className="text-[#8d909b] hover:text-[#dfe1fa] text-[12px] cursor-pointer"
+                title="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {detailLoading ? (
+              <div className="p-6 text-center text-[11px] text-[#8d909b] flex items-center justify-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-[#8cd6cb] animate-spin">sync</span>
+                <span>Reading unit state and journal from host...</span>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3 overflow-y-auto">
+                {unitStateError && (
+                  <div className="p-2 rounded bg-[#331114] border border-[#ffb4ab]/30 text-[10px] text-[#ffb4ab] break-all">
+                    {unitStateError}
+                  </div>
+                )}
+
+                {unitState && (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px]">
+                    {[
+                      ['Load', unitState.loadState],
+                      ['Active', unitState.activeState],
+                      ['Sub', unitState.subState],
+                      ['Unit file', unitState.unitFileState || '—'],
+                      ['Result', unitState.result || '—'],
+                      ['Main PID', unitState.mainPid ? String(unitState.mainPid) : '—'],
+                      ['Restarts', String(unitState.nRestarts ?? 0)],
+                      ['Since', unitState.activeEnterTimestamp || '—'],
+                    ].map(([label, value]) => (
+                      <div key={label} className="p-1.5 rounded bg-[#0f1224] border border-[#26293c]/80">
+                        <div className="text-[9px] uppercase font-bold text-[#8d909b]">{label}</div>
+                        <div className="text-[#dfe1fa] break-all">{value}</div>
+                      </div>
+                    ))}
+                    <div className="md:col-span-4 p-1.5 rounded bg-[#0f1224] border border-[#26293c]/80">
+                      <div className="text-[9px] uppercase font-bold text-[#8d909b]">Fragment / drop-ins</div>
+                      <div className="text-[#c3c6d2] break-all font-mono">
+                        {unitState.fragmentPath || '—'}
+                        {(unitState.dropInPaths || []).map(p => (
+                          <div key={p} className="text-[#8cd6cb]">↳ {p}</div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between">
+                  <div className="text-[10px] uppercase font-bold text-[#8d909b]">
+                    Journal ({journal.length})
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => loadUnitDetail(selectedUnit)}
+                    className="px-2 py-0.5 rounded bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] text-[10px] cursor-pointer"
+                  >
+                    Reload
+                  </button>
+                </div>
+
+                {journalError ? (
+                  <div className="p-2 rounded bg-[#331114] border border-[#ffb4ab]/30 text-[10px] text-[#ffb4ab] break-all">
+                    {journalError}
+                  </div>
+                ) : journal.length === 0 ? (
+                  <div className="p-6 text-center text-[10px] text-[#8d909b] bg-[#0f1224] border border-[#26293c]/80 rounded">
+                    No journal records for this unit in the requested window.
+                  </div>
+                ) : (
+                  <div className="bg-[#0a0d1f] border border-[#26293c] rounded overflow-auto max-h-[45vh]">
+                    <table className="w-full text-left text-[10px] border-collapse">
+                      <tbody className="divide-y divide-[#26293c]/40">
+                        {journal.map((entry, idx) => (
+                          <tr key={`${entry.timestamp}-${idx}`} className="align-top hover:bg-[#141830]">
+                            <td className="py-1 px-2 whitespace-nowrap text-[#8d909b] font-mono">
+                              {entry.timestamp || '—'}
+                            </td>
+                            <td className="py-1 px-2 whitespace-nowrap">
+                              <span
+                                className={`px-1 rounded text-[8px] uppercase font-bold border ${
+                                  entry.priority <= 3
+                                    ? 'bg-[#331114] text-[#ffb4ab] border-[#ffb4ab]/30'
+                                    : entry.priority <= 4
+                                    ? 'bg-[#2a2414] text-[#e8c78c] border-[#e8c78c]/30'
+                                    : 'bg-[#1f2238] text-[#8d909b] border-[#26293c]'
+                                }`}
+                              >
+                                {entry.level || String(entry.priority)}
+                              </span>
+                            </td>
+                            <td className="py-1 px-2 whitespace-nowrap text-[#8cd6cb] font-mono">
+                              {entry.identifier || entry.unit || '—'}
+                              {entry.pid ? `[${entry.pid}]` : ''}
+                            </td>
+                            <td className="py-1 px-2 text-[#dfe1fa] font-mono break-all whitespace-pre-wrap">
+                              {entry.message}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}

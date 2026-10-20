@@ -63,9 +63,9 @@ const mockNode: NodeItem = {
 };
 
 describe('ansibleQueueCompiler', () => {
-  it('compiles service mutation using native ansible.builtin.systemd with run0', () => {
+  it('compiles service mutation using native ansible.builtin.systemd_service with run0', () => {
     const task = compileServiceTask(mockNode, 'caddy', 'restarted');
-    expect(task.primaryModule).toBe('ansible.builtin.systemd');
+    expect(task.primaryModule).toBe('ansible.builtin.systemd_service');
     expect(task.becomeMethod).toBe('run0');
     expect(task.become).toBe(true);
     expect(task.category).toBe('system');
@@ -73,12 +73,12 @@ describe('ansibleQueueCompiler', () => {
     expect(task.targetSshUser).toBe('core');
     expect(task.targetSshPort).toBe(22);
     expect(task.steps.length).toBe(1);
-    expect(task.steps[0].module).toBe('ansible.builtin.systemd');
+    expect(task.steps[0].module).toBe('ansible.builtin.systemd_service');
     expect(task.steps[0].parameters.name).toBe('caddy');
     expect(task.steps[0].parameters.state).toBe('restarted');
 
     const yaml = compileOnTheFlyPlaybook(task);
-    expect(yaml).toContain('ansible.builtin.systemd:');
+    expect(yaml).toContain('ansible.builtin.systemd_service:');
     expect(yaml).toContain('ansible_host: "likes-it-cold.ts.net"');
     expect(yaml).toContain('ansible_user: "core"');
     expect(yaml).toContain('ansible_port: 22');
