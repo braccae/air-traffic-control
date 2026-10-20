@@ -10,6 +10,21 @@ coverage/
 data/bin/
 data/ansible-venv/
 
+# Runtime host-cache SQLite — real homelab inventory, never track or publish.
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+
+# Agent scratch / skill working copies (like .superpowers/, never commit).
+.agents/
+
+# Editor config.
+.vscode/
+
+# One-off verification scratch (contains a real node id; sanitize before keeping).
+.evidence-terminal-working.png
+.verify-terminal.mjs
+
 # Embedded copy of the Vite build for the Go binary. `just build-all` copies the
 # real assets in; only .gitkeep is committed so a bare `go build` or
 # `go test ./...` still works on a fresh clone that has never run a build.
