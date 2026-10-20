@@ -19,6 +19,12 @@ export default defineConfig(() => {
       watch: process.env.DISABLE_HMR === 'true' ? null : {
         ignored: ['**/data/**', '**/*.sqlite*', '**/backend-go/**'],
       },
+      // Dev-only: when Vite runs standalone (see justfile `dev-frontend`), forward API + WS
+      // traffic to the Go daemon. In Express middlewareMode these options are ignored.
+      proxy: {
+        '/api': { target: 'http://127.0.0.1:18090', changeOrigin: true },
+        '/ws': { target: 'ws://127.0.0.1:18090', ws: true },
+      },
     },
   };
 });

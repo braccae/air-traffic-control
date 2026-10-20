@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"air-traffic-control/backend/cmd/proxy"
@@ -56,7 +57,7 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager) *http.ServeMux 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":    "healthy",
 			"version":   "v8.2-ansible",
-			"engine":    "golang/1.22",
+			"engine":    runtime.Version(),
 			"connected": true,
 		})
 	})
