@@ -438,6 +438,16 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/nodes/", a.handleNodeRoutes)
 }
 
+// HandleListPlugins implements GET /api/plugins
+func (a *API) HandleListPlugins(w http.ResponseWriter, r *http.Request) {
+	a.handleListPlugins(w, r)
+}
+
+// NodeRoutesHandler returns an http.Handler that handles /api/nodes/ plugin routes.
+func (a *API) NodeRoutesHandler() http.Handler {
+	return http.HandlerFunc(a.handleNodeRoutes)
+}
+
 // handleListPlugins implements GET /api/plugins
 func (a *API) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
