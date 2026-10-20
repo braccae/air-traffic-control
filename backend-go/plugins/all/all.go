@@ -37,6 +37,9 @@ import (
 	// Backup plugin
 	_ "air-traffic-control/backend/plugins/backup/restic"
 
+	// Mount plugin
+	_ "air-traffic-control/backend/plugins/mount/rclone"
+
 	// Logs plugin
 	_ "air-traffic-control/backend/plugins/logs/journald"
 

@@ -4,6 +4,7 @@ import type { ManagedWindow } from '../utils/windowManager.ts';
 import { getConsoleWindowPillClasses, formatTaskQueueTabLabel, type ConsoleDrawerTab } from '../utils/navigationViewModel.ts';
 import { TaskQueueTab } from './TaskQueueTab.tsx';
 import { ClusterSyslogTab } from './ClusterSyslogTab.tsx';
+import { VaultAuditPanel } from './VaultAuditPanel.tsx';
 
 interface GlobalTasksExecutionLogProps {
   tasks: GlobalTaskItem[];
@@ -221,30 +222,6 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
   const liveAnsibleLogs = runningOrRecentAnsible?.logs && runningOrRecentAnsible.logs.length > 0
     ? runningOrRecentAnsible.logs
     : tasks.find(t => t.logs && t.logs.length > 0)?.logs || null;
-
-  const fallbackAnsibleLogs = [
-    'PLAY [Setup Homelab Cluster Services & Podman Engine] ****************************************',
-    'TASK [Gathering Facts] **********************************************************************',
-    'ok: [likes-it-cold.leo-banjo.ts.net]',
-    'ok: [ping.leo-banjo.ts.net]',
-    'ok: [dev-pc.leo-banjo.ts.net]',
-    'TASK [podman : Verify rootless linger configuration] ****************************************',
-    'changed: [likes-it-cold.leo-banjo.ts.net] => {"changed": true, "msg": "loginctl enable-linger core"}',
-    'changed: [ping.leo-banjo.ts.net] => {"changed": true, "msg": "loginctl enable-linger uosserver"}',
-    'TASK [restic : Ensure immutable gold retention policy] **************************************',
-    'ok: [likes-it-cold.leo-banjo.ts.net] => {"mode": "immutable", "retention": "7d/4w/12m"}',
-    'TASK [tailscale : Verify mesh routing & exit advertisement] *********************************',
-    'ok: [likes-it-cold.leo-banjo.ts.net] => {"advertised": "192.168.8.0/24", "status": "online"}',
-    'PLAY RECAP **********************************************************************************',
-    'likes-it-cold.leo-banjo.ts.net : ok=14   changed=1    unreachable=0    failed=0',
-    'ping.leo-banjo.ts.net          : ok=12   changed=1    unreachable=0    failed=0',
-  ];
-
-  const vaultLogs = [
-    '2026-10-18 02:10:50 [AUDIT] root@pam authenticated with GSSAPI ticket',
-    '2026-10-18 02:10:50 [VAULT] Decrypted group_vars/all.yml using AES-256 cipher (SQLite cache sync)',
-    '2026-10-18 02:05:12 [AUDIT] Token generated for cockpit-bridge session (ttl: 3600s)',
-  ];
 
   return (
     <section
@@ -517,40 +494,17 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
                   </div>
                 ))
               ) : (
-                fallbackAnsibleLogs.map((line, idx) => (
-                  <div
-                    key={idx}
-                    className={
-                      line.startsWith('PLAY') || line.startsWith('TASK')
-                        ? 'text-[#b0c9ff] font-bold'
-                        : line.includes('changed')
-                        ? 'text-[#d9b9ff]'
-                        : line.includes('failed')
-                        ? 'text-[#ffb4ab]'
-                        : 'text-[#8cd6cb]'
-                    }
-                  >
-                    {line}
-                  </div>
-                ))
+                <div className="text-[#8d909b]">
+                  No captured Ansible output yet — run a playbook or an ATC mutation task to stream
+                  its real output here.
+                </div>
               )}
             </div>
           )}
 
           {activeTab === 'syslog' && <ClusterSyslogTab nodes={nodes} />}
 
-          {activeTab === 'vault' && (
-            <div className="p-3 font-mono text-xs space-y-1 text-[#c3c6d2] bg-[#0a0d1f]">
-              {vaultLogs.map((line, idx) => (
-                <div key={idx} className="hover:bg-[#171a2d] px-1 rounded flex items-center gap-2">
-                  <span className="material-symbols-outlined text-[14px] text-[#d9b9ff]">
-                    verified
-                  </span>
-                  <span>{line}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          {activeTab === 'vault' && <VaultAuditPanel />}
         </div>
       )}
     </section>

@@ -76,7 +76,8 @@ import {
   ensureAnsibleVenv,
   REQUIRED_VENV_PACKAGES,
 } from './src/utils/ansibleVenvManager.ts';
-import { registerVaultRoutes } from './src/utils/vaultManager.ts';
+import { materializeVaultVarsFile, registerVaultRoutes } from './src/utils/vaultManager.ts';
+import { registerRcloneRoutes } from './src/utils/rcloneManager.ts';
 import { createPlaybookRunner } from './src/utils/playbookRunner.ts';
 import {
   initCronScheduleStore,
@@ -130,11 +131,23 @@ initCronScheduleStore(dbFilePath);
 
 // Shared real playbook runner: POST /api/playbook/run and cron schedules both
 // spawn through this instance so runs land in the same console task stream.
+// Persist a task to SQLite and keep the in-memory console list in sync.
+function persistTask(task: GlobalTaskItem) {
+  hostCache.saveTask(task);
+  const idx = tasks.findIndex(t => t.id === task.id);
+  if (idx >= 0) {
+    tasks[idx] = { ...task };
+  } else {
+    tasks.unshift({ ...task });
+  }
+}
+
 const playbookRunner = createPlaybookRunner({
   cwd: __dirname,
   inventoryPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
-  saveTask: task => hostCache.saveTask(task),
+  saveTask: task => persistTask(task),
   broadcast: msg => broadcast(msg),
+  prepareExtraVarsFile: () => materializeVaultVarsFile(hostCache),
 });
 
 const cronExecutor = createCronExecutor({
@@ -1888,7 +1901,41 @@ const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
 registerPlaybookRoutes(app, playbookDir, {
   inventoryScriptPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
 });
-registerVaultRoutes(app);
+registerVaultRoutes(app, {
+  // Decryption audit rows persist in data/hosts-cache.sqlite (vault_audit_log).
+  auditStore: hostCache,
+  // Named vault variables persist as AES256 ciphertext in vault_variables.
+  variableStore: hostCache,
+  action: 'POST /api/vault/decrypt',
+});
+
+// ==========================================
+// Category F: rclone remote integration
+// ==========================================
+
+registerRcloneRoutes(app, {
+  hostCache,
+  broadcast,
+  getNode: (id: string) => findNode(id) || hostCache.getHostById(id),
+  // The Go daemon's mount/rclone plugin is the canonical task compiler.
+  compileInstall: async (nodeId, options) => {
+    const result = await proxyToGoDaemon(
+      `/api/nodes/${encodeURIComponent(nodeId)}/plugins/mount/rclone/actions/install_remote`,
+      'POST',
+      { options },
+      15000
+    );
+    if (!result.ok || !result.data) {
+      throw new Error(result.error || 'mount/rclone plugin unavailable on the air-traffic-control-daemon');
+    }
+    return result.data;
+  },
+  stageTask: (task: any) => {
+    const queued = enqueueTask(task);
+    broadcast({ type: 'queue_updated', queue: getQueue() });
+    return queued;
+  },
+});
 
 app.get('/api/ansible/config', async (_req, res) => {
   try {
@@ -2132,10 +2179,21 @@ app.post('/api/queue/execute', async (req, res) => {
 
   broadcast({ type: 'queue_execution_started', taskId, queue: getQueue() });
 
-  const { result, remainingCount, haltedOnError } = await executeNextQueueTask(inv, {
-    cwd: __dirname,
-    taskId,
-  });
+  // Expose the SQLite vault store to the playbook as an owner-only vars file;
+  // it contains ansible-vault ciphertext only and is removed when the run ends.
+  const vaultVars = materializeVaultVarsFile(hostCache);
+
+  let queueOutcome: Awaited<ReturnType<typeof executeNextQueueTask>>;
+  try {
+    queueOutcome = await executeNextQueueTask(inv, {
+      cwd: __dirname,
+      taskId,
+      vaultVarsFile: vaultVars?.filePath,
+    });
+  } finally {
+    vaultVars?.cleanup();
+  }
+  const { result, remainingCount, haltedOnError } = queueOutcome;
 
   broadcast({
     type: 'queue_execution_finished',

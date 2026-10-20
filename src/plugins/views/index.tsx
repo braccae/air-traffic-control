@@ -21,6 +21,7 @@ import { TailscaleMeshCard } from '../../components/TailscaleMeshCard.tsx';
 import { VirtualMachinesKVM } from '../../components/VirtualMachinesKVM.tsx';
 import { LxcContainers } from '../../components/LxcContainers.tsx';
 import { ResticBackupPolicy } from '../../components/ResticBackupPolicy.tsx';
+import { RcloneRemotesView } from '../../components/RcloneRemotesView.tsx';
 import { SystemHealthTelemetry } from '../../components/SystemHealthTelemetry.tsx';
 import { SystemServicesView } from '../../components/SystemServicesView.tsx';
 import { PackageUpdatesView } from '../../components/PackageUpdatesView.tsx';
@@ -364,6 +365,10 @@ const ResticBackupPolicyAdapter: React.FC<PluginViewProps> = ({ node }) => (
   />
 );
 
+const RcloneRemotesViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
+  <RcloneRemotesView node={node} />
+);
+
 const SystemHealthTelemetryAdapter: React.FC<PluginViewProps> = ({ telemetry }) => {
   if (!telemetry) return null;
   return <SystemHealthTelemetry telemetry={telemetry} />;
@@ -435,6 +440,10 @@ export const PLUGIN_VIEW_REGISTRY: Record<string, PluginViewComponent> = {
   // Backups
   'backup/restic': ResticBackupPolicyAdapter,
   'backup': ResticBackupPolicyAdapter,
+
+  // Remote storage mounts
+  'mount/rclone': RcloneRemotesViewAdapter,
+  'mount': RcloneRemotesViewAdapter,
 
   // Telemetry
   'telemetry/glances': SystemHealthTelemetryAdapter,

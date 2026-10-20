@@ -15,6 +15,9 @@ data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
 
+# rclone remote secret-encryption key (generated if ATC_RCLONE_KEY is unset).
+data/.rclone-key
+
 # Agent scratch / skill working copies (like .superpowers/, never commit).
 .agents/
 

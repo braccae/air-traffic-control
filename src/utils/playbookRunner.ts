@@ -32,6 +32,12 @@ export interface PlaybookRunnerDeps {
   saveTask: (task: GlobalTaskItem) => void;
   broadcast?: (message: unknown) => void;
   spawnFn?: typeof spawn;
+  /**
+   * Optional hook that materializes the Ansible Vault vars file (ciphertext
+   * generated from the vault store) for this run. Returned file path is passed
+   * as `--extra-vars @file`; cleanup runs when the process exits.
+   */
+  prepareExtraVarsFile?: () => { filePath: string; cleanup: () => void } | null;
 }
 
 export interface PlaybookCompletion {
@@ -119,6 +125,12 @@ export function createPlaybookRunner(deps: PlaybookRunnerDeps): PlaybookRunner {
       args.push('--extra-vars', typeof extraVars === 'string' ? extraVars : JSON.stringify(extraVars));
     }
 
+    // Vault store -> ephemeral owner-only vars file (ansible-vault ciphertext).
+    const vaultVars = deps.prepareExtraVarsFile ? deps.prepareExtraVarsFile() : null;
+    if (vaultVars) {
+      args.push('--extra-vars', `@${vaultVars.filePath}`);
+    }
+
     const proc = spawnFn(ansibleBinary, args, {
       cwd,
       env: { ...process.env, ANSIBLE_FORCE_COLOR: '1' },
@@ -133,6 +145,7 @@ export function createPlaybookRunner(deps: PlaybookRunnerDeps): PlaybookRunner {
 
     proc.on('error', (err: any) => {
       activeProcs.delete(taskId);
+      vaultVars?.cleanup();
       settleCompletion({ success: false, exitCode: null, error: err?.message || String(err) });
       newTask.status = 'FAILED';
       newTask.progress = 100;
@@ -183,6 +196,7 @@ export function createPlaybookRunner(deps: PlaybookRunnerDeps): PlaybookRunner {
 
     proc.on('close', code => {
       activeProcs.delete(taskId);
+      vaultVars?.cleanup();
       settleCompletion({
         success: code === 0,
         exitCode: code,

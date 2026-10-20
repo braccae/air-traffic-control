@@ -1341,6 +1341,8 @@ export default function App() {
               datacenterName={selectedNode?.datacenter || 'leo-banjo.ts.net'}
               nodes={nodesList}
               tasks={tasks}
+              queue={queue}
+              isQueueRunning={isQueueRunning}
               activeSection={datacenterSection}
               onSelectNode={handleSelectNode}
               onOpenPlaybookModal={playbookName => {
@@ -1349,6 +1351,8 @@ export default function App() {
               }}
               onOpenPlaybookEditor={playbookName => handleOpenPlaybookEditor(playbookName)}
               onOpenGroupVars={() => setGroupVarsOpen(true)}
+              onOpenVaultEditor={() => setDatacenterSection('vars_vault')}
+              onSelectSection={setDatacenterSection}
               onToggleTasksDrawer={() => {
                 const el = document.getElementById('global-tasks-drawer');
                 el?.scrollIntoView({ behavior: 'smooth' });
