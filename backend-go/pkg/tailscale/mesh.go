@@ -6,6 +6,21 @@ import (
 	"os/exec"
 )
 
+type PeerStatus struct {
+	ID           string   `json:"ID"`
+	HostName     string   `json:"HostName"`
+	DNSName      string   `json:"DNSName"`
+	TailscaleIPs []string `json:"TailscaleIPs"`
+	Addrs        []string `json:"Addrs"`
+	Tags         []string `json:"Tags"`
+	OS           string   `json:"OS"`
+	Online       bool     `json:"Online"`
+	Active       bool     `json:"Active"`
+	Relay        string   `json:"Relay"`
+	RxBytes      int64    `json:"RxBytes"`
+	TxBytes      int64    `json:"TxBytes"`
+}
+
 type Status struct {
 	Self struct {
 		ID           string   `json:"ID"`
@@ -13,19 +28,13 @@ type Status struct {
 		HostName     string   `json:"HostName"`
 		DNSName      string   `json:"DNSName"`
 		TailscaleIPs []string `json:"TailscaleIPs"`
+		Addrs        []string `json:"Addrs"`
+		Tags         []string `json:"Tags"`
+		OS           string   `json:"OS"`
 		Online       bool     `json:"Online"`
 		ExitNode     bool     `json:"ExitNode"`
 	} `json:"Self"`
-	Peer map[string]struct {
-		HostName     string   `json:"HostName"`
-		DNSName      string   `json:"DNSName"`
-		TailscaleIPs []string `json:"TailscaleIPs"`
-		Online       bool     `json:"Online"`
-		Active       bool     `json:"Active"`
-		Relay        string   `json:"Relay"`
-		RxBytes      int64    `json:"RxBytes"`
-		TxBytes      int64    `json:"TxBytes"`
-	} `json:"Peer"`
+	Peer map[string]PeerStatus `json:"Peer"`
 }
 
 // GetLocalStatus queries tailscale status via the tailscale CLI or local socket

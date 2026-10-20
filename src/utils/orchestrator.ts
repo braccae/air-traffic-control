@@ -577,7 +577,7 @@ export function parseTerminalCommand(cmd: string, node: NodeItem): { output: str
       return {
         output: [
           'GLANCES v3.4.0.5 - Telemetry Probe',
-          `CPU: ${node.specs.cpu} (16 vCPUs) - 1.4% usage, 38°C`,
+          `CPU: ${node.specs?.cpu || 'Multi-core x86_64'} (16 vCPUs) - 1.4% usage, 38°C`,
           'MEM: 42.4 / 62.8 GiB (67.5% used, ZFS ARC: 12.3 GiB)',
           'SWAP: 0.0 / 8.0 GiB (0% used)',
           'ZFS POOL tank0: 14.2 / 48.0 TB (29.5% used, RAIDZ2, Scrub healthy)',

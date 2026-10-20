@@ -95,139 +95,18 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 	})
 
 	mux.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && nodeAPI != nil {
-			nodeAPI.HandleCreate(w, r)
+		if nodeAPI != nil {
+			nodeAPI.HandleNodes(w, r)
+			return
+		}
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(nodeapi.BaselineNodeObjects())
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		var nodes []types.Node
-		if tsStatus, err := tailscale.GetLocalStatus(); err == nil && tsStatus != nil {
-			if tsStatus.Self.HostName != "" {
-				ip := ""
-				if len(tsStatus.Self.TailscaleIPs) > 0 {
-					ip = tsStatus.Self.TailscaleIPs[0]
-				}
-				nodes = append(nodes, types.Node{
-					ID:            "node-" + tsStatus.Self.HostName,
-					Name:          tsStatus.Self.HostName,
-					Group:         "tag:host",
-					Datacenter:    "leo-banjo.ts.net",
-					NodeType:      types.NodeTypeLinuxLinux,
-					IP:            ip,
-					Port:          22,
-					TailscaleIP:   ip,
-					TailscaleHost: tsStatus.Self.DNSName,
-					OSDescription: "Linux",
-					Status:        "online",
-					HasCockpit:    true,
-					HasPodman:     true,
-					HasRestic:     true,
-					AuthMethod:    "tailscale-ssh",
-				})
-			}
-			for _, p := range tsStatus.Peer {
-				ip := ""
-				if len(p.TailscaleIPs) > 0 {
-					ip = p.TailscaleIPs[0]
-				}
-				status := "offline"
-				if p.Online {
-					status = "online"
-				}
-				nodes = append(nodes, types.Node{
-					ID:            "node-" + p.HostName,
-					Name:          p.HostName,
-					Group:         "tag:host",
-					Datacenter:    "leo-banjo.ts.net",
-					NodeType:      types.NodeTypeLinuxLinux,
-					IP:            ip,
-					Port:          22,
-					TailscaleIP:   ip,
-					TailscaleHost: p.DNSName,
-					OSDescription: "Linux",
-					Status:        status,
-					HasCockpit:    true,
-					HasPodman:     true,
-					HasRestic:     true,
-					AuthMethod:    "tailscale-ssh",
-				})
-			}
-		}
-
-		if len(nodes) == 0 {
-			// Grounded cluster baseline from GUIDELINES.md leo-banjo.ts.net
-			nodes = []types.Node{
-				{
-					ID:            "node-likes-it-cold",
-					Name:          "likes-it-cold",
-					Group:         "tag:host",
-					Datacenter:    "leo-banjo.ts.net",
-					NodeType:      types.NodeTypeLinuxLinux,
-					IP:            "100.105.71.49",
-					Port:          22,
-					TailscaleIP:   "100.105.71.49",
-					TailscaleHost: "likes-it-cold.leo-banjo.ts.net",
-					OSDescription: "AlmaLinux 10.2 (Lavender Lion)",
-					Status:        "online",
-					HasCockpit:    true,
-					HasPodman:     true,
-					HasRestic:     true,
-					AuthMethod:    "ssh-ed25519",
-				},
-				{
-					ID:            "node-ping",
-					Name:          "ping",
-					Group:         "tag:host",
-					Datacenter:    "leo-banjo.ts.net",
-					NodeType:      types.NodeTypeLinuxLinux,
-					IP:            "100.73.87.87",
-					Port:          22,
-					TailscaleIP:   "100.73.87.87",
-					TailscaleHost: "ping.leo-banjo.ts.net",
-					OSDescription: "AlmaLinux 10.2 (Lavender Lion)",
-					Status:        "online",
-					HasCockpit:    true,
-					HasPodman:     true,
-					HasRestic:     false,
-					AuthMethod:    "ssh-ed25519",
-				},
-				{
-					ID:            "node-dev-pc",
-					Name:          "dev-pc",
-					Group:         "tag:host",
-					Datacenter:    "leo-banjo.ts.net",
-					NodeType:      types.NodeTypeLinuxLinux,
-					IP:            "100.103.55.90",
-					Port:          22,
-					TailscaleIP:   "100.103.55.90",
-					TailscaleHost: "dev-pc.leo-banjo.ts.net",
-					OSDescription: "Arch Linux / Linux 6.12",
-					Status:        "online",
-					HasCockpit:    true,
-					HasPodman:     true,
-					HasRestic:     true,
-					AuthMethod:    "tailscale-ssh",
-				},
-				{
-					ID:            "node-the-freezer",
-					Name:          "the-freezer",
-					Group:         "tag:host",
-					Datacenter:    "leo-banjo.ts.net",
-					NodeType:      types.NodeTypeLinuxLinux,
-					IP:            "100.111.45.109",
-					Port:          22,
-					TailscaleIP:   "100.111.45.109",
-					TailscaleHost: "the-freezer.leo-banjo.ts.net",
-					OSDescription: "openmediavault 7.4.11-1 (Sandworm)",
-					Status:        "online",
-					HasCockpit:    true,
-					HasPodman:     true,
-					HasRestic:     true,
-					AuthMethod:    "tailscale-ssh",
-				},
-			}
-		}
-		json.NewEncoder(w).Encode(nodes)
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "node API not initialized"})
 	})
 
 	mux.HandleFunc("/api/tailscale/peers", func(w http.ResponseWriter, r *http.Request) {
@@ -313,10 +192,11 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 
 		// Mount the node lifecycle and hardware probe API (CRUD, testSsh, probes).
 		if nAPI, err := nodeapi.New(nodeapi.Options{
-			Store:     store,
-			Runner:    nodeapi.NewSSHRunner(sshManager.Pool()),
-			Broadcast: queueBroadcast,
-			Fallback:  pluginAPI.NodeRoutesHandler(),
+			Store:        store,
+			Runner:       nodeapi.NewSSHRunner(sshManager.Pool()),
+			Broadcast:    queueBroadcast,
+			Fallback:     pluginAPI.NodeRoutesHandler(),
+			SeedBaseline: true,
 		}); err != nil {
 			log.Printf("node API disabled: %v", err)
 		} else {

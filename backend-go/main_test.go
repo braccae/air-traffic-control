@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -177,5 +178,52 @@ func TestUnknownNonAPIPath_ServesSPAFallback(t *testing.T) {
 	}
 	if strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
 		t.Fatal("non-API path must not be answered by the API 404 handler")
+	}
+}
+
+func TestGETNodesEndpoint_ReturnsPopulatedSpecsForAllNodes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hosts-cache.sqlite")
+	mux := newServerMux(nil, nil, dbPath)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var nodes []map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&nodes); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(nodes) != 8 {
+		t.Fatalf("expected 8 nodes, got %d", len(nodes))
+	}
+
+	for _, n := range nodes {
+		id, _ := n["id"].(string)
+		shortName, _ := n["shortName"].(string)
+		badge, _ := n["badge"].(string)
+
+		if shortName == "" || badge == "" {
+			t.Errorf("node %s missing shortName/badge: %+v", id, n)
+		}
+
+		specs, ok := n["specs"].(map[string]any)
+		if !ok || specs == nil {
+			t.Fatalf("node %s specs missing", id)
+		}
+
+		mb, _ := specs["motherboard"].(string)
+		bios, _ := specs["bios"].(string)
+		cpu, _ := specs["cpu"].(string)
+		vcpus, _ := specs["vcpus"].(float64)
+		ram, _ := specs["ramGiB"].(float64)
+
+		if mb == "" || bios == "" || cpu == "" || vcpus <= 0 || ram <= 0 {
+			t.Errorf("node %s invalid specs: %+v", id, specs)
+		}
 	}
 }
