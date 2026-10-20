@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"air-traffic-control/backend/cmd/proxy"
+	"air-traffic-control/backend/pkg/ansqueue"
 	"air-traffic-control/backend/pkg/glances"
 	"air-traffic-control/backend/pkg/hostcache"
 	"air-traffic-control/backend/pkg/plugin"
@@ -282,6 +283,25 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 			log.Printf("readonly API disabled: %v", err)
 		} else {
 			roAPI.Register(mux)
+		}
+
+		// Mount the Ansible mutation queue (staging, execution, halting). It
+		// shares the cache file's pooled handle; the queue store never closes it.
+		var queueBroadcast func(event map[string]any)
+		if hub != nil {
+			queueBroadcast = func(event map[string]any) { hub.BroadcastJSON(event) }
+		}
+		if qAPI, err := ansqueue.NewAPI(ansqueue.APIOptions{
+			Store: ansqueue.New(store.SQLDB()),
+			RunOptions: ansqueue.Options{
+				WorkDir:     ansqueue.ResolveWorkDir(),
+				Invalidator: ansqueue.NewCacheInvalidator(store),
+			},
+			Broadcast: queueBroadcast,
+		}); err != nil {
+			log.Printf("ansible queue API disabled: %v", err)
+		} else {
+			qAPI.Register(mux)
 		}
 	}
 
