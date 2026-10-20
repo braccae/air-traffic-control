@@ -5,7 +5,10 @@ import {
   isSettingsSection,
   fetchGlobalSettingsPages,
   saveGlobalSettingsPage,
+  isMaskedSecret,
+  buildSettingsPayload,
 } from './globalSettingsManager.ts';
+import type { GlobalSettingsField } from '../types/index.ts';
 
 test('settingsSectionId maps a page id to a deterministic sidebar section id', () => {
   assert.equal(settingsSectionId('backup/restic'), 'settings-backup-restic');
@@ -90,4 +93,33 @@ test('saveGlobalSettingsPage PUTs the values and returns the page', async () => 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('isMaskedSecret recognises the backend mask and not real values', () => {
+  assert.equal(isMaskedSecret('•••••••• (vault: authKey)'), true);
+  assert.equal(isMaskedSecret('tskey-auth-abc'), false);
+  assert.equal(isMaskedSecret(''), false);
+  assert.equal(isMaskedSecret(undefined), false);
+});
+
+test('buildSettingsPayload never sends a mask or an empty secret', () => {
+  const fields: GlobalSettingsField[] = [
+    { name: 'hostname', label: 'Hostname', type: 'string' },
+    { name: 'authKey', label: 'Auth Key', type: 'secret', secret: true },
+  ];
+
+  // Mask echoed back by the API means "unchanged" — it must not be persisted.
+  assert.deepEqual(
+    buildSettingsPayload(fields, { hostname: 'atc-node', authKey: '•••••••• (vault: authKey)' }),
+    { hostname: 'atc-node' }
+  );
+
+  assert.deepEqual(buildSettingsPayload(fields, { hostname: 'atc-node', authKey: '' }), {
+    hostname: 'atc-node',
+  });
+
+  assert.deepEqual(buildSettingsPayload(fields, { hostname: 'atc-node', authKey: '  tskey-auth-new  ' }), {
+    hostname: 'atc-node',
+    authKey: 'tskey-auth-new',
+  });
 });

@@ -979,6 +979,19 @@ func (a *API) settingsView(page SettingsPage) (GlobalSettingsPageView, error) {
 
 	values := make(map[string]any, len(page.Fields))
 	for _, f := range page.Fields {
+		if IsSecretField(f) {
+			// Secret Protection Invariant: a write-only secret never leaves the
+			// process in plaintext. Clients receive only the mask, which they
+			// echo back unchanged when they have not replaced the value.
+			if v, ok := stored[f.Name]; ok {
+				if s, isString := v.(string); isString && strings.TrimSpace(s) != "" {
+					values[f.Name] = MaskedSecretValue(f.Name)
+					continue
+				}
+			}
+			values[f.Name] = ""
+			continue
+		}
 		if v, ok := stored[f.Name]; ok {
 			values[f.Name] = v
 			continue
@@ -1020,6 +1033,21 @@ func coerceSettingsValues(page SettingsPage, input map[string]any) (map[string]a
 	out := make(map[string]any, len(page.Fields))
 	for _, f := range page.Fields {
 		raw, present := input[f.Name]
+		if IsSecretField(f) {
+			// A secret field is write-only. An omitted, empty, or mask value
+			// means "leave the stored secret alone"; only real new material is
+			// persisted, so re-saving an unrelated field can never blank or
+			// overwrite the secret with its own mask.
+			if !present || raw == nil {
+				continue
+			}
+			s, isString := raw.(string)
+			if !isString || strings.TrimSpace(s) == "" || IsMaskedSecretValue(s) {
+				continue
+			}
+			out[f.Name] = strings.TrimSpace(s)
+			continue
+		}
 		if !present || raw == nil || raw == "" {
 			if f.Required {
 				return nil, fmt.Errorf("missing required settings field %q", f.Name)

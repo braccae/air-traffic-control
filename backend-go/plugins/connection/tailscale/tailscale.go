@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,164 @@ func init() {
 	_ = plugin.Register(New())
 }
 
+// SettingsPageID is the route slug of ATC's own Tailscale settings page. It is
+// also the key under which the framework persists the page's values.
+const SettingsPageID = "connection/tailscale"
+
+// Defaults for ATC's own tsnet node when nothing has been configured.
+const (
+	DefaultStateDir = "/tmp/atc-tsnet"
+	DefaultHostname = "air-traffic-control-tsnet"
+)
+
+// Settings field names, shared between the page schema and the config resolver.
+const (
+	FieldAuthKey    = "authKey"
+	FieldHostname   = "hostname"
+	FieldStateDir   = "stateDir"
+	FieldControlURL = "controlURL"
+	FieldEphemeral  = "ephemeral"
+)
+
+// SettingsPage implements plugin.SettingsPageProvider so ATC's own Tailscale
+// node settings render in the Datacenter Settings sidebar with no bespoke
+// frontend code. The auth key is a write-only secret: the framework masks it in
+// every response and only ever persists genuinely new material.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return plugin.SettingsPage{
+		ID:    SettingsPageID,
+		Title: "ATC Tailscale",
+		Icon:  "hub",
+		Description: "ATC's own Tailscale node (embedded tsnet) — the identity ATC uses to reach the mesh. " +
+			"The auth key is write-only and masked in every API response.",
+		Order: 15,
+		Fields: []plugin.SettingsField{
+			{
+				Name:        FieldAuthKey,
+				Label:       "Tailscale Auth Key",
+				Type:        plugin.SettingsFieldSecret,
+				Secret:      true,
+				Placeholder: "tskey-auth-...",
+				Description: "Auth key used to register ATC's own node. Saving a new key re-registers ATC: " +
+					"the previous tsnet state is discarded so the new key is the one that takes effect.",
+			},
+			{
+				Name:        FieldHostname,
+				Label:       "Node Hostname",
+				Type:        plugin.SettingsFieldString,
+				Default:     DefaultHostname,
+				Placeholder: DefaultHostname,
+				Description: "Hostname ATC advertises to the tailnet.",
+			},
+			{
+				Name:        FieldStateDir,
+				Label:       "tsnet State Directory",
+				Type:        plugin.SettingsFieldString,
+				Default:     DefaultStateDir,
+				Placeholder: DefaultStateDir,
+				Description: "Directory holding ATC's tsnet node state (file store + logs).",
+			},
+			{
+				Name:        FieldControlURL,
+				Label:       "Control Server URL",
+				Type:        plugin.SettingsFieldString,
+				Placeholder: "https://controlplane.tailscale.com",
+				Description: "Leave blank for the Tailscale-hosted control plane; set it for Headscale or a self-hosted control server.",
+			},
+			{
+				Name:        FieldEphemeral,
+				Label:       "Ephemeral Node",
+				Type:        plugin.SettingsFieldBool,
+				Default:     true,
+				Description: "Register ATC as an ephemeral node so the tailnet drops it when ATC goes offline.",
+			},
+		},
+	}
+}
+
+// tsnetSettings is the effective configuration for ATC's own tsnet node,
+// resolved from explicit plugin options, then persisted settings, then
+// environment variables.
+type tsnetSettings struct {
+	AuthKey    string
+	Hostname   string
+	StateDir   string
+	ControlURL string
+	Ephemeral  bool
+}
+
+// fingerprint identifies the configuration a cached tsnet.Server was built
+// from, so a settings change actually rebuilds it instead of being inert.
+func (c tsnetSettings) fingerprint() string {
+	return strings.Join([]string{c.Hostname, c.StateDir, c.ControlURL, c.AuthKey, strconv.FormatBool(c.Ephemeral)}, "\x00")
+}
+
+// persistedSetting reads a string setting written through the settings page.
+func persistedSetting(field string) string {
+	store := plugin.GlobalSettingsStore()
+	if store == nil {
+		return ""
+	}
+	v, ok := store.Value(SettingsPageID, field)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+// effectiveSettings resolves the configuration for ATC's own tsnet node.
+// Precedence per field: explicit plugin option, then the persisted settings
+// page value, then environment variables (TS_AUTHKEY, TS_CONTROL_URL).
+func (p *Plugin) effectiveSettings() tsnetSettings {
+	cfg := tsnetSettings{
+		AuthKey:   strings.TrimSpace(p.authKey),
+		Hostname:  p.hostname,
+		StateDir:  p.stateDir,
+		Ephemeral: p.ephemeral,
+	}
+
+	if v := persistedSetting(FieldHostname); v != "" {
+		cfg.Hostname = v
+	}
+	if v := persistedSetting(FieldStateDir); v != "" {
+		cfg.StateDir = v
+	}
+	if v := persistedSetting(FieldControlURL); v != "" {
+		cfg.ControlURL = v
+	}
+	if v := persistedSetting(FieldEphemeral); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.Ephemeral = b
+		}
+	}
+	if cfg.AuthKey == "" {
+		if v := persistedSetting(FieldAuthKey); v != "" && !plugin.IsMaskedSecretValue(v) {
+			cfg.AuthKey = v
+		}
+	}
+	if cfg.AuthKey == "" {
+		cfg.AuthKey = strings.TrimSpace(os.Getenv("TS_AUTHKEY"))
+	}
+	if cfg.ControlURL == "" {
+		cfg.ControlURL = strings.TrimSpace(os.Getenv("TS_CONTROL_URL"))
+	}
+	return cfg
+}
+
+// resetTsnetState removes the persisted tsnet node state so a new auth key
+// registers the node afresh instead of being ignored because the node already
+// exists in the state store.
+func resetTsnetState(stateDir string) error {
+	if strings.TrimSpace(stateDir) == "" {
+		return nil
+	}
+	statePath := filepath.Join(stateDir, "tailscaled.state")
+	if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reset tsnet state %s: %w", statePath, err)
+	}
+	return nil
+}
+
 // Plugin provides connectivity over the Tailscale mesh using embedded tsnet or custom dialer.
 type Plugin struct {
 	mu          sync.Mutex
@@ -64,6 +223,9 @@ type Plugin struct {
 	stateDir    string
 	hostname    string
 	authKey     string
+	ephemeral   bool
+	tsnetFP     string
+	tsnetAuth   string
 	initialized bool
 }
 
@@ -94,9 +256,10 @@ func WithAuthKey(key string) Option {
 // New creates a new Tailscale connection plugin.
 func New(opts ...Option) *Plugin {
 	p := &Plugin{
-		clients:  make(map[string]*ssh.Client),
-		stateDir: "/tmp/atc-tsnet",
-		hostname: "air-traffic-control-tsnet",
+		clients:   make(map[string]*ssh.Client),
+		stateDir:  DefaultStateDir,
+		hostname:  DefaultHostname,
+		ephemeral: true,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -173,6 +336,10 @@ func isSystemTailscaledActive() bool {
 }
 
 func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
+	// Resolve settings before taking the lock: the settings store has its own
+	// locking and must never be held while dialing.
+	cfg := p.effectiveSettings()
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -180,25 +347,40 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 		return p.dialer, nil
 	}
 
-	// If a host-level system tailscaled is active and no explicit auth key was provided,
+	// If a host-level system tailscaled is active and no auth key is configured,
 	// direct dial through standard network stack which automatically routes 100.x / MagicDNS.
-	if isSystemTailscaledActive() && p.authKey == "" && os.Getenv("TS_AUTHKEY") == "" {
+	if isSystemTailscaledActive() && cfg.AuthKey == "" {
 		return &systemNetworkDialer{}, nil
 	}
 
-	if p.tsServer == nil {
-		authKey := p.authKey
-		if authKey == "" {
-			authKey = os.Getenv("TS_AUTHKEY")
+	// A settings change must reach the live node, not just the database: the
+	// cached server is rebuilt whenever the resolved configuration changes, and
+	// a replaced auth key also discards the node state so the new key is the one
+	// that registers.
+	if p.tsServer != nil && p.tsnetFP != cfg.fingerprint() {
+		// Discard node state only when the auth key itself changed, so editing
+		// hostname or the control URL does not force a re-registration.
+		if cfg.AuthKey != p.tsnetAuth {
+			if err := resetTsnetState(cfg.StateDir); err != nil {
+				return nil, err
+			}
 		}
+		_ = p.tsServer.Close()
+		p.tsServer = nil
+		p.tsnetFP = ""
+	}
 
+	if p.tsServer == nil {
 		srv := &tsnet.Server{
-			Dir:       p.stateDir,
-			Hostname:  p.hostname,
-			AuthKey:   authKey,
-			Ephemeral: true,
+			Dir:        cfg.StateDir,
+			Hostname:   cfg.Hostname,
+			AuthKey:    cfg.AuthKey,
+			ControlURL: cfg.ControlURL,
+			Ephemeral:  cfg.Ephemeral,
 		}
 		p.tsServer = srv
+		p.tsnetFP = cfg.fingerprint()
+		p.tsnetAuth = cfg.AuthKey
 	}
 
 	return &tsnetDialer{srv: p.tsServer}, nil
@@ -414,6 +596,8 @@ func (p *Plugin) Close() error {
 	if p.tsServer != nil {
 		err := p.tsServer.Close()
 		p.tsServer = nil
+		p.tsnetFP = ""
+		p.tsnetAuth = ""
 		return err
 	}
 	return nil

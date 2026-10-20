@@ -36,6 +36,7 @@ func demoPage() plugin.SettingsPage {
 				{Value: "fast", Label: "Fast"},
 				{Value: "safe", Label: "Safe"},
 			}},
+			{Name: "token", Label: "Token", Type: plugin.SettingsFieldSecret, Secret: true},
 		},
 	}
 }
@@ -273,5 +274,140 @@ func TestAPI_GetSettingsPageUnknown404(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/settings/pages/demo/missing", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestAPI_MasksStoredSecrets proves the Secret Protection Invariant on reads: a
+// persisted secret is never emitted in plaintext, only as its mask.
+func TestAPI_MasksStoredSecrets(t *testing.T) {
+	api, store := newSettingsAPI(t)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	const secret = "tskey-auth-supersecret-value"
+	if err := store.Save("demo/alpha", map[string]any{"token": secret}); err != nil {
+		t.Fatalf("seed secret: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/settings/pages/demo/alpha", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(secret)) {
+		t.Fatalf("response leaked the secret in plaintext: %s", rec.Body.String())
+	}
+
+	var view plugin.GlobalSettingsPageView
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, want := view.Values["token"], plugin.MaskedSecretValue("token"); got != want {
+		t.Fatalf("token = %v, want mask %q", got, want)
+	}
+
+	// The list endpoint must mask too.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/settings/pages", nil))
+	if bytes.Contains(rec.Body.Bytes(), []byte(secret)) {
+		t.Fatalf("list response leaked the secret in plaintext: %s", rec.Body.String())
+	}
+}
+
+// TestAPI_PutMaskPreservesStoredSecret proves that echoing the mask back (which
+// is what the UI does when the secret field is untouched) never overwrites the
+// stored secret with the mask itself.
+func TestAPI_PutMaskPreservesStoredSecret(t *testing.T) {
+	api, store := newSettingsAPI(t)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	const secret = "tskey-auth-original"
+	if err := store.Save("demo/alpha", map[string]any{"token": secret, "mode": "auto"}); err != nil {
+		t.Fatalf("seed secret: %v", err)
+	}
+
+	body, _ := json.Marshal(plugin.SettingsValuesBody{Values: map[string]any{
+		"token": plugin.MaskedSecretValue("token"),
+		"mode":  "manual",
+	}})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/settings/pages/demo/alpha", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored, ok := store.Value("demo/alpha", "token")
+	if !ok || stored != secret {
+		t.Fatalf("stored token = %q (ok=%v), want original secret preserved", stored, ok)
+	}
+	if mode, _ := store.Value("demo/alpha", "mode"); mode != "manual" {
+		t.Fatalf("mode = %q, want manual", mode)
+	}
+
+	// Empty string must also mean "leave it alone".
+	body, _ = json.Marshal(plugin.SettingsValuesBody{Values: map[string]any{"token": ""}})
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/settings/pages/demo/alpha", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if stored, _ := store.Value("demo/alpha", "token"); stored != secret {
+		t.Fatalf("empty PUT replaced the secret with %q", stored)
+	}
+}
+
+// TestAPI_PutNewSecretPersists proves a genuinely new secret is stored and still
+// never reflected back in plaintext.
+func TestAPI_PutNewSecretPersists(t *testing.T) {
+	api, store := newSettingsAPI(t)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	const replacement = "tskey-auth-replacement"
+	body, _ := json.Marshal(plugin.SettingsValuesBody{Values: map[string]any{"token": "  " + replacement + "  "}})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/settings/pages/demo/alpha", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	if stored, ok := store.Value("demo/alpha", "token"); !ok || stored != replacement {
+		t.Fatalf("stored token = %q (ok=%v), want trimmed replacement", stored, ok)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(replacement)) {
+		t.Fatalf("PUT response leaked the new secret: %s", rec.Body.String())
+	}
+}
+
+// TestRealTailscaleModuleContributesSettingsPage proves ATC's own Tailscale
+// settings page is registered and its auth key is a secret field.
+func TestRealTailscaleModuleContributesSettingsPage(t *testing.T) {
+	var page plugin.SettingsPage
+	found := false
+	for _, p := range plugin.ListSettingsPages() {
+		if p.ID == "connection/tailscale" {
+			page = p
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected connection/tailscale to contribute a global settings page")
+	}
+	if page.Title == "" || len(page.Fields) == 0 {
+		t.Fatalf("tailscale settings page is empty: %+v", page)
+	}
+
+	authKey := false
+	for _, f := range page.Fields {
+		if f.Name == "authKey" {
+			authKey = true
+			if !plugin.IsSecretField(f) {
+				t.Fatalf("authKey field is not secret: %+v", f)
+			}
+		}
+	}
+	if !authKey {
+		t.Fatalf("tailscale settings page has no authKey field: %+v", page.Fields)
 	}
 }

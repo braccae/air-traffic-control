@@ -1,6 +1,10 @@
 import React, { useState } from 'react';
 import type { GlobalSettingsField, GlobalSettingsPage } from '../types/index.ts';
-import { saveGlobalSettingsPage } from '../utils/globalSettingsManager.ts';
+import {
+  buildSettingsPayload,
+  isMaskedSecret,
+  saveGlobalSettingsPage,
+} from '../utils/globalSettingsManager.ts';
 
 export interface GlobalSettingsPanelProps {
   page: GlobalSettingsPage;
@@ -25,7 +29,9 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, 
     setSaving(true);
     setFeedback(null);
     try {
-      const updated = await saveGlobalSettingsPage(page.id, values);
+      // Secret fields are write-only: only genuinely retyped values are sent,
+      // never the mask the API returned.
+      const updated = await saveGlobalSettingsPage(page.id, buildSettingsPayload(page.fields, values));
       setValues(updated.values || {});
       setFeedback({ type: 'success', message: `Saved ${page.title}.` });
       onSaved?.(updated);
@@ -98,16 +104,41 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, 
           />
         );
         break;
-      default: // string, secret
+      default: {
+        // string, secret
+        const isSecret = field.type === 'secret' || field.secret;
+        if (isSecret) {
+          // The API only ever returns a mask for a stored secret. Never load it
+          // into the input: the field stays empty and accepts a replacement.
+          const storedMask = isMaskedSecret(raw) ? String(raw) : '';
+          control = (
+            <div className="flex flex-col gap-1">
+              <input
+                type="password"
+                value=""
+                autoComplete="new-password"
+                placeholder={storedMask || field.placeholder || 'not set'}
+                onChange={e => setField(field.name, e.target.value)}
+                className={inputClass}
+                aria-label={field.label}
+              />
+              <span className="text-[10px] font-mono text-[#8d909b]">
+                {storedMask ? `Stored: ${storedMask}` : 'No value stored — enter one to set it.'}
+              </span>
+            </div>
+          );
+          break;
+        }
         control = (
           <input
-            type={field.type === 'secret' || field.secret ? 'password' : 'text'}
+            type="text"
             value={String(raw ?? '')}
             placeholder={field.placeholder}
             onChange={e => setField(field.name, e.target.value)}
             className={inputClass}
           />
         );
+      }
     }
 
     return (

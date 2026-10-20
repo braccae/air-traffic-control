@@ -66,6 +66,25 @@ fabricates state.
 `SetGlobalSettingsStore`) so a resident module can read its own persisted values
 during `Read`/`Compile` via `plugin.GlobalSettingsStore().Value(pageID, field)`.
 
+### 2.1 Secret fields are write-only
+
+A field typed `secret` (or flagged `Secret: true`) is a **write-only** value:
+
+- `GET` never returns the stored material. A configured secret is reported as
+  the mask `•••••••• (vault: <field>)`; an unconfigured one as `""`.
+- `PUT` only persists genuinely new material. An omitted field, an empty string,
+  or the mask echoed back all mean "leave the stored secret alone", so re-saving
+  an unrelated field can never blank or overwrite a secret with its own mask.
+- `coerceSettingsValues` no longer rejects a missing `Required` secret, because a
+  required secret is required to *exist*, not to be re-typed on every save.
+
+`MaskedSecretValue` / `IsMaskedSecretValue` / `IsSecretField` in
+`backend-go/pkg/plugin/settings.go` own the mask format; the frontend mirrors the
+prefix in `src/utils/globalSettingsManager.ts` (`isMaskedSecret`,
+`buildSettingsPayload`). The generic panel renders a secret as an empty password
+input plus a `Stored: •••••••• (vault: <field>)` caption — the stored value is
+never loaded into a form field.
+
 ## 3. Frontend rendering
 
 No per-page frontend code is needed:
@@ -90,6 +109,18 @@ Values are available to the module itself through
 `plugin.GlobalSettingsStore().Value(<pageID>, "<field>")`.
 
 ## 5. Worked example
+
+`backend-go/plugins/connection/tailscale/tailscale.go` contributes ATC's own
+**ATC Tailscale** page (`ID = "connection/tailscale"`). Its fields configure the
+embedded tsnet node ATC itself uses to reach the mesh: a write-only auth key,
+node hostname, tsnet state directory, control server URL, and whether the node is
+ephemeral. The plugin resolves its live configuration on every dial
+(`effectiveSettings`: explicit option → persisted page value → `TS_AUTHKEY` /
+`TS_CONTROL_URL`), and rebuilds the cached `tsnet.Server` whenever the resolved
+configuration changes. Replacing the auth key also discards
+`<stateDir>/tailscaled.state`, because tsnet ignores an auth key for a node that
+already exists in its state store — so "set a new auth key" actually re-registers
+the node instead of being inert config.
 
 `backend-go/plugins/backup/restic/restic.go` is a real module using the
 framework. It contributes the **Restic Backup Defaults** page

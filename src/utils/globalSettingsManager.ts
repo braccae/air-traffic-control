@@ -1,7 +1,43 @@
-import type { GlobalSettingsPage } from '../types/index.ts';
+import type { GlobalSettingsField, GlobalSettingsPage } from '../types/index.ts';
 
 /** Prefix under which module-contributed settings sections appear in the sidebar. */
 export const SETTINGS_SECTION_PREFIX = 'settings-';
+
+/**
+ * The bullet run the backend uses for every masked secret value. A secret field
+ * is write-only: the API only ever returns this mask, never the stored value.
+ */
+export const SECRET_MASK_PREFIX = '••••••••';
+
+/** Returns true when a value is the backend's masked secret placeholder. */
+export function isMaskedSecret(value: unknown): boolean {
+  return typeof value === 'string' && value.includes(SECRET_MASK_PREFIX);
+}
+
+/**
+ * Builds the PUT payload for a settings page. Secret fields are only included
+ * when the operator actually typed a replacement value, so echoing a mask back
+ * can never overwrite the stored secret with its own mask.
+ */
+export function buildSettingsPayload(
+  fields: GlobalSettingsField[],
+  values: Record<string, unknown>
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const field of fields) {
+    const value = values[field.name];
+    if (value === undefined) continue;
+    if (field.secret || field.type === 'secret') {
+      if (typeof value !== 'string') continue;
+      const trimmed = value.trim();
+      if (trimmed === '' || isMaskedSecret(trimmed)) continue;
+      payload[field.name] = trimmed;
+      continue;
+    }
+    payload[field.name] = value;
+  }
+  return payload;
+}
 
 /**
  * Maps a settings page id (e.g. "backup/restic") to the deterministic sidebar

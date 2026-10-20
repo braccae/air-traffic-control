@@ -1,5 +1,7 @@
 package plugin
 
+import "strings"
+
 // SettingsFieldType enumerates the typed inputs the framework knows how to
 // render and persist on a global settings page.
 type SettingsFieldType string
@@ -44,6 +46,33 @@ type SettingsPage struct {
 	Description string          `json:"description"`
 	Order       int             `json:"order"`
 	Fields      []SettingsField `json:"fields"`
+}
+
+// SecretMaskPrefix is the fixed bullet run used for every masked secret value.
+// The mask is the only representation of a secret that ever leaves the process.
+const SecretMaskPrefix = "••••••••"
+
+// IsSecretField reports whether a field carries a write-only secret. A field is
+// secret when it is typed "secret" or flagged with Secret.
+func IsSecretField(f SettingsField) bool {
+	return f.Secret || f.Type == SettingsFieldSecret
+}
+
+// MaskedSecretValue renders the mask for a stored secret field, in the shape
+// required by the Secret Protection Invariant: "•••••••• (vault: <name>)".
+// Note that the mask names where the secret *would* live; it never contains the
+// secret itself, and the framework stores module secrets in the settings store
+// rather than in an on-disk Ansible Vault.
+func MaskedSecretValue(name string) string {
+	return SecretMaskPrefix + " (vault: " + name + ")"
+}
+
+// IsMaskedSecretValue reports whether a value returned by this package is a
+// mask rather than real secret material. Clients echo the mask back when they
+// re-save a page they only partially edited; the framework must never persist
+// the mask over the real value.
+func IsMaskedSecretValue(v string) bool {
+	return strings.Contains(v, SecretMaskPrefix)
 }
 
 // SettingsPageProvider is the optional interface an addon module implements to
