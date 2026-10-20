@@ -34,6 +34,7 @@ export const ConnectNetworkModal: React.FC<ConnectNetworkModalProps> = ({
   const [dnsServers, setDnsServers] = useState('1.1.1.1, 8.8.8.8');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [staging, setStaging] = useState(false);
 
   useEffect(() => {
     if (node?.id) {
@@ -160,8 +161,6 @@ export const ConnectNetworkModal: React.FC<ConnectNetworkModalProps> = ({
       setLoading(false);
     }
   };
-
-  const [staging, setStaging] = useState(false);
 
   const handleStageNetwork = async () => {
     setError(null);

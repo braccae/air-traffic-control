@@ -2,6 +2,7 @@ package bootc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -12,7 +13,8 @@ func init() {
 	_ = plugin.Register(New())
 }
 
-// Plugin implements plugin.Plugin and plugin.Actor for bootc bootable container systems.
+// Plugin implements plugin.Plugin, plugin.Reader and plugin.Actor for bootc
+// bootable container systems.
 type Plugin struct{}
 
 // New returns a new bootc package plugin.
@@ -80,6 +82,111 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		Detected: true,
 		Status:   "ONLINE",
 		Details:  strings.TrimSpace(out),
+	}, nil
+}
+
+// bootcImageRef is the innermost container image reference object emitted by
+// `bootc status --json` as status.<entry>.image.image.
+type bootcImageRef struct {
+	Image string `json:"image"`
+}
+
+// bootcImageStatus is status.<entry>.image: the tracked image reference plus
+// its resolved version/digest metadata.
+type bootcImageStatus struct {
+	Image   bootcImageRef `json:"image"`
+	Version string        `json:"version"`
+	Digest  string        `json:"imageDigest"`
+}
+
+// bootcBootEntry is a single bootc deployment (booted, staged or rollback).
+type bootcBootEntry struct {
+	Image bootcImageStatus `json:"image"`
+}
+
+// bootcStatusDoc is the subset of the `bootc status --json` document that the
+// bootc module needs. The top-level document is a BootcHost with a status
+// object carrying the booted, staged and rollback deployments.
+type bootcStatusDoc struct {
+	Status struct {
+		Booted   *bootcBootEntry `json:"booted"`
+		Staged   *bootcBootEntry `json:"staged"`
+		Rollback *bootcBootEntry `json:"rollback"`
+	} `json:"status"`
+}
+
+// imageRefOf returns the container image reference for a deployment, or "none"
+// when the deployment (or its image reference) is absent. It never fabricates
+// a value.
+func imageRefOf(entry *bootcBootEntry) string {
+	if entry == nil {
+		return "none"
+	}
+	ref := strings.TrimSpace(entry.Image.Image.Image)
+	if ref == "" {
+		return "none"
+	}
+	return ref
+}
+
+// versionOf returns the resolved image version for a deployment, or an empty
+// string when unavailable.
+func versionOf(entry *bootcBootEntry) string {
+	if entry == nil {
+		return ""
+	}
+	return strings.TrimSpace(entry.Image.Version)
+}
+
+// digestOf returns the resolved image digest for a deployment, or an empty
+// string when unavailable.
+func digestOf(entry *bootcBootEntry) string {
+	if entry == nil {
+		return ""
+	}
+	return strings.TrimSpace(entry.Image.Digest)
+}
+
+// Read reports the current (booted), staged and fallback (rollback) container
+// images from `bootc status --json` on the target host. Absent fields are
+// reported honestly as "none" — never fabricated.
+func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (any, error) {
+	if r == nil {
+		return nil, fmt.Errorf("runner is nil")
+	}
+
+	// bootc status requires root; prefer passwordless sudo and fall back to a
+	// direct invocation when the runner already has privileges.
+	cmd := "sudo -n bootc status --json 2>/dev/null || bootc status --json"
+	out, err := r.RunCommand(ctx, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("bootc status failed: %w", err)
+	}
+	raw := strings.TrimSpace(out)
+	if raw == "" {
+		return nil, fmt.Errorf("bootc status returned no output")
+	}
+
+	// The runner merges stderr into stdout; isolate the JSON document.
+	if idx := strings.Index(raw, "{"); idx > 0 {
+		raw = raw[idx:]
+	}
+
+	var doc bootcStatusDoc
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return nil, fmt.Errorf("failed to parse bootc status JSON: %w", err)
+	}
+
+	return map[string]any{
+		"currentImage":         imageRefOf(doc.Status.Booted),
+		"currentImageVersion":  versionOf(doc.Status.Booted),
+		"currentImageDigest":   digestOf(doc.Status.Booted),
+		"stagedImage":          imageRefOf(doc.Status.Staged),
+		"stagedImageVersion":   versionOf(doc.Status.Staged),
+		"stagedImageDigest":    digestOf(doc.Status.Staged),
+		"fallbackImage":        imageRefOf(doc.Status.Rollback),
+		"fallbackImageVersion": versionOf(doc.Status.Rollback),
+		"fallbackImageDigest":  digestOf(doc.Status.Rollback),
 	}, nil
 }
 

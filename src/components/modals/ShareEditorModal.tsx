@@ -9,6 +9,8 @@ interface ShareEditorModalProps {
   onMinimize?: () => void;
   onClose: () => void;
   onSaved?: () => void;
+  /** Protocol pre-selected when creating a NEW share (ignored when editing an existing one). */
+  defaultProtocol?: 'smb' | 'nfs';
   initialShare?: {
     id?: string;
     name?: string;
@@ -25,6 +27,7 @@ export const ShareEditorModal: React.FC<ShareEditorModalProps> = ({
   onMinimize,
   onClose,
   onSaved,
+  defaultProtocol = 'smb',
   initialShare = null,
 }) => {
   const isEditing = Boolean(initialShare?.name);
@@ -65,7 +68,7 @@ export const ShareEditorModal: React.FC<ShareEditorModalProps> = ({
         setNfsClient('*');
         setNfsOptions(isRo ? 'ro,sync,no_subtree_check' : 'rw,sync,no_subtree_check,no_root_squash');
       } else {
-        setShareType('smb');
+        setShareType(defaultProtocol);
         setName('');
         setPath('');
         setComment('');
@@ -76,7 +79,7 @@ export const ShareEditorModal: React.FC<ShareEditorModalProps> = ({
         setNfsOptions('rw,sync,no_subtree_check,no_root_squash');
       }
     }
-  }, [isOpen, initialShare]);
+  }, [isOpen, initialShare, defaultProtocol]);
 
   if (!isOpen) return null;
 

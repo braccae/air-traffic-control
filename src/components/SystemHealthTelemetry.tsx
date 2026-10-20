@@ -64,16 +64,6 @@ export const SystemHealthTelemetry: React.FC<SystemHealthTelemetryProps> = ({
           </div>
         </div>
 
-        {/* Warning banner when Glances is not installed and fallback is used */}
-        {telemetry.metricsWarning && (
-          <div className="mt-2 bg-[#ffd97d]/10 border border-[#ffd97d]/30 rounded px-2.5 py-1.5 flex items-center gap-2 font-mono text-[11px] text-[#ffd97d]">
-            <span className="material-symbols-outlined text-[15px] shrink-0 text-[#ffd97d]">
-              warning
-            </span>
-            <span className="flex-1">{telemetry.metricsWarning}</span>
-          </div>
-        )}
-
         {/* 4 Telemetry Metrics Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">
           {/* CPU Usage */}

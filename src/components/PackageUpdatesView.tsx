@@ -8,11 +8,93 @@ import {
 } from '../utils/packageManager.ts';
 import { safeFetchJson } from '../utils/apiDefensive.ts';
 import { compilePackageTask } from '../utils/ansibleQueueCompiler.ts';
-import { stageTaskInQueue } from '../utils/drivers/index.ts';
+import { compileDaemonPluginMutation, stageTaskInQueue } from '../utils/drivers/index.ts';
 
 interface PackageUpdatesViewProps {
   node: NodeItem;
   onOpenTask?: (taskId: string) => void;
+}
+
+export interface BootcImageSwitchPanelProps {
+  imageRef: string;
+  onChange: (value: string) => void;
+  onStage: () => void;
+  staging: boolean;
+}
+
+/**
+ * Affordance for staging a bootc image switch (`bootc switch <image>`) as a
+ * declarative Ansible mutation. Rendered only for bootc-managed hosts.
+ */
+export const BootcImageSwitchPanel: React.FC<BootcImageSwitchPanelProps> = ({
+  imageRef,
+  onChange,
+  onStage,
+  staging,
+}) => (
+  <div className="bg-[#171a2d] border border-[#26293c] rounded p-3 flex flex-col gap-2 shadow-sm font-mono">
+    <div className="flex items-center gap-2">
+      <span className="material-symbols-outlined text-[#b0c9ff] text-[20px]">swap_horiz</span>
+      <h3 className="text-sm font-semibold text-[#dfe1fa]">Switch Container Image</h3>
+    </div>
+    <p className="text-[11px] text-[#8d909b]">
+      Rebind this bootc host to a new bootable container image. The change is staged as a declarative
+      Ansible task in the mutation queue and applied when the queue runs.
+    </p>
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <input
+        type="text"
+        value={imageRef}
+        onChange={e => onChange(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter') onStage();
+        }}
+        placeholder="quay.io/org/os:latest"
+        className="flex-1 min-w-[240px] bg-[#121528] border border-[#26293c] rounded px-2.5 py-1 text-xs text-[#dfe1fa] placeholder-[#8d909b]/60 focus:outline-none focus:border-[#b0c9ff]"
+      />
+      <button
+        type="button"
+        onClick={onStage}
+        disabled={staging}
+        className="flex items-center gap-1.5 bg-[#b0c9ff] hover:bg-[#b0c9ff]/80 text-[#002d6c] font-bold px-3 py-1 rounded transition-colors shadow-sm cursor-pointer disabled:opacity-50"
+        title="Stage bootc switch task into Ansible Mutation Queue"
+      >
+        <span className="material-symbols-outlined text-[15px]">swap_horiz</span>
+        <span>{staging ? 'Staging...' : 'Stage Image Switch'}</span>
+      </button>
+    </div>
+  </div>
+);
+
+/**
+ * Compiles a bootc image switch through the Go daemon and stages it into the
+ * Ansible mutation queue. Fails loudly and honestly when the daemon is
+ * unreachable or rejects the action (Zero-Mock Policy).
+ */
+export async function stageBootcImageSwitch(
+  node: NodeItem,
+  image: string
+): Promise<{ success: boolean; title?: string; error?: string }> {
+  const trimmed = image.trim();
+  if (!trimmed) {
+    return {
+      success: false,
+      error: 'Enter a target container image reference (e.g. quay.io/org/os:latest)',
+    };
+  }
+  try {
+    const task = await compileDaemonPluginMutation(node, 'package', 'bootc', 'switch', {
+      image: trimmed,
+    });
+    task.title = `Switch container image to ${trimmed} on ${node.shortName || node.name}`;
+    const res = await stageTaskInQueue(task);
+    if (res.success) {
+      return { success: true, title: task.title };
+    }
+    return { success: false, error: res.error || 'Failed to stage image switch' };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Error staging image switch' };
+  }
 }
 
 export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, onOpenTask }) => {
@@ -25,6 +107,8 @@ export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, on
   const [showConfirmModal, setShowConfirmModal] = useState<boolean>(false);
   const [appliedTaskId, setAppliedTaskId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [imageRef, setImageRef] = useState<string>('');
+  const [switchingImage, setSwitchingImage] = useState<boolean>(false);
 
   const fetchUpdates = async (refresh = false) => {
     setLoading(true);
@@ -102,6 +186,20 @@ export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, on
     } finally {
       setQueueing(false);
     }
+  };
+
+  const handleStageImageSwitch = async () => {
+    setSwitchingImage(true);
+    setError(null);
+    setStatusMessage(null);
+    const res = await stageBootcImageSwitch(node, imageRef);
+    if (res.success) {
+      setStatusMessage(`Image switch staged in Ansible Mutation Queue (${res.title})`);
+      setImageRef('');
+    } else {
+      setError(res.error || 'Failed to stage image switch');
+    }
+    setSwitchingImage(false);
   };
 
   const getManagerBadge = (mgr?: PackageManager) => {
@@ -211,6 +309,16 @@ export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, on
           )}
         </div>
       </div>
+
+      {/* bootc Image Switch Panel */}
+      {checkResult?.manager === 'bootc' && (
+        <BootcImageSwitchPanel
+          imageRef={imageRef}
+          onChange={setImageRef}
+          onStage={handleStageImageSwitch}
+          staging={switchingImage}
+        />
+      )}
 
       {/* Reboot Alert Banner */}
       {checkResult?.rebootRequired && (

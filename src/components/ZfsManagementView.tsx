@@ -17,6 +17,7 @@ import { safeFetchJson } from '../utils/apiDefensive.ts';
 interface ZfsManagementViewProps {
   node: NodeItem;
   onEngineDetected?: (engine: StorageEngineType) => void;
+  targetType?: 'zfs' | 'btrfs' | 'lvm' | 'all';
 }
 
 export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node, onEngineDetected }) => {
