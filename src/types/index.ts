@@ -288,6 +288,26 @@ export interface RcloneMountRecord {
   updatedAt: number;
 }
 
+/**
+ * One audit line for a vault decryption. Records the variable NAME and metadata
+ * only — never the decrypted plaintext (see the Secret Protection Invariant).
+ */
+export interface VaultAuditEvent {
+  id: string;
+  /** Epoch milliseconds when the decryption completed. */
+  timestamp: number;
+  /** Vault variable name (e.g. `api_key`). Never the value. */
+  variableName: string;
+  /** Acting user / request context (OS user, API client label, or 'system'). */
+  actor: string;
+  /** Target host the secret was destined for, or 'n/a'. */
+  host: string;
+  /** Task / action that triggered the decryption (route or playbook step). */
+  action: string;
+  /** Which password source resolved the decryption. */
+  passwordSource: 'file' | 'env' | 'ask_password' | 'inline' | string;
+}
+
 export interface QueuedAnsibleTask {
   id: string;
   title: string;

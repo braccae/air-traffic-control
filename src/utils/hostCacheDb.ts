@@ -13,6 +13,7 @@ import type {
   TagInventoryChunk,
   RcloneRemoteRecord,
   RcloneMountRecord,
+  VaultAuditEvent,
 } from '../types/index.ts';
 
 export interface CachedHostTelemetry {
@@ -82,6 +83,9 @@ export interface HostCacheStore {
   getRcloneMounts(nodeId?: string): RcloneMountRecord[];
   getRcloneMount(nodeId: string, remoteId: string): RcloneMountRecord | null;
   deleteRcloneMount(nodeId: string, remoteId: string): boolean;
+  recordVaultAuditEvent(event: VaultAuditEvent): void;
+  getVaultAuditEvents(filter?: { variableName?: string; host?: string; limit?: number }): VaultAuditEvent[];
+  countVaultAuditEvents(): number;
   close(): void;
 }
 
@@ -197,6 +201,18 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
       PRIMARY KEY (node_id, remote_id)
     );
 
+    -- Vault decryption audit trail. Deliberately has no column for plaintext:
+    -- the Secret Protection Invariant is enforced by the schema, not by trust.
+    CREATE TABLE IF NOT EXISTS vault_audit_log (
+      id TEXT PRIMARY KEY,
+      timestamp INTEGER NOT NULL,
+      variable_name TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      host TEXT NOT NULL,
+      action TEXT NOT NULL,
+      password_source TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_hosts_sort ON hosts(sort_order ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_hosts_tailscale ON hosts(tailscale_host, tailscale_ip);
     CREATE INDEX IF NOT EXISTS idx_sections_host ON host_section_cache(host_id, section);
@@ -204,6 +220,9 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
     CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_folders_name ON inventory_folders(name ASC);
     CREATE INDEX IF NOT EXISTS idx_chunks_created ON tag_inventory_chunks(created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_vault_audit_ts ON vault_audit_log(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_vault_audit_var ON vault_audit_log(variable_name);
+    CREATE INDEX IF NOT EXISTS idx_vault_audit_host ON vault_audit_log(host);
   `);
 
   try {
