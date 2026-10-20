@@ -261,6 +261,33 @@ export interface AnsibleTaskStep {
   parameters: Record<string, any>;
 }
 
+/** rclone mount strategies. The chosen strategy is what actually gets installed. */
+export type RcloneMountPolicy = 'systemd-mount' | 'systemd-automount' | 'fstab' | 'script';
+
+/** A remote stored in the ATC database. Secret field values in `configJson` are encrypted at rest. */
+export interface RcloneRemoteRecord {
+  id: string;
+  name: string;
+  provider: string;
+  type: string;
+  configJson: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** An installed (or pending) remote mount on a specific client. */
+export interface RcloneMountRecord {
+  nodeId: string;
+  remoteId: string;
+  remoteName: string;
+  mountTarget: string;
+  policy: RcloneMountPolicy;
+  status: 'pending' | 'installed' | 'failed';
+  error?: string;
+  installedAt: number;
+  updatedAt: number;
+}
+
 export interface QueuedAnsibleTask {
   id: string;
   title: string;

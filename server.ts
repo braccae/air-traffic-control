@@ -77,6 +77,7 @@ import {
   REQUIRED_VENV_PACKAGES,
 } from './src/utils/ansibleVenvManager.ts';
 import { registerVaultRoutes } from './src/utils/vaultManager.ts';
+import { registerRcloneRoutes } from './src/utils/rcloneManager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1823,6 +1824,34 @@ registerPlaybookRoutes(app, playbookDir, {
   inventoryScriptPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
 });
 registerVaultRoutes(app);
+
+// ==========================================
+// Category F: rclone remote integration
+// ==========================================
+
+registerRcloneRoutes(app, {
+  hostCache,
+  broadcast,
+  getNode: (id: string) => findNode(id) || hostCache.getHostById(id),
+  // The Go daemon's mount/rclone plugin is the canonical task compiler.
+  compileInstall: async (nodeId, options) => {
+    const result = await proxyToGoDaemon(
+      `/api/nodes/${encodeURIComponent(nodeId)}/plugins/mount/rclone/actions/install_remote`,
+      'POST',
+      { options },
+      15000
+    );
+    if (!result.ok || !result.data) {
+      throw new Error(result.error || 'mount/rclone plugin unavailable on the air-traffic-control-daemon');
+    }
+    return result.data;
+  },
+  stageTask: (task: any) => {
+    const queued = enqueueTask(task);
+    broadcast({ type: 'queue_updated', queue: getQueue() });
+    return queued;
+  },
+});
 
 app.get('/api/ansible/config', async (_req, res) => {
   try {
