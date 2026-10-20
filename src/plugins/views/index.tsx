@@ -19,6 +19,7 @@ import { FirewallView } from '../../components/FirewallView.tsx';
 import { TailscaleExplorerView } from '../../components/TailscaleExplorerView.tsx';
 import { TailscaleMeshCard } from '../../components/TailscaleMeshCard.tsx';
 import { VirtualMachinesKVM } from '../../components/VirtualMachinesKVM.tsx';
+import { ProxmoxView } from '../../components/ProxmoxView.tsx';
 import { ResticBackupPolicy } from '../../components/ResticBackupPolicy.tsx';
 import { SystemHealthTelemetry } from '../../components/SystemHealthTelemetry.tsx';
 import { SystemServicesView } from '../../components/SystemServicesView.tsx';
@@ -349,6 +350,10 @@ const VirtualMachinesKVMAdapter: React.FC<PluginViewProps> = ({ node, onOpenExec
   />
 );
 
+const ProxmoxViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
+  <ProxmoxView node={node} pluginId="vm/proxmox" />
+);
+
 const ResticBackupPolicyAdapter: React.FC<PluginViewProps> = ({ node }) => (
   <ResticBackupPolicy
     nodeName={node.name}
@@ -423,6 +428,7 @@ export const PLUGIN_VIEW_REGISTRY: Record<string, PluginViewComponent> = {
   'firewall': FirewallViewAdapter,
 
   // VMs
+  'vm/proxmox': ProxmoxViewAdapter,
   'vm/libvirt': VirtualMachinesKVMAdapter,
   'vm': VirtualMachinesKVMAdapter,
 
