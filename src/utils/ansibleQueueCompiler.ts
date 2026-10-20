@@ -1,3 +1,11 @@
+/**
+ * OWNERSHIP NOTE (Ansible mutation queue migration)
+ *
+ * The Go engine `backend-go/pkg/ansqueue` is now authoritative for queue
+ * storage, execution and checkpoint halting. This module remains as the
+ * Express fallback until the coordinator is retired (Phase 3): it is kept
+ * behaviourally unchanged and is not the source of truth for new work.
+ */
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
