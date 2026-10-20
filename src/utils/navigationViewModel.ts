@@ -342,11 +342,12 @@ export function getDatacenterNavSections(playbooksCount = 4, tasksCount = 0): Da
  *   #/datacenter/settings/automation/ansible-forks -> single setting page
  * ------------------------------------------------------------------ */
 
-export type DatacenterSettingCategoryId = 'playbooks' | 'automation' | 'variables' | 'terminal';
+export type DatacenterSettingCategoryId = 'playbooks' | 'automation' | 'variables' | 'storage' | 'terminal';
 
 export type DatacenterSettingPageId =
   | 'playbook-editor'
   | 'datacenter-vars'
+  | 'rclone-remotes'
   | 'ansible-stdout-callback'
   | 'ansible-become-method'
   | 'ansible-forks'
@@ -453,6 +454,22 @@ const DATACENTER_SETTING_CATEGORIES: DatacenterSettingCategory[] = [
         icon: 'data_object',
         description: 'List, add, edit and remove group_vars entries persisted in the vars store',
         slug: 'vars',
+      },
+    ],
+  },
+  {
+    id: 'storage',
+    title: 'Storage & Remotes',
+    icon: 'cloud_queue',
+    description: 'Datacenter-wide rclone remotes and mount defaults',
+    pages: [
+      {
+        id: 'rclone-remotes',
+        category: 'storage',
+        title: 'Rclone Remotes',
+        icon: 'cloud_queue',
+        description: 'Guided rclone.conf remote setup, Ansible Vault secret storage, and device installation',
+        slug: 'rclone-remotes',
       },
     ],
   },

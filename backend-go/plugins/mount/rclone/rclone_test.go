@@ -7,6 +7,7 @@ import (
 
 	"air-traffic-control/backend/pkg/plugin"
 	_ "air-traffic-control/backend/plugins/all"
+	"air-traffic-control/backend/plugins/mount/rclone"
 )
 
 type mockRunner struct{ responses map[string]string }
@@ -34,6 +35,16 @@ func TestRclonePlugin_Registered(t *testing.T) {
 	}
 	if p.Compatible(plugin.HostFacts{OSFamily: "windows"}) {
 		t.Error("expected incompatible with windows")
+	}
+
+	// Verify SettingsPageProvider is registered for datacenter settings.
+	sp, ok := p.(plugin.SettingsPageProvider)
+	if !ok {
+		t.Fatal("expected mount/rclone to implement plugin.SettingsPageProvider")
+	}
+	page := sp.SettingsPage()
+	if page.ID != "mount/rclone" || len(page.Fields) == 0 {
+		t.Errorf("unexpected settings page: %+v", page)
 	}
 }
 
@@ -80,7 +91,7 @@ func TestRclonePlugin_ProbeUnavailable(t *testing.T) {
 	}
 }
 
-func TestRclonePlugin_CompilePolicyVariants(t *testing.T) {
+func TestRclonePlugin_CompilePolicyVariantsAndSystemdAlignment(t *testing.T) {
 	p, _ := plugin.Get("mount/rclone")
 	actor, ok := p.(plugin.Actor)
 	if !ok {
@@ -93,7 +104,7 @@ func TestRclonePlugin_CompilePolicyVariants(t *testing.T) {
 		"mountTarget":   "/mnt/rclone/hetzner",
 	}
 
-	modulesFor := func(policy string) []string {
+	compilePolicy := func(policy string) plugin.TaskSpec {
 		opts := map[string]any{}
 		for k, v := range base {
 			opts[k] = v
@@ -103,6 +114,10 @@ func TestRclonePlugin_CompilePolicyVariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("compile %s: %v", policy, err)
 		}
+		return spec
+	}
+
+	modulesFor := func(spec plugin.TaskSpec) []string {
 		var mods []string
 		for _, s := range spec.Steps {
 			mods = append(mods, s.Module)
@@ -110,22 +125,82 @@ func TestRclonePlugin_CompilePolicyVariants(t *testing.T) {
 		return mods
 	}
 
-	if got := modulesFor("fstab"); !contains(got, "ansible.posix.mount") {
+	fstabSpec := compilePolicy("fstab")
+	if got := modulesFor(fstabSpec); !contains(got, "ansible.posix.mount") {
 		t.Errorf("fstab policy should use ansible.posix.mount, got %v", got)
 	}
-	if got := modulesFor("systemd-mount"); !contains(got, "ansible.builtin.systemd") {
-		t.Errorf("systemd-mount should use ansible.builtin.systemd, got %v", got)
+
+	systemdSpec := compilePolicy("systemd-mount")
+	if got := modulesFor(systemdSpec); !contains(got, "ansible.builtin.systemd_service") {
+		t.Errorf("systemd-mount should use ansible.builtin.systemd_service, got %v", got)
 	}
-	if got := modulesFor("script"); !contains(got, "ansible.builtin.copy") {
+	// Verify ATC drop-in subfolder /etc/systemd/system/rclone-hetzner.service.d/atc-rclone.conf
+	foundDropIn := false
+	for _, s := range systemdSpec.Steps {
+		if s.Module == "ansible.builtin.copy" {
+			if dest, _ := s.Params["dest"].(string); dest == "/etc/systemd/system/rclone-hetzner.service.d/atc-rclone.conf" {
+				foundDropIn = true
+			}
+		}
+	}
+	if !foundDropIn {
+		t.Error("expected systemd-mount to write /etc/systemd/system/rclone-hetzner.service.d/atc-rclone.conf drop-in")
+	}
+
+	automountSpec := compilePolicy("systemd-automount")
+	if got := modulesFor(automountSpec); !contains(got, "ansible.builtin.systemd_service") {
+		t.Errorf("systemd-automount should use ansible.builtin.systemd_service, got %v", got)
+	}
+	// systemd requires .mount and .automount unit names to match the escaped Where= path.
+	wantMountUnit := rclone.MountUnitName("/mnt/rclone/hetzner")
+	wantAutomountUnit := rclone.AutomountUnitName("/mnt/rclone/hetzner")
+	if wantMountUnit != "mnt-rclone-hetzner.mount" || wantAutomountUnit != "mnt-rclone-hetzner.automount" {
+		t.Fatalf("unexpected escaped unit names: %s / %s", wantMountUnit, wantAutomountUnit)
+	}
+	foundMountUnit := false
+	foundMountDropIn := false
+	foundAutomountStart := false
+	for _, s := range automountSpec.Steps {
+		if s.Module == "ansible.builtin.copy" {
+			dest, _ := s.Params["dest"].(string)
+			if dest == "/etc/systemd/system/"+wantMountUnit {
+				foundMountUnit = true
+			}
+			if dest == "/etc/systemd/system/"+wantMountUnit+".d/atc-rclone.conf" {
+				foundMountDropIn = true
+			}
+		}
+		if s.Module == "ansible.builtin.systemd_service" {
+			if name, _ := s.Params["name"].(string); name == wantAutomountUnit {
+				foundAutomountStart = true
+			}
+		}
+	}
+	if !foundMountUnit || !foundMountDropIn || !foundAutomountStart {
+		t.Errorf("automount steps missing expected unit/drop-in/start: mount=%v dropin=%v start=%v",
+			foundMountUnit, foundMountDropIn, foundAutomountStart)
+	}
+
+	scriptSpec := compilePolicy("script")
+	if got := modulesFor(scriptSpec); !contains(got, "ansible.builtin.copy") {
 		t.Errorf("script policy should copy a script, got %v", got)
 	}
 
-	// Measured difference: the three policies must not compile to the same task.
-	a := strings.Join(modulesFor("systemd-mount"), ",")
-	b := strings.Join(modulesFor("fstab"), ",")
-	c := strings.Join(modulesFor("script"), ",")
-	if a == b || b == c {
-		t.Errorf("policies compiled identically: systemd=%s fstab=%s script=%s", a, b, c)
+	// Non-systemd Linux fallback (OpenRC/Alpine) degrades systemd-mount to fstab.
+	nonSystemdSpec, err := actor.Compile(plugin.HostFacts{
+		OSFamily:  "linux",
+		Overrides: map[string]string{"initSystem": "openrc"},
+	}, "install_remote", map[string]any{
+		"name":          "hetzner",
+		"configContent": "[hetzner]\ntype = sftp\n",
+		"mountTarget":   "/mnt/rclone/hetzner",
+		"policy":        "systemd-mount",
+	})
+	if err != nil {
+		t.Fatalf("compile non-systemd fallback: %v", err)
+	}
+	if got := modulesFor(nonSystemdSpec); !contains(got, "ansible.posix.mount") {
+		t.Errorf("expected non-systemd host to fall back to ansible.posix.mount, got %v", got)
 	}
 }
 

@@ -15,6 +15,8 @@ export const MOUNT_POLICIES: RcloneMountPolicy[] = [
   'script',
 ];
 
+export const DEFAULT_RCLONE_DROPIN_FILE = 'atc-rclone.conf';
+
 /** rclone remote names become INI section headers: keep them strict. */
 export function sanitizeRemoteName(name: string): string {
   const trimmed = (name || '').trim();
@@ -50,6 +52,54 @@ export function sanitizeConfigValue(value: string): string {
   return trimmed;
 }
 
+function escapeUnitPathComponent(part: string): string {
+  let out = '';
+  for (let i = 0; i < part.length; i++) {
+    const ch = part[i];
+    const code = part.charCodeAt(i);
+    const isAlphaNum =
+      (code >= 97 && code <= 122) ||
+      (code >= 65 && code <= 90) ||
+      (code >= 48 && code <= 57);
+    if (isAlphaNum || ch === ':' || (ch === '.' && i > 0)) {
+      out += ch;
+    } else {
+      out += `\\x${code.toString(16).padStart(2, '0')}`;
+    }
+  }
+  return out;
+}
+
+/**
+ * Converts an absolute mount target path into systemd's canonical unit stem
+ * (matching `systemd-escape -p --suffix=mount <target>` and `backend-go/plugins/mount/rclone`).
+ */
+export function escapeSystemdMountUnitBase(target: string): string {
+  const clean = sanitizeMountTarget(target).replace(/^\/+|\/+$/g, '');
+  if (!clean) return '-';
+  return clean
+    .split('/')
+    .filter(Boolean)
+    .map(escapeUnitPathComponent)
+    .join('-');
+}
+
+export function buildSystemdMountUnitName(target: string): string {
+  return `${escapeSystemdMountUnitBase(target)}.mount`;
+}
+
+export function buildSystemdAutomountUnitName(target: string): string {
+  return `${escapeSystemdMountUnitBase(target)}.automount`;
+}
+
+export function buildSystemdServiceUnitName(name: string): string {
+  return `rclone-${sanitizeRemoteName(name)}.service`;
+}
+
+export function buildSystemdDropInPath(unitName: string, dropInFile = DEFAULT_RCLONE_DROPIN_FILE): string {
+  return `/etc/systemd/system/${unitName}.d/${dropInFile}`;
+}
+
 /** systemd service unit — the `systemd-mount` policy. */
 export function buildSystemdServiceUnit(
   name: string,
@@ -79,26 +129,47 @@ export function buildSystemdServiceUnit(
   ].join('\n');
 }
 
+/** ATC-owned drop-in for `rclone-<name>.service.d/atc-rclone.conf`. */
+export function buildSystemdServiceDropIn(
+  name: string,
+  target: string,
+  mountOptions: string,
+  mountUser = 'root'
+): string {
+  const n = sanitizeRemoteName(name);
+  const t = sanitizeMountTarget(target);
+  return [
+    `# Managed by Air Traffic Control — rclone mount drop-in for ${n} (${t})`,
+    '[Service]',
+    `User=${mountUser}`,
+    'Environment="RCLONE_CONFIG=/root/.config/rclone/rclone.conf"',
+    `# Mount options: ${mountOptions}`,
+    '',
+  ].join('\n');
+}
+
 /** .mount + .automount unit pair — the `systemd-automount` policy. */
 export function buildSystemdAutomountUnits(
   name: string,
   target: string,
   mountOptions: string
-): { mountUnit: string; automountUnit: string } {
+): { mountUnit: string; automountUnit: string; mountDropIn: string } {
   const n = sanitizeRemoteName(name);
   const t = sanitizeMountTarget(target);
-  const opts = mountOptions.trim().split(/\s+/).join(',');
+  const opts = mountOptions.trim().split(/\s+/).filter(Boolean).join(',');
+  const optionsLine = opts ? `_netdev,${opts}` : '_netdev';
   return {
     mountUnit: [
       '[Unit]',
       `Description=rclone mount ${n}`,
       'After=network-online.target',
+      'Wants=network-online.target',
       '',
       '[Mount]',
       `What=${n}:`,
       `Where=${t}`,
       'Type=fuse.rclone',
-      `Options=_netdev,${opts}`,
+      `Options=${optionsLine}`,
       '',
       '[Install]',
       'WantedBy=multi-user.target',
@@ -107,12 +178,20 @@ export function buildSystemdAutomountUnits(
     automountUnit: [
       '[Unit]',
       `Description=Automount rclone remote ${n}`,
+      'After=network-online.target',
       '',
       '[Automount]',
       `Where=${t}`,
+      'TimeoutIdleSec=600',
       '',
       '[Install]',
       'WantedBy=multi-user.target',
+      '',
+    ].join('\n'),
+    mountDropIn: [
+      `# Managed by Air Traffic Control — rclone mount drop-in for ${n} (${t})`,
+      '[Mount]',
+      `Options=${optionsLine}`,
       '',
     ].join('\n'),
   };
@@ -142,7 +221,7 @@ export function buildMountScript(name: string, target: string, mountOptions: str
 /**
  * Preview of what a given mount policy installs on a client. The Go plugin
  * (`mount/rclone`) is the authoritative compiler for the staged Ansible task;
- * this previewer renders the same artifacts for the client page and tests.
+ * this previewer renders the same unit and drop-in artifacts for the client page and tests.
  */
 export function previewMountArtifacts(
   policy: RcloneMountPolicy,
@@ -150,20 +229,29 @@ export function previewMountArtifacts(
   target: string,
   mountOptions = '--vfs-cache-mode writes --dir-cache-time 5m'
 ): string[] {
+  const svcUnit = buildSystemdServiceUnitName(name);
   switch (policy) {
     case 'systemd-mount':
-      return [`/etc/systemd/system/rclone-${name}.service`];
-    case 'systemd-automount':
       return [
-        `/etc/systemd/system/rclone-${name}.mount`,
-        `/etc/systemd/system/rclone-${name}.automount`,
+        `/etc/systemd/system/${svcUnit}`,
+        buildSystemdDropInPath(svcUnit),
       ];
+    case 'systemd-automount': {
+      const mountUnit = buildSystemdMountUnitName(target);
+      const automountUnit = buildSystemdAutomountUnitName(target);
+      return [
+        `/etc/systemd/system/${mountUnit}`,
+        buildSystemdDropInPath(mountUnit),
+        `/etc/systemd/system/${automountUnit}`,
+      ];
+    }
     case 'fstab':
       return [buildFstabLine(name, target, mountOptions)];
     case 'script':
       return [
-        `/usr/local/bin/rclone-mount-${name}.sh`,
-        `/etc/systemd/system/rclone-${name}.service`,
+        `/usr/local/bin/rclone-mount-${sanitizeRemoteName(name)}.sh`,
+        `/etc/systemd/system/${svcUnit}`,
+        buildSystemdDropInPath(svcUnit),
       ];
     default:
       return [];
