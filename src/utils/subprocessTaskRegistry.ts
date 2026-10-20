@@ -79,7 +79,6 @@ interface TaskRecord {
   capturedChars: number;
   nextSeq: number;
   listeners: Set<(ev: SubprocessStreamEvent) => void>;
-  listenersSinceSeq: Map<(ev: SubprocessStreamEvent) => void, number>;
   cancelled: boolean;
   logDir: string;
 }
