@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import type { NodeItem, TagInventoryChunk, CustomFolder } from '../types/index.ts';
+import React, { useState, useEffect } from 'react';
+import type { NodeItem, TagInventoryChunk, CustomFolder, GlobalSettingsPage } from '../types/index.ts';
 import {
   buildInventoryTree,
   buildHostGroupPills,
@@ -10,8 +10,9 @@ import {
   getDatacenterNavSections,
   calculateClusterHealthScore,
   type SidebarViewMode,
-  type DatacenterSection,
+  type DatacenterSelection,
 } from '../utils/navigationViewModel.ts';
+import { fetchGlobalSettingsPages, settingsSectionId } from '../utils/globalSettingsManager.ts';
 
 interface ServerViewSidebarProps {
   nodes: NodeItem[];
@@ -24,12 +25,14 @@ interface ServerViewSidebarProps {
   onCloseMobile?: () => void;
   viewMode?: SidebarViewMode;
   onSelectViewMode?: (mode: SidebarViewMode) => void;
-  selectedDatacenterSection?: DatacenterSection;
-  onSelectDatacenterSection?: (section: DatacenterSection) => void;
+  selectedDatacenterSection?: DatacenterSelection;
+  onSelectDatacenterSection?: (section: DatacenterSelection) => void;
   chunks?: TagInventoryChunk[];
   folders?: CustomFolder[];
   onCreateFolder?: (name: string) => void;
   onDeleteFolder?: (id: string) => void;
+  /** Module-contributed global settings pages. When omitted the sidebar fetches them. */
+  settingsPages?: GlobalSettingsPage[];
 }
 
 export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
@@ -49,6 +52,7 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   folders = [],
   onCreateFolder,
   onDeleteFolder,
+  settingsPages: propsSettingsPages,
 }) => {
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterText, setFilterText] = useState('');
@@ -76,6 +80,25 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   const onlineCount = nodes.filter(n => n.status === 'online').length;
   const health = calculateClusterHealthScore(nodes);
   const datacenterSections = getDatacenterNavSections(4, 0);
+
+  // Module-contributed global settings pages (fetched unless supplied by props).
+  const [internalSettingsPages, setInternalSettingsPages] = useState<GlobalSettingsPage[] | null>(null);
+  useEffect(() => {
+    if (propsSettingsPages !== undefined) return;
+    let active = true;
+    fetchGlobalSettingsPages()
+      .then(pages => {
+        if (active) setInternalSettingsPages(pages);
+      })
+      .catch(() => {
+        if (active) setInternalSettingsPages([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [propsSettingsPages]);
+
+  const settingsPages = propsSettingsPages !== undefined ? propsSettingsPages : internalSettingsPages || [];
 
   const inventoryTree = buildInventoryTree(visibleNodes, chunks, folders, datacenterName);
   const tsNodes = inventoryTree.tailscale.tags.flatMap(t => t.nodes);
@@ -281,6 +304,42 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                 );
               })}
             </div>
+
+            {/* Module-contributed Global Settings Pages */}
+            {settingsPages.length > 0 && (
+              <div className="space-y-1 pt-1">
+                <div className="px-1 text-[10px] font-bold uppercase tracking-wider text-[#8d909b]">
+                  Module Settings
+                </div>
+                {settingsPages.map(page => {
+                  const sectionId = settingsSectionId(page.id);
+                  const isActive = selectedDatacenterSection === sectionId;
+                  return (
+                    <button
+                      key={page.id}
+                      type="button"
+                      onClick={() => onSelectDatacenterSection?.(sectionId as DatacenterSelection)}
+                      className={`w-full flex items-center gap-2 px-2.5 py-2 rounded transition-all text-left cursor-pointer ${
+                        isActive
+                          ? 'bg-[#21263d] text-[#d9b9ff] font-bold border-l-2 border-[#d9b9ff] shadow-[inset_0_0_12px_rgba(217,185,255,0.08)]'
+                          : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+                      }`}
+                    >
+                      <span className="material-symbols-outlined text-[16px] shrink-0 text-[#d9b9ff]">
+                        {page.icon || 'tune'}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="truncate text-xs font-semibold">{page.title}</div>
+                        <div className="text-[10px] text-[#8d909b] truncate">{page.description}</div>
+                      </div>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#291e3b] text-[#d9b9ff] font-mono border border-[#d9b9ff]/30 shrink-0">
+                        module
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Tailscale / Ansible Host Groups Box */}
             <div className="p-1.5 mt-2 bg-[#0a0d1f] rounded border border-[#26293c]/60">

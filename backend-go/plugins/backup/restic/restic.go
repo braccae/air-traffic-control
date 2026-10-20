@@ -47,6 +47,88 @@ func (p *Plugin) Requirements() plugin.Requirements {
 	}
 }
 
+// SettingsPageID is the route slug of the datacenter-wide Restic settings page
+// contributed by this module. It is also the key under which the framework
+// persists the page's values.
+const SettingsPageID = "backup/restic"
+
+// DefaultRepoPath is the fallback repository used when neither a per-host
+// override nor a persisted global default is configured.
+const DefaultRepoPath = "/var/backups/restic"
+
+// SettingsPage implements plugin.SettingsPageProvider so the module appears in
+// the Datacenter Settings sidebar with no frontend work of its own.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return plugin.SettingsPage{
+		ID:          SettingsPageID,
+		Title:       "Restic Backup Defaults",
+		Icon:        "cloud_sync",
+		Description: "Datacenter-wide repository and retention defaults applied to every node unless a per-host override is configured.",
+		Order:       20,
+		Fields: []plugin.SettingsField{
+			{
+				Name:        "repoPath",
+				Label:       "Default Repository",
+				Type:        plugin.SettingsFieldString,
+				Default:     DefaultRepoPath,
+				Required:    true,
+				Placeholder: "/var/backups/restic or s3:https://...",
+				Description: "Restic repository path or URL used when a node has no per-host override.",
+			},
+			{
+				Name:        "retentionDaily",
+				Label:       "Daily Snapshots Kept",
+				Type:        plugin.SettingsFieldInt,
+				Default:     7,
+				Min:         intPtr(0),
+				Max:         intPtr(365),
+				Description: "Snapshots retained by the daily forget policy.",
+			},
+			{
+				Name:        "retentionWeekly",
+				Label:       "Weekly Snapshots Kept",
+				Type:        plugin.SettingsFieldInt,
+				Default:     4,
+				Min:         intPtr(0),
+				Max:         intPtr(104),
+				Description: "Snapshots retained by the weekly forget policy.",
+			},
+			{
+				Name:        "retentionMonthly",
+				Label:       "Monthly Snapshots Kept",
+				Type:        plugin.SettingsFieldInt,
+				Default:     12,
+				Min:         intPtr(0),
+				Max:         intPtr(120),
+				Description: "Snapshots retained by the monthly forget policy.",
+			},
+			{
+				Name:        "passwordVaultVar",
+				Label:       "Repository Password Vault Variable",
+				Type:        plugin.SettingsFieldSecret,
+				Secret:      true,
+				Placeholder: "vault_restic_password",
+				Description: "Ansible Vault variable name holding the repository password. The password itself is never stored here.",
+			},
+		},
+	}
+}
+
+func intPtr(v int) *int { return &v }
+
+// globalDefaultRepo returns the persisted datacenter-wide repository default, or
+// an empty string when none has been configured.
+func globalDefaultRepo() string {
+	store := plugin.GlobalSettingsStore()
+	if store == nil {
+		return ""
+	}
+	if v, ok := store.Value(SettingsPageID, "repoPath"); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
 func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (plugin.Detection, error) {
 	if r == nil {
 		return plugin.Detection{Detected: false, Status: "OFFLINE", Error: "runner is nil"}, nil
@@ -82,9 +164,11 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 		return nil, fmt.Errorf("runner is nil")
 	}
 
-	repo := "/var/backups/restic"
+	repo := DefaultRepoPath
 	if h.Overrides != nil && h.Overrides["resticRepo"] != "" {
 		repo = h.Overrides["resticRepo"]
+	} else if global := globalDefaultRepo(); global != "" {
+		repo = global
 	}
 
 	adapter := &runnerAdapter{ctx: ctx, runner: r}

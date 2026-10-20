@@ -2428,6 +2428,39 @@ app.post('/api/nodes/:id/plugins/refresh', async (req, res) => {
   res.json(result.data);
 });
 
+// -------------------------------------------------------------
+// Module-contributed global settings pages (proxied to the Go daemon)
+// -------------------------------------------------------------
+app.get('/api/settings/pages', async (_req, res) => {
+  const result = await proxyToGoDaemon('/api/settings/pages', 'GET');
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+  res.json(result.data);
+});
+
+app.get('/api/settings/pages/*', async (req, res) => {
+  // The page id may itself contain a slash (e.g. "backup/restic").
+  const pageId = (req.params as Record<string, string>)[0];
+  const result = await proxyToGoDaemon(`/api/settings/pages/${pageId}`, 'GET');
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+  res.json(result.data);
+});
+
+app.put('/api/settings/pages/*', async (req, res) => {
+  const pageId = (req.params as Record<string, string>)[0];
+  const result = await proxyToGoDaemon(`/api/settings/pages/${pageId}`, 'PUT', req.body);
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+  res.json(result.data);
+});
+
 app.post('/api/restic/snapshot', async (req, res) => {
   const targetNode = findNode(req.body?.host || 'likes-it-cold');
   const snapshotTask: GlobalTaskItem = {
