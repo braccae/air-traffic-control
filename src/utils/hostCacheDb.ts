@@ -386,6 +386,38 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
   `);
   const stmtDeleteRcloneMount = db.prepare('DELETE FROM rclone_mounts WHERE node_id = ? AND remote_id = ?');
 
+  const stmtInsertVaultAudit = db.prepare(`
+    INSERT INTO vault_audit_log (id, timestamp, variable_name, actor, host, action, password_source)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  const stmtSelectVaultAudit = db.prepare(`
+    SELECT id, timestamp, variable_name, actor, host, action, password_source
+    FROM vault_audit_log ORDER BY timestamp DESC, rowid DESC LIMIT ?
+  `);
+  const stmtSelectVaultAuditByVariable = db.prepare(`
+    SELECT id, timestamp, variable_name, actor, host, action, password_source
+    FROM vault_audit_log WHERE variable_name = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?
+  `);
+  const stmtSelectVaultAuditByHost = db.prepare(`
+    SELECT id, timestamp, variable_name, actor, host, action, password_source
+    FROM vault_audit_log WHERE host = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?
+  `);
+  const stmtSelectVaultAuditByVariableAndHost = db.prepare(`
+    SELECT id, timestamp, variable_name, actor, host, action, password_source
+    FROM vault_audit_log WHERE variable_name = ? AND host = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?
+  `);
+  const stmtCountVaultAudit = db.prepare('SELECT COUNT(*) as cnt FROM vault_audit_log');
+
+  const mapVaultAuditRow = (r: any): VaultAuditEvent => ({
+    id: String(r.id),
+    timestamp: Number(r.timestamp),
+    variableName: String(r.variable_name),
+    actor: String(r.actor),
+    host: String(r.host),
+    action: String(r.action),
+    passwordSource: String(r.password_source),
+  });
+
   type RcloneRemoteRow = {
     id: string;
     name: string;
@@ -829,6 +861,44 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
     deleteRcloneMount(nodeId: string, remoteId: string): boolean {
       const res = stmtDeleteRcloneMount.run(nodeId, remoteId);
       return Number(res.changes) > 0;
+    },
+
+    recordVaultAuditEvent(event: VaultAuditEvent): void {
+      stmtInsertVaultAudit.run(
+        event.id,
+        event.timestamp,
+        event.variableName,
+        event.actor,
+        event.host,
+        event.action,
+        event.passwordSource
+      );
+    },
+
+    getVaultAuditEvents(
+      filter?: { variableName?: string; host?: string; limit?: number }
+    ): VaultAuditEvent[] {
+      const rawLimit = Number(filter?.limit ?? 200);
+      const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 1000) : 200;
+      const variableName = filter?.variableName?.trim();
+      const host = filter?.host?.trim();
+
+      let rows: any[];
+      if (variableName && host) {
+        rows = stmtSelectVaultAuditByVariableAndHost.all(variableName, host, limit) as any[];
+      } else if (variableName) {
+        rows = stmtSelectVaultAuditByVariable.all(variableName, limit) as any[];
+      } else if (host) {
+        rows = stmtSelectVaultAuditByHost.all(host, limit) as any[];
+      } else {
+        rows = stmtSelectVaultAudit.all(limit) as any[];
+      }
+      return rows.map(mapVaultAuditRow);
+    },
+
+    countVaultAuditEvents(): number {
+      const row = stmtCountVaultAudit.get() as { cnt: number } | undefined;
+      return Number(row?.cnt ?? 0);
     },
 
     close(): void {
