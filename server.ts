@@ -76,16 +76,33 @@ import {
   ensureAnsibleVenv,
   REQUIRED_VENV_PACKAGES,
 } from './src/utils/ansibleVenvManager.ts';
-import { materializeVaultVarsFile, registerVaultRoutes } from "./src/utils/vaultManager.ts";
-import { registerRcloneRoutes } from "./src/utils/rcloneManager.ts";
-import { registerVaultRoutes } from "./src/utils/vaultManager.ts";
+import { materializeVaultVarsFile, registerVaultRoutes } from './src/utils/vaultManager.ts';
+import { registerRcloneRoutes } from './src/utils/rcloneManager.ts';
+import { createPlaybookRunner } from './src/utils/playbookRunner.ts';
+import {
+  initCronScheduleStore,
+  listSchedules,
+  getSchedule,
+  createSchedule,
+  updateSchedule,
+  removeSchedule,
+} from './src/utils/cronScheduleStore.ts';
+import { createCronScheduler } from './src/utils/cronScheduler.ts';
+import { nextCronRun } from './src/utils/cronExpression.ts';
+import { createCronExecutor } from './src/utils/cronScheduleExecutor.ts';
 import {
   installConsoleCapture,
   listClusterLogs,
   onClusterLog,
   recordClusterLog,
   type ClusterLogKind,
-}
+} from './src/utils/clusterLogStore.ts';
+import {
+  beginConnection,
+  getConnectionSnapshot,
+  onConnectionChange,
+  type ConnectionSnapshot,
+} from './src/utils/connectionRegistry.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -110,6 +127,44 @@ app.get('/ghostty-vt.wasm', (_req, res) => {
 const dbFilePath = process.env.HOST_CACHE_DB_PATH || path.resolve(__dirname, 'data/hosts-cache.sqlite');
 const hostCache = createHostCacheStore(dbFilePath);
 initQueueStore(dbFilePath);
+initCronScheduleStore(dbFilePath);
+
+// Shared real playbook runner: POST /api/playbook/run and cron schedules both
+// spawn through this instance so runs land in the same console task stream.
+// Persist a task to SQLite and keep the in-memory console list in sync.
+function persistTask(task: GlobalTaskItem) {
+  hostCache.saveTask(task);
+  const idx = tasks.findIndex(t => t.id === task.id);
+  if (idx >= 0) {
+    tasks[idx] = { ...task };
+  } else {
+    tasks.unshift({ ...task });
+  }
+}
+
+const playbookRunner = createPlaybookRunner({
+  cwd: __dirname,
+  inventoryPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
+  saveTask: task => persistTask(task),
+  broadcast: msg => broadcast(msg),
+  prepareExtraVarsFile: () => materializeVaultVarsFile(hostCache),
+});
+
+const cronExecutor = createCronExecutor({
+  cwd: __dirname,
+  inventoryPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
+  playbookRunner,
+  listNodes: () => nodes,
+  enqueueTask,
+  executeQueuedTask: (inventoryPath, options) => executeNextQueueTask(inventoryPath, options),
+  saveTask: task => hostCache.saveTask(task),
+  broadcast: msg => broadcast(msg),
+});
+
+const cronScheduler = createCronScheduler({
+  execute: schedule => cronExecutor.execute(schedule),
+  log: message => console.log(message),
+});
 
 // Seed or load persisted hosts from SQLite
 let nodes: NodeItem[] = hostCache.seedHostsIfEmpty(LIVE_TAILNET_NODES);
@@ -1361,7 +1416,6 @@ const activePtySessions = new Map<
   string,
   { proc: ChildProcess; ws: WebSocket; sessionId: string; releaseConnection: () => void }
 >();
-const activePlaybookProcs = new Map<string, ChildProcess>();
 
 // ==========================================
 // Category C: Tailscale Deep Telemetry Routes
@@ -2033,150 +2087,27 @@ app.post('/api/ansible/collections/install', (req, res) => {
 });
 
 app.post('/api/playbook/run', (req, res) => {
-  const { playbook = 'site.yml', target = 'all', checkMode = false, tags, extraVars } = req.body;
+  const { playbook = 'site.yml', target = 'all', checkMode = false, tags, extraVars } = req.body || {};
 
-  const playbookValidation = validatePlaybookName(playbook);
-  if (!playbookValidation.valid) {
-    res.status(400).json({ error: playbookValidation.error || 'Invalid playbook name' });
+  const outcome = playbookRunner.run({
+    playbook,
+    target,
+    checkMode: Boolean(checkMode),
+    tags,
+    extraVars,
+  });
+
+  if (!outcome.success) {
+    res.status(outcome.code || 500).json({ error: outcome.error || 'Failed to start playbook' });
     return;
   }
 
-  const inventoryPath = path.resolve(__dirname, 'inventory/tailscale_inventory.py');
-  const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
-  const playbookPath = path.resolve(playbookDir, playbookValidation.name);
-
-  if (!playbookPath.startsWith(playbookDir + path.sep)) {
-    res.status(400).json({ error: 'Path traversal detected in playbook name' });
-    return;
-  }
-
-  if (!fs.existsSync(playbookPath)) {
-    res.status(404).json({ error: `Playbook ${playbook} not found on filesystem` });
-    return;
-  }
-
-  const taskId = `task-ansible-${Date.now()}`;
-  const newTask: GlobalTaskItem = {
-    id: taskId,
-    startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-    nodeTarget: target,
-    user: 'core@ansible',
-    description: `ansible-playbook ${playbook} --limit ${target} ${checkMode ? '(--check)' : ''}`,
-    progress: 10,
-    progressEta: 'Spawning Ansible runner...',
-    status: 'RUNNING',
-    category: 'ansible',
-    logs: [`[ansible] Starting playbook ${playbook} against ${target}`],
-  };
-
-  tasks.unshift(newTask);
-  hostCache.saveTask(newTask);
-  broadcast({ type: 'task_started', task: newTask });
-
-  const args = ['-i', inventoryPath, playbookPath];
-  if (target && target !== 'all') {
-    args.push('--limit', target);
-  }
-  if (checkMode) {
-    args.push('--check');
-  }
-  if (tags) {
-    args.push('--tags', tags);
-  }
-  if (extraVars) {
-    args.push('--extra-vars', typeof extraVars === 'string' ? extraVars : JSON.stringify(extraVars));
-  }
-
-  // Vault store -> ephemeral owner-only vars file (ansible-vault ciphertext).
-  const vaultVars = materializeVaultVarsFile(hostCache);
-  if (vaultVars) {
-    args.push('--extra-vars', `@${vaultVars.filePath}`);
-  }
-
-  const proc = spawn('ansible-playbook', args, {
-    cwd: __dirname,
-    env: { ...process.env, ANSIBLE_FORCE_COLOR: '1' },
-  });
-
-  activePlaybookProcs.set(taskId, proc);
-
-  proc.on('error', (err: any) => {
-    activePlaybookProcs.delete(taskId);
-    vaultVars?.cleanup();
-    newTask.status = 'FAILED';
-    newTask.progress = 100;
-    newTask.progressEta = `Spawn error: ${err?.code || err?.message || 'Failed to spawn runner'}`;
-    newTask.logs = newTask.logs || [];
-    newTask.logs.push(`[error] Process failed to spawn: ${err?.message || String(err)}`);
-    hostCache.saveTask(newTask);
-    broadcast({ type: 'task_output', taskId, line: `[error] Process failed to spawn: ${err?.message || String(err)}` });
-    broadcast({ type: 'task_updated', task: newTask });
-  });
-
-  const appendLog = (line: string) => {
-    newTask.logs = newTask.logs || [];
-    newTask.logs.push(line);
-    if (newTask.logs.length > 300) {
-      newTask.logs.shift();
-    }
-    broadcast({ type: 'task_output', taskId, line });
-
-    if (line.includes('PLAY [')) {
-      newTask.progress = 25;
-      newTask.progressEta = 'Starting plays...';
-    } else if (line.includes('TASK [')) {
-      newTask.progress = Math.min(85, (newTask.progress || 25) + 5);
-      const match = line.match(/TASK \[(.*?)\]/);
-      if (match) newTask.progressEta = match[1];
-    } else if (line.includes('PLAY RECAP')) {
-      newTask.progress = 90;
-      newTask.progressEta = 'Finalizing recap...';
-    }
-    hostCache.saveTask(newTask);
-    broadcast({ type: 'task_updated', task: newTask });
-  };
-
-  proc.stdout.on('data', chunk => {
-    const lines = chunk.toString().split('\n');
-    for (const l of lines) {
-      if (l.trim()) appendLog(l);
-    }
-  });
-
-  proc.stderr.on('data', chunk => {
-    const lines = chunk.toString().split('\n');
-    for (const l of lines) {
-      if (l.trim()) appendLog(`[stderr] ${l}`);
-    }
-  });
-
-  proc.on('close', code => {
-    activePlaybookProcs.delete(taskId);
-    vaultVars?.cleanup();
-    if (newTask.status === 'FAILED') {
-      return;
-    }
-    newTask.progress = 100;
-    if (code === 0) {
-      newTask.status = 'OK';
-      newTask.progressEta = checkMode ? 'Completed dry-run (0 failed)' : 'Completed successfully';
-    } else {
-      newTask.status = 'FAILED';
-      newTask.progressEta = `Failed (exit code ${code})`;
-    }
-    hostCache.saveTask(newTask);
-    broadcast({ type: 'task_updated', task: newTask });
-  });
-
-  res.json({ success: true, taskId, task: newTask });
+  res.json({ success: true, taskId: outcome.taskId, task: outcome.task });
 });
 
 app.post('/api/playbook/cancel', (req, res) => {
   const { taskId } = req.body;
-  const proc = activePlaybookProcs.get(taskId);
-  if (proc) {
-    proc.kill('SIGTERM');
-    activePlaybookProcs.delete(taskId);
+  if (playbookRunner.cancel(taskId)) {
     const task = tasks.find(t => t.id === taskId);
     if (task) {
       task.status = 'FAILED';
@@ -2279,6 +2210,98 @@ app.post('/api/queue/execute', async (req, res) => {
     remainingCount,
     haltedOnError,
   });
+});
+
+// -------------------------------------------------------------
+// Cron Schedule API Endpoints (ATC in-process scheduler)
+// -------------------------------------------------------------
+function broadcastSchedules() {
+  broadcast({ type: 'cron_updated', schedules: listSchedules() });
+}
+
+app.get('/api/cron/schedules', (_req, res) => {
+  res.json({
+    success: true,
+    schedules: listSchedules(),
+    schedulerRunning: cronScheduler.isRunning(),
+  });
+});
+
+app.get('/api/cron/schedules/:id', (req, res) => {
+  const schedule = getSchedule(req.params.id);
+  if (!schedule) {
+    res.status(404).json({ success: false, error: `Schedule ${req.params.id} not found` });
+    return;
+  }
+  res.json({ success: true, schedule });
+});
+
+app.post('/api/cron/schedules', (req, res) => {
+  try {
+    const schedule = createSchedule(req.body);
+    broadcastSchedules();
+    res.json({ success: true, schedule });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err?.message || 'Failed to create schedule' });
+  }
+});
+
+app.put('/api/cron/schedules/:id', (req, res) => {
+  try {
+    const schedule = updateSchedule(req.params.id, req.body || {});
+    if (!schedule) {
+      res.status(404).json({ success: false, error: `Schedule ${req.params.id} not found` });
+      return;
+    }
+    broadcastSchedules();
+    res.json({ success: true, schedule });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err?.message || 'Failed to update schedule' });
+  }
+});
+
+app.delete('/api/cron/schedules/:id', (req, res) => {
+  const removed = removeSchedule(req.params.id);
+  if (!removed) {
+    res.status(404).json({ success: false, error: `Schedule ${req.params.id} not found` });
+    return;
+  }
+  broadcastSchedules();
+  res.json({ success: true });
+});
+
+// Fires a schedule immediately for verification — does not change its next-run clock.
+app.post('/api/cron/schedules/:id/run', async (req, res) => {
+  const schedule = getSchedule(req.params.id);
+  if (!schedule) {
+    res.status(404).json({ success: false, error: `Schedule ${req.params.id} not found` });
+    return;
+  }
+  const run = await cronScheduler.runNow(schedule.id);
+  res.json({
+    success: run ? run.status === 'OK' : false,
+    run,
+    schedule: getSchedule(schedule.id),
+  });
+});
+
+// Preview the next fire times for an expression before saving a schedule.
+app.get('/api/cron/preview', (req, res) => {
+  const expression = String(req.query.expression || '');
+  const count = Math.min(Math.max(parseInt(String(req.query.count || '5'), 10) || 5, 1), 25);
+  try {
+    const runs: number[] = [];
+    let cursor = Date.now();
+    for (let i = 0; i < count; i++) {
+      const next = nextCronRun(expression, cursor);
+      if (next === null) break;
+      runs.push(next);
+      cursor = next;
+    }
+    res.json({ success: true, expression, runs });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err?.message || 'Invalid cron expression' });
+  }
 });
 
 // -------------------------------------------------------------
@@ -2729,6 +2752,10 @@ async function startServer() {
     console.log(`Air Traffic Control Fullstack server running on http://0.0.0.0:${PORT}`);
     // Non-blocking background initialization of persistent Ansible virtual environment
     ensureAnsibleVenv().catch(err => console.warn('Background venv init error:', err));
+    // In-process cron scheduler: fires persisted schedules and records real runs.
+    cronScheduler.start();
+    const scheduleCount = listSchedules().filter(s => s.enabled).length;
+    console.log(`[cron] ATC scheduler started with ${scheduleCount} enabled schedule(s)`);
   });
 }
 

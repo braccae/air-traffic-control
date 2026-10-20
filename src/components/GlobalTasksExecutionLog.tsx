@@ -223,39 +223,6 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
     ? runningOrRecentAnsible.logs
     : tasks.find(t => t.logs && t.logs.length > 0)?.logs || null;
 
-  const fallbackAnsibleLogs = [
-    'PLAY [Setup Homelab Cluster Services & Podman Engine] ****************************************',
-    'TASK [Gathering Facts] **********************************************************************',
-    'ok: [likes-it-cold.leo-banjo.ts.net]',
-    'ok: [ping.leo-banjo.ts.net]',
-    'ok: [dev-pc.leo-banjo.ts.net]',
-    'TASK [podman : Verify rootless linger configuration] ****************************************',
-    'changed: [likes-it-cold.leo-banjo.ts.net] => {"changed": true, "msg": "loginctl enable-linger core"}',
-    'changed: [ping.leo-banjo.ts.net] => {"changed": true, "msg": "loginctl enable-linger uosserver"}',
-    'TASK [restic : Ensure immutable gold retention policy] **************************************',
-    'ok: [likes-it-cold.leo-banjo.ts.net] => {"mode": "immutable", "retention": "7d/4w/12m"}',
-    'TASK [tailscale : Verify mesh routing & exit advertisement] *********************************',
-    'ok: [likes-it-cold.leo-banjo.ts.net] => {"advertised": "192.168.8.0/24", "status": "online"}',
-    'PLAY RECAP **********************************************************************************',
-    'likes-it-cold.leo-banjo.ts.net : ok=14   changed=1    unreachable=0    failed=0',
-    'ping.leo-banjo.ts.net          : ok=12   changed=1    unreachable=0    failed=0',
-  ];
-
-<<<<<<< HEAD
-  const vaultLogs = [
-    '2026-10-18 02:10:50 [AUDIT] root@pam authenticated with GSSAPI ticket',
-    '2026-10-18 02:10:50 [VAULT] Decrypted group_vars/all.yml using AES-256 cipher (SQLite cache sync)',
-    '2026-10-18 02:05:12 [AUDIT] Token generated for cockpit-bridge session (ttl: 3600s)',
-=======
-  const syslogLogs = [
-    'Oct 18 02:15:44 likes-it-cold systemd[1]: Started Cockpit Web Service Session ws-tunnel.',
-    'Oct 18 02:15:40 likes-it-cold podman[4182]: container c9603dec9010 (uosserver) health check: PASSED',
-    'Oct 18 02:15:35 likes-it-cold restic[19482]: snapshot f7a91b2e saved to s3://restic-homelab-vault/leo-banjo',
-    'Oct 18 02:15:30 ping systemd[1]: uosserver.service: Active rootless pod (UID 1001)',
-    'Oct 18 02:15:22 dev-pc tailscaled[1104]: mesh: peer likes-it-cold latency 1.8ms (direct WireGuard)',
->>>>>>> wt/t_f78d6662
-  ];
-
   return (
     <section
       id="global-tasks-drawer"
@@ -527,22 +494,10 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
                   </div>
                 ))
               ) : (
-                fallbackAnsibleLogs.map((line, idx) => (
-                  <div
-                    key={idx}
-                    className={
-                      line.startsWith('PLAY') || line.startsWith('TASK')
-                        ? 'text-[#b0c9ff] font-bold'
-                        : line.includes('changed')
-                        ? 'text-[#d9b9ff]'
-                        : line.includes('failed')
-                        ? 'text-[#ffb4ab]'
-                        : 'text-[#8cd6cb]'
-                    }
-                  >
-                    {line}
-                  </div>
-                ))
+                <div className="text-[#8d909b]">
+                  No captured Ansible output yet — run a playbook or an ATC mutation task to stream
+                  its real output here.
+                </div>
               )}
             </div>
           )}

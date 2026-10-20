@@ -8,6 +8,7 @@ import {
   formatNodeIpBadge,
   type DatacenterSection,
 } from '../utils/navigationViewModel.ts';
+import { CronSchedulesPanel } from './CronSchedulesPanel.tsx';
 import {
   loadQuickCommands,
   addQuickCommand,
@@ -412,176 +413,6 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
 
   return (
     <div className="flex flex-col gap-4 w-full">
-<<<<<<< HEAD
-      {/* Datacenter Header */}
-      <div
-        id="datacenter-overview"
-        className="rounded-lg bg-[#121528] border border-[#26293c] p-4 shadow-md flex flex-col gap-3"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-[#1b2a38] border border-[#8cd6cb]/40 flex items-center justify-center text-[#8cd6cb] shadow-sm">
-              <span className="material-symbols-outlined text-[24px]">cloud_queue</span>
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-lg font-bold font-mono text-[#f0f2ff] tracking-tight">
-                  {datacenterName}
-                </h1>
-                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider bg-[#1b2a38] text-[#8cd6cb] border border-[#8cd6cb]/30">
-                  Tailnet Mesh
-                </span>
-              </div>
-              <p className="text-xs text-[#8d909b] font-mono mt-0.5">
-                WireGuard-encrypted mesh • MagicDNS active • Rootless Podman &amp; Cockpit nodes
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <div className="px-3 py-1.5 rounded-md bg-[#171a2d] border border-[#26293c] flex items-center gap-2 text-xs font-mono">
-              <span className="text-[#8d909b]">HEALTH:</span>
-              <span className={`font-bold ${health.statusColor}`}>{health.score}% {health.statusLabel}</span>
-            </div>
-            <div className="px-3 py-1.5 rounded-md bg-[#171a2d] border border-[#26293c] flex items-center gap-2 text-xs font-mono">
-              <span className="text-[#8d909b]">ONLINE:</span>
-              <span className="font-bold text-[#8cd6cb]">{health.onlineCount} / {health.totalCount} NODES</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Aggregate Stats Pills */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-[#26293c]/60">
-          <div className="bg-[#171a2d] px-3 py-2 rounded border border-[#26293c] flex items-center justify-between">
-            <span className="text-[11px] font-mono text-[#8d909b]">Physical Hosts</span>
-            <span className="text-sm font-mono font-bold text-[#b0c9ff]">{hostCount}</span>
-          </div>
-          <div className="bg-[#171a2d] px-3 py-2 rounded border border-[#26293c] flex items-center justify-between">
-            <span className="text-[11px] font-mono text-[#8d909b]">Proxmox PVE</span>
-            <span className="text-sm font-mono font-bold text-[#ffb4ab]">{pveCount}</span>
-          </div>
-          <div className="bg-[#171a2d] px-3 py-2 rounded border border-[#26293c] flex items-center justify-between">
-            <span className="text-[11px] font-mono text-[#8d909b]">KVM Virtual Machines</span>
-            <span className="text-sm font-mono font-bold text-[#d9b9ff]">{vmCount}</span>
-          </div>
-          <div className="bg-[#171a2d] px-3 py-2 rounded border border-[#26293c] flex items-center justify-between">
-            <span className="text-[11px] font-mono text-[#8d909b]">LXC Containers</span>
-            <span className="text-sm font-mono font-bold text-[#8cd6cb]">{lxcCount}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Section 1: Quick Actions */}
-      <div className="rounded-lg bg-[#121528] border border-[#26293c] p-4 shadow-md">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <span className="material-symbols-outlined text-[18px] text-[#b0c9ff]">flash_on</span>
-            <h2 className="text-xs font-mono font-bold text-[#dfe1fa] uppercase tracking-wider">
-              Datacenter Quick Actions
-            </h2>
-          </div>
-          <span className="text-[10px] font-mono text-[#8d909b]">Cluster-wide operations</span>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2.5">
-          {/* Action 1: Run Ansible Playbook */}
-          <button
-            type="button"
-            onClick={() => onOpenPlaybookModal()}
-            className="group flex flex-col p-3 rounded-lg bg-[#171a2d] hover:bg-[#1f2338] border border-[#26293c] hover:border-[#b0c9ff]/50 transition-all text-left cursor-pointer shadow-xs"
-          >
-            <div className="flex items-center justify-between w-full mb-1">
-              <span className="material-symbols-outlined text-[20px] text-[#b0c9ff] group-hover:scale-110 transition-transform">
-                play_circle
-              </span>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#21263d] text-[#b0c9ff] border border-[#b0c9ff]/30">
-                Run
-              </span>
-            </div>
-            <span className="font-mono text-xs font-bold text-[#f0f2ff] group-hover:text-[#b0c9ff]">
-              Run Ansible Playbook
-            </span>
-            <span className="text-[11px] text-[#8d909b] mt-1 leading-tight">
-              Execute baseline, hardening, or container update tasks
-            </span>
-          </button>
-
-          {/* Action 2: Manage Playbooks */}
-          <button
-            type="button"
-            onClick={() => onOpenPlaybookEditor()}
-            className="group flex flex-col p-3 rounded-lg bg-[#171a2d] hover:bg-[#1f2338] border border-[#26293c] hover:border-[#8cd6cb]/50 transition-all text-left cursor-pointer shadow-xs"
-          >
-            <div className="flex items-center justify-between w-full mb-1">
-              <span className="material-symbols-outlined text-[20px] text-[#8cd6cb] group-hover:scale-110 transition-transform">
-                edit_document
-              </span>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#1b2a38] text-[#8cd6cb] border border-[#8cd6cb]/30">
-                Edit
-              </span>
-            </div>
-            <span className="font-mono text-xs font-bold text-[#f0f2ff] group-hover:text-[#8cd6cb]">
-              Manage Playbooks
-            </span>
-            <span className="text-[11px] text-[#8d909b] mt-1 leading-tight">
-              Create, view, and modify YAML playbooks in ansible/playbooks
-            </span>
-          </button>
-
-          {/* Action 3: Cluster Vars & Vault */}
-          <button
-            type="button"
-            onClick={onOpenVaultEditor || onOpenGroupVars}
-            className="group flex flex-col p-3 rounded-lg bg-[#171a2d] hover:bg-[#1f2338] border border-[#26293c] hover:border-[#d9b9ff]/50 transition-all text-left cursor-pointer shadow-xs"
-          >
-            <div className="flex items-center justify-between w-full mb-1">
-              <span className="material-symbols-outlined text-[20px] text-[#d9b9ff] group-hover:scale-110 transition-transform">
-                key
-              </span>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#291e3b] text-[#d9b9ff] border border-[#d9b9ff]/30">
-                Vault
-              </span>
-            </div>
-            <span className="font-mono text-xs font-bold text-[#f0f2ff] group-hover:text-[#d9b9ff]">
-              Cluster Vars &amp; Vault
-            </span>
-            <span className="text-[11px] text-[#8d909b] mt-1 leading-tight">
-              Configure group variables and AES-256 encrypted secrets
-            </span>
-          </button>
-
-          {/* Action 4: Console & Tasks Execution */}
-          <button
-            type="button"
-            onClick={() => {
-              if (onToggleTasksDrawer) {
-                onToggleTasksDrawer();
-              } else {
-                const el = document.getElementById('global-tasks-drawer');
-                el?.scrollIntoView({ behavior: 'smooth' });
-              }
-            }}
-            className="group flex flex-col p-3 rounded-lg bg-[#171a2d] hover:bg-[#1f2338] border border-[#26293c] hover:border-[#ffd580]/50 transition-all text-left cursor-pointer shadow-xs"
-            title="Open Console"
-          >
-            <div className="flex items-center justify-between w-full mb-1">
-              <span className="material-symbols-outlined text-[20px] text-[#ffd580] group-hover:scale-110 transition-transform">
-                terminal
-              </span>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#2d281b] text-[#ffd580] border border-[#ffd580]/30">
-                {tasks.length} Jobs
-              </span>
-            </div>
-            <span className="font-mono text-xs font-bold text-[#f0f2ff] group-hover:text-[#ffd580]">
-              Console &amp; Tasks
-            </span>
-            <span className="text-[11px] text-[#8d909b] mt-1 leading-tight">
-              View live execution logs, ACPI signals, and SSH outputs
-            </span>
-          </button>
-        </div>
-      </div>
-=======
       {/* Summary / overview: quick actions, recent console tasks, live storage probes */}
       <DatacenterSummaryView
         datacenterName={datacenterName}
@@ -601,7 +432,6 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
           el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }}
       />
->>>>>>> wt/t_a49a3587
 
       {/* Section 2: Global Playbooks Library */}
       <div
@@ -1228,6 +1058,9 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Section 6b: Scheduled playbooks & tasks (ATC in-process cron scheduler) */}
+      <CronSchedulesPanel nodes={nodes} />
 
       {/* Section 7: Ansible Engine Configuration (ansible.cfg) */}
       <div
