@@ -13,8 +13,10 @@ import (
 
 	"air-traffic-control/backend/cmd/proxy"
 	"air-traffic-control/backend/pkg/glances"
+	"air-traffic-control/backend/pkg/hostcache"
 	"air-traffic-control/backend/pkg/plugin"
 	"air-traffic-control/backend/pkg/podman"
+	"air-traffic-control/backend/pkg/readonlyapi"
 	"air-traffic-control/backend/pkg/restic"
 	"air-traffic-control/backend/pkg/ssh"
 	"air-traffic-control/backend/pkg/tailscale"
@@ -268,6 +270,20 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 	// Mount plugin framework REST API routes
 	pluginAPI := plugin.NewAPI(plugin.APIOptions{DBPath: dbPath})
 	pluginAPI.RegisterRoutes(mux)
+
+	// Mount the ported read-only routes. They share the same hosts-cache.sqlite
+	// store as the plugin API. Startup fails loudly if the resolver cannot be
+	// built, so we never serve a half-broken API.
+	resolvedDB := plugin.ResolveDBPath(dbPath)
+	if store, err := hostcache.Open(resolvedDB); err != nil {
+		log.Printf("readonly API disabled: %v", err)
+	} else {
+		if roAPI, err := readonlyapi.New(readonlyapi.Options{Store: store, DBPath: resolvedDB}); err != nil {
+			log.Printf("readonly API disabled: %v", err)
+		} else {
+			roAPI.Register(mux)
+		}
+	}
 
 	// API 404 catch-all. Mirrors server.ts: an unhandled /api/* request must
 	// return JSON, never fall through to the SPA index.html. Every /api/*
