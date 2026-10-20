@@ -15,6 +15,7 @@ import (
 	"air-traffic-control/backend/pkg/ansqueue"
 	"air-traffic-control/backend/pkg/glances"
 	"air-traffic-control/backend/pkg/hostcache"
+	"air-traffic-control/backend/pkg/nodeapi"
 	"air-traffic-control/backend/pkg/plugin"
 	"air-traffic-control/backend/pkg/podman"
 	"air-traffic-control/backend/pkg/readonlyapi"
@@ -68,6 +69,7 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 
 	sshManager := ssh.NewClientManager()
 	runner := &sshWithLocalFallbackRunner{sshMgr: sshManager}
+	var nodeAPI *nodeapi.API
 
 	mux.HandleFunc("/api/podman/probe", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -93,6 +95,10 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 	})
 
 	mux.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && nodeAPI != nil {
+			nodeAPI.HandleCreate(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		var nodes []types.Node
 		if tsStatus, err := tailscale.GetLocalStatus(); err == nil && tsStatus != nil {
@@ -270,7 +276,7 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 
 	// Mount plugin framework REST API routes
 	pluginAPI := plugin.NewAPI(plugin.APIOptions{DBPath: dbPath})
-	pluginAPI.RegisterRoutes(mux)
+	mux.HandleFunc("/api/plugins", pluginAPI.HandleListPlugins)
 
 	// Mount the ported read-only routes. They share the same hosts-cache.sqlite
 	// store as the plugin API. Startup fails loudly if the resolver cannot be
@@ -278,6 +284,7 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 	resolvedDB := plugin.ResolveDBPath(dbPath)
 	if store, err := hostcache.Open(resolvedDB); err != nil {
 		log.Printf("readonly API disabled: %v", err)
+		mux.Handle("/api/nodes/", pluginAPI.NodeRoutesHandler())
 	} else {
 		if roAPI, err := readonlyapi.New(readonlyapi.Options{Store: store, DBPath: resolvedDB}); err != nil {
 			log.Printf("readonly API disabled: %v", err)
@@ -302,6 +309,19 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 			log.Printf("ansible queue API disabled: %v", err)
 		} else {
 			qAPI.Register(mux)
+		}
+
+		// Mount the node lifecycle and hardware probe API (CRUD, testSsh, probes).
+		if nAPI, err := nodeapi.New(nodeapi.Options{
+			Store:     store,
+			Runner:    nodeapi.NewSSHRunner(sshManager.Pool()),
+			Broadcast: queueBroadcast,
+			Fallback:  pluginAPI.NodeRoutesHandler(),
+		}); err != nil {
+			log.Printf("node API disabled: %v", err)
+		} else {
+			nodeAPI = nAPI
+			nodeAPI.Register(mux)
 		}
 	}
 
