@@ -3,6 +3,7 @@ import type { GlobalTaskItem, QueuedAnsibleTask } from '../types/index.ts';
 import type { ManagedWindow } from '../utils/windowManager.ts';
 import { getConsoleWindowPillClasses, formatTaskQueueTabLabel, type ConsoleDrawerTab } from '../utils/navigationViewModel.ts';
 import { TaskQueueTab } from './TaskQueueTab.tsx';
+import { VaultAuditPanel } from './VaultAuditPanel.tsx';
 
 interface GlobalTasksExecutionLogProps {
   tasks: GlobalTaskItem[];
@@ -243,12 +244,6 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
     'Oct 18 02:15:35 likes-it-cold restic[19482]: snapshot f7a91b2e saved to s3://restic-homelab-vault/leo-banjo',
     'Oct 18 02:15:30 ping systemd[1]: uosserver.service: Active rootless pod (UID 1001)',
     'Oct 18 02:15:22 dev-pc tailscaled[1104]: mesh: peer likes-it-cold latency 1.8ms (direct WireGuard)',
-  ];
-
-  const vaultLogs = [
-    '2026-10-18 02:10:50 [AUDIT] root@pam authenticated with GSSAPI ticket',
-    '2026-10-18 02:10:50 [VAULT] Decrypted group_vars/all.yml using AES-256 cipher (SQLite cache sync)',
-    '2026-10-18 02:05:12 [AUDIT] Token generated for cockpit-bridge session (ttl: 3600s)',
   ];
 
   return (
