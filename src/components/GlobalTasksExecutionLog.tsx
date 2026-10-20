@@ -549,18 +549,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             </div>
           )}
 
-          {activeTab === 'vault' && (
-            <div className="p-3 font-mono text-xs space-y-1 text-[#c3c6d2] bg-[#0a0d1f]">
-              {vaultLogs.map((line, idx) => (
-                <div key={idx} className="hover:bg-[#171a2d] px-1 rounded flex items-center gap-2">
-                  <span className="material-symbols-outlined text-[14px] text-[#d9b9ff]">
-                    verified
-                  </span>
-                  <span>{line}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          {activeTab === 'vault' && <VaultAuditPanel />}
         </div>
       )}
     </section>
