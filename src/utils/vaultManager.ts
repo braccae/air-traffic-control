@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import type { Express, Request, Response } from 'express';
 import { parseAnsibleCfg } from './ansibleConfigManager.ts';
 import { getAnsibleExecutionEnv } from './ansibleVenvManager.ts';
+import type { VaultAuditEvent } from '../types/index.ts';
 
 export interface VaultPasswordSource {
   source: 'file' | 'env' | 'ask_password';
@@ -108,6 +109,21 @@ export function resolveVaultPasswordSource(options?: ResolveVaultPasswordOptions
     source: 'ask_password',
     hasPassword: false,
   };
+}
+
+/** Persistent audit trail for vault decryptions (implemented by the SQLite store). */
+export interface VaultAuditStore {
+  recordVaultAuditEvent(event: VaultAuditEvent): void;
+  getVaultAuditEvents(filter?: { variableName?: string; host?: string; limit?: number }): VaultAuditEvent[];
+}
+
+/**
+ * Extracts the vault variable name from a `name: !vault |` block so the audit
+ * trail can name the secret without ever touching its plaintext.
+ */
+export function extractVaultVariableName(vaultBlock: string): string | null {
+  const match = vaultBlock.match(/^\s*([A-Za-z0-9_.\-]+)\s*:\s*!vault\s*\|/m);
+  return match ? match[1] : null;
 }
 
 /**
@@ -340,13 +356,36 @@ export async function decryptVaultString(
   }
 }
 
+export interface RegisterVaultRoutesOptions {
+  /** Persistent audit sink. When absent, decryptions are not audited (tests). */
+  auditStore?: VaultAuditStore;
+  /** Fallback actor label when a request does not identify one. */
+  actor?: string;
+  /** Fallback target host when a request does not identify one. */
+  host?: string;
+  /** Fallback action label when a request does not identify one. */
+  action?: string;
+}
+
 /**
  * Registers REST API endpoints for Ansible Vault management:
  * - GET /api/vault/status: returns current password resolution status
+ * - GET /api/vault/audit: newest-first decryption audit trail (filterable)
  * - POST /api/vault/encrypt: encrypts plaintext into vault block
- * - POST /api/vault/decrypt: decrypts vault block back to plaintext
+ * - POST /api/vault/decrypt: decrypts vault block back to plaintext and records
+ *   exactly one audit row (variable name + metadata, never the plaintext)
  */
-export function registerVaultRoutes(app: Express): void {
+export function registerVaultRoutes(app: Express, options: RegisterVaultRoutesOptions = {}): void {
+  const { auditStore } = options;
+  const defaultActor = options.actor || process.env.SUDO_USER || process.env.USER || 'atc-coordinator';
+  const defaultHost = options.host || 'n/a';
+  const defaultAction = options.action || 'POST /api/vault/decrypt';
+
+  const safeActor = (value: unknown): string => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    return text || defaultActor;
+  };
+
   app.get('/api/vault/status', (_req: Request, res: Response) => {
     try {
       const source = resolveVaultPasswordSource();
@@ -357,6 +396,27 @@ export function registerVaultRoutes(app: Express): void {
       });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err?.message || 'Failed to resolve vault status' });
+    }
+  });
+
+  app.get('/api/vault/audit', (req: Request, res: Response) => {
+    try {
+      if (!auditStore) {
+        res.json({ success: true, events: [], total: 0 });
+        return;
+      }
+      const variableName = typeof req.query.variable === 'string' ? req.query.variable : undefined;
+      const host = typeof req.query.host === 'string' ? req.query.host : undefined;
+      const limitParam = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined;
+
+      const events = auditStore.getVaultAuditEvents({
+        variableName,
+        host,
+        limit: Number.isFinite(limitParam) ? limitParam : undefined,
+      });
+      res.json({ success: true, events, total: events.length });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Failed to read vault audit trail' });
     }
   });
 
@@ -377,13 +437,36 @@ export function registerVaultRoutes(app: Express): void {
 
   app.post('/api/vault/decrypt', async (req: Request, res: Response) => {
     try {
-      const { vaultBlock, password } = req.body || {};
+      const { vaultBlock, password, varName, host, actor, action } = req.body || {};
       if (!vaultBlock || typeof vaultBlock !== 'string') {
         res.status(400).json({ success: false, error: 'Missing or invalid vaultBlock' });
         return;
       }
 
       const plaintext = await decryptVaultString(vaultBlock, { password });
+
+      // Audit the decryption: name + metadata only, never the plaintext.
+      if (auditStore) {
+        try {
+          const passwordSource = password ? 'inline' : resolveVaultPasswordSource().source;
+          auditStore.recordVaultAuditEvent({
+            id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            timestamp: Date.now(),
+            variableName:
+              (typeof varName === 'string' && varName.trim()) ||
+              extractVaultVariableName(vaultBlock) ||
+              'unnamed',
+            actor: safeActor(actor),
+            host: (typeof host === 'string' && host.trim()) || defaultHost,
+            action: (typeof action === 'string' && action.trim()) || defaultAction,
+            passwordSource,
+          });
+        } catch (auditErr) {
+          // Never leak the plaintext through an error path; surface the failure instead.
+          console.error('[vault-audit] failed to record decryption event:', (auditErr as Error)?.message);
+        }
+      }
+
       res.json({ success: true, plaintext });
     } catch (err: any) {
       res.status(400).json({ success: false, error: err?.message || 'Decryption failed' });

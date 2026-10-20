@@ -1823,7 +1823,11 @@ const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
 registerPlaybookRoutes(app, playbookDir, {
   inventoryScriptPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
 });
-registerVaultRoutes(app);
+registerVaultRoutes(app, {
+  // Decryption audit rows persist in data/hosts-cache.sqlite (vault_audit_log).
+  auditStore: hostCache,
+  action: 'POST /api/vault/decrypt',
+});
 
 // ==========================================
 // Category F: rclone remote integration
