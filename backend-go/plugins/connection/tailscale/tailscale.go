@@ -3,6 +3,7 @@ package tailscale
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -11,10 +12,44 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"tailscale.com/tsnet"
 
 	"air-traffic-control/backend/pkg/plugin"
 )
+
+func resolveAgentSocketPath() string {
+	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+		if _, err := os.Stat(sock); err == nil {
+			return sock
+		}
+	}
+	uid := os.Getuid()
+	candidates := []string{
+		fmt.Sprintf("/run/user/%d/ssh-agent.socket", uid),
+		fmt.Sprintf("/run/user/%d/keyring/ssh", uid),
+		fmt.Sprintf("/run/user/%d/gnupg/S.gpg-agent.ssh", uid),
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
+func getSSHAgentAuthMethod() (ssh.AuthMethod, io.Closer) {
+	sock := resolveAgentSocketPath()
+	if sock == "" {
+		return nil, nil
+	}
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		return nil, nil
+	}
+	agentClient := agent.NewClient(conn)
+	return ssh.PublicKeysCallback(agentClient.Signers), conn
+}
 
 func init() {
 	_ = plugin.Register(New())
@@ -124,12 +159,31 @@ func (p *Plugin) Requirements() plugin.Requirements {
 	}
 }
 
+func isSystemTailscaledActive() bool {
+	candidates := []string{
+		"/run/tailscale/tailscaled.sock",
+		"/var/run/tailscale/tailscaled.sock",
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && (fi.Mode()&os.ModeSocket != 0) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.dialer != nil {
 		return p.dialer, nil
+	}
+
+	// If a host-level system tailscaled is active and no explicit auth key was provided,
+	// direct dial through standard network stack which automatically routes 100.x / MagicDNS.
+	if isSystemTailscaledActive() && p.authKey == "" && os.Getenv("TS_AUTHKEY") == "" {
+		return &systemNetworkDialer{}, nil
 	}
 
 	if p.tsServer == nil {
@@ -148,6 +202,13 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 	}
 
 	return &tsnetDialer{srv: p.tsServer}, nil
+}
+
+type systemNetworkDialer struct{}
+
+func (s *systemNetworkDialer) Dial(ctx context.Context, network, address string) (net.Conn, error) {
+	var d net.Dialer
+	return d.DialContext(ctx, network, address)
 }
 
 type tsnetDialer struct {
@@ -264,6 +325,12 @@ func (p *Plugin) GetClient(h plugin.HostFacts) (*ssh.Client, error) {
 	}
 
 	var authMethods []ssh.AuthMethod
+	// 1. Agent forwarding
+	if agentAuth, _ := getSSHAgentAuthMethod(); agentAuth != nil {
+		authMethods = append(authMethods, agentAuth)
+	}
+
+	// 2. Private Key
 	if pkStr, ok := h.Overrides["private_key"]; ok && strings.TrimSpace(pkStr) != "" {
 		pass := h.Overrides["passphrase"]
 		var signer ssh.Signer
