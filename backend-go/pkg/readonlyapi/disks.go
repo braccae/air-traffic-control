@@ -52,7 +52,6 @@ type DiskItem struct {
 	Rota        bool        `json:"rota"`
 	Tran        *string     `json:"tran"`
 	SmartStatus string      `json:"smartStatus"`
-	TempC       *float64    `json:"tempC"`
 	Children    []DiskChild `json:"children,omitempty"`
 }
 
@@ -152,9 +151,7 @@ func (a *API) handleDisks(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			joined := strings.Join(filtered, ", ")
-			if joined != "" {
-				mountPoint = &joined
-			}
+			mountPoint = &joined
 		} else if dev.MountPoint != nil {
 			mountPoint = dev.MountPoint
 		}
@@ -170,9 +167,7 @@ func (a *API) handleDisks(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				joined := strings.Join(filtered, ", ")
-				if joined != "" {
-					chMount = &joined
-				}
+				chMount = &joined
 			} else if ch.MountPoint != nil {
 				chMount = ch.MountPoint
 			}
@@ -207,7 +202,6 @@ func (a *API) handleDisks(w http.ResponseWriter, r *http.Request) {
 			Rota:        dev.Rota,
 			Tran:        tran,
 			SmartStatus: smartStatus,
-			TempC:       nil,
 		}
 		if len(children) > 0 {
 			item.Children = children
@@ -216,13 +210,11 @@ func (a *API) handleDisks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := map[string]any{
-		"disks":         disks,
+		"disks":          disks,
 		"smartAvailable": hasSmart,
 	}
 	if !hasSmart {
 		result["smartWarning"] = "smartctl not installed on host — drive health monitored via kernel sysfs."
-	} else {
-		result["smartWarning"] = nil
 	}
 	a.sectionResult(w, node.ID, "disks", result)
 }

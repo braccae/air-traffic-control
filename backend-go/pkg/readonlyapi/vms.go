@@ -1,6 +1,7 @@
 package readonlyapi
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,11 +18,13 @@ const vmsCmd = "which virsh 2>&1 || sudo -n which virsh 2>&1 || echo \"NO_VIRSH\
 
 // VMItem mirrors the Express VM projection.
 type VMItem struct {
-	ID      int    `json:"id"`
+	ID      int    `json:"vmid"`
 	Name    string `json:"name"`
 	Subtext string `json:"subtext"`
 	Status  string `json:"status"`
 	VCPUs   int    `json:"vcpus"`
+	RamGiB  int    `json:"ramGiB"`
+	Type    string `json:"type"`
 }
 
 // handleVMs ports GET /api/nodes/:id/vms (list only).
@@ -69,12 +72,14 @@ func (a *API) handleVMs(w http.ResponseWriter, r *http.Request) {
 	hasKvm := strings.Contains(kvmRaw, "kvm_amd") || strings.Contains(kvmRaw, "kvm_intel") || strings.Contains(kvmRaw, "kvm")
 	isServiceActive := strings.Contains(servicesRaw, "active")
 
-	kvmModule := "KVM (kernel)"
+	kvmModule := "software emulation"
 	switch {
 	case strings.Contains(kvmRaw, "kvm_amd"):
-		kvmModule = "kvm_amd"
+		kvmModule = "kvm_amd (AMD-V)"
 	case strings.Contains(kvmRaw, "kvm_intel"):
-		kvmModule = "kvm_intel"
+		kvmModule = "kvm_intel (VT-x)"
+	case hasKvm:
+		kvmModule = "kvm"
 	}
 
 	vms := []VMItem{}
@@ -96,10 +101,12 @@ func (a *API) handleVMs(w http.ResponseWriter, r *http.Request) {
 			}
 			vms = append(vms, VMItem{
 				ID:      id,
-				Name:    name,
+				Name:    fmt.Sprintf("%d (%s)", id, name),
 				Subtext: "KVM Guest (" + name + ")",
 				Status:  vmStatus,
 				VCPUs:   2,
+				RamGiB:  4,
+				Type:    "linux",
 			})
 		}
 	}
