@@ -77,6 +77,19 @@ import {
   REQUIRED_VENV_PACKAGES,
 } from './src/utils/ansibleVenvManager.ts';
 import { registerVaultRoutes } from './src/utils/vaultManager.ts';
+import {
+  installConsoleCapture,
+  listClusterLogs,
+  onClusterLog,
+  recordClusterLog,
+  type ClusterLogKind,
+} from './src/utils/clusterLogStore.ts';
+import {
+  beginConnection,
+  getConnectionSnapshot,
+  onConnectionChange,
+  type ConnectionSnapshot,
+} from './src/utils/connectionRegistry.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -86,6 +99,10 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 app.use(express.json());
+
+// Mirror the coordinator's own console output into the cluster syslog buffer so the
+// Cluster Syslog tab shows real ATC application logs (never synthesised lines).
+installConsoleCapture();
 
 // Serve libghostty WASM binary directly so ghostty-web can always load /ghostty-vt.wasm
 app.get('/ghostty-vt.wasm', (_req, res) => {
@@ -130,7 +147,9 @@ hostCache.upsertHosts(nodes);
 
 // Dynamic Tailscale Tag Synchronization Wrapper
 async function refreshTailscaleNodes(currentNodes: NodeItem[]): Promise<NodeItem[]> {
-  let updated = await baseRefreshTailscaleNodes(currentNodes);
+  let updated = await withPollLog('tailscale', 'tailnet', 'tailscale status --json', () =>
+    baseRefreshTailscaleNodes(currentNodes)
+  );
   try {
     const chunks = hostCache.getAllTagChunks();
     const hasDynamicNodes = updated.some(n => n.isDynamicTagMember);
@@ -554,7 +573,9 @@ app.get('/api/telemetry', async (req, res) => {
     return;
   }
 
-  const live = await fetchLiveNodeTelemetry(targetNode);
+  const live = await withPollLog('telemetry', targetNode.shortName || targetNode.name, 'live-telemetry', () =>
+    fetchLiveNodeTelemetry(targetNode)
+  );
   hostCache.upsertHostTelemetry(targetNode.id, live);
   telemetry = {
     ...telemetry,
@@ -575,7 +596,12 @@ app.get('/api/nodes/:id/telemetry/glances', async (req, res) => {
     return;
   }
   try {
-    const glances = await fetchNodeTelemetryMultiTier(targetNode);
+    const glances = await withPollLog(
+      'telemetry',
+      targetNode.shortName || targetNode.name,
+      'glances-multi-tier',
+      () => fetchNodeTelemetryMultiTier(targetNode)
+    );
     res.json({ success: true, glances });
   } catch (err: any) {
     res.status(502).json({ success: false, error: err?.message || String(err) });
@@ -1335,7 +1361,10 @@ app.post('/api/terminal/exec', async (req, res) => {
 });
 
 // Active background process registries
-const activePtySessions = new Map<string, { proc: ChildProcess; ws: WebSocket; sessionId: string }>();
+const activePtySessions = new Map<
+  string,
+  { proc: ChildProcess; ws: WebSocket; sessionId: string; releaseConnection: () => void }
+>();
 const activePlaybookProcs = new Map<string, ChildProcess>();
 
 // ==========================================
@@ -2378,9 +2407,107 @@ function broadcast(msg: any) {
   });
 }
 
+// ==========================================
+// Cluster syslog: coordinator app logs, backend poll logs, live connections
+// ==========================================
+
+/**
+ * Times a real backend poll of a node (or of the local tailnet) and records the
+ * measured outcome in the cluster syslog. Errors are logged and re-thrown so the
+ * caller keeps its existing failure behaviour.
+ */
+async function withPollLog<T>(kind: string, host: string, detail: string, fn: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    const durationMs = Date.now() - startedAt;
+    recordClusterLog({
+      kind: 'poll',
+      level: 'info',
+      source: `poll:${kind}`,
+      host,
+      detail,
+      durationMs,
+      ok: true,
+      message: `${detail} ok in ${durationMs}ms`,
+    });
+    return result;
+  } catch (err: any) {
+    const durationMs = Date.now() - startedAt;
+    const reason = err?.message || String(err);
+    recordClusterLog({
+      kind: 'poll',
+      level: 'error',
+      source: `poll:${kind}`,
+      host,
+      detail,
+      durationMs,
+      ok: false,
+      message: `${detail} failed in ${durationMs}ms: ${reason}`,
+    });
+    throw err;
+  }
+}
+
+app.get('/api/cluster-log', (req, res) => {
+  const rawLimit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : NaN;
+  const rawSinceId = typeof req.query.sinceId === 'string' ? Number.parseInt(req.query.sinceId, 10) : NaN;
+  const kind = typeof req.query.kind === 'string' ? (req.query.kind as ClusterLogKind) : undefined;
+  const host = typeof req.query.host === 'string' ? req.query.host : undefined;
+
+  res.json({
+    success: true,
+    entries: listClusterLogs({
+      limit: Number.isFinite(rawLimit) ? rawLimit : 300,
+      kind: kind === 'app' || kind === 'poll' || kind === 'node' ? kind : undefined,
+      host,
+      sinceId: Number.isFinite(rawSinceId) ? rawSinceId : undefined,
+    }),
+  });
+});
+
+app.get('/api/connections', (_req, res) => {
+  res.json({ success: true, connections: getConnectionSnapshot() });
+});
+
+// Push live cluster log entries and connection counts to every dashboard client.
+const pendingClusterLogs: ReturnType<typeof listClusterLogs> = [];
+let clusterLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushClusterLogs(): void {
+  clusterLogFlushTimer = null;
+  if (pendingClusterLogs.length === 0) return;
+  const entries = pendingClusterLogs.splice(0, pendingClusterLogs.length);
+  broadcast({ type: 'cluster_log_batch', entries });
+}
+
+onClusterLog(entry => {
+  pendingClusterLogs.push(entry);
+  if (clusterLogFlushTimer) return;
+  clusterLogFlushTimer = setTimeout(flushClusterLogs, 250);
+  clusterLogFlushTimer.unref?.();
+});
+
+let connectionBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+
+onConnectionChange((snapshot: ConnectionSnapshot) => {
+  if (connectionBroadcastTimer) return;
+  connectionBroadcastTimer = setTimeout(() => {
+    connectionBroadcastTimer = null;
+    broadcast({ type: 'connections_updated', connections: snapshot });
+  }, 250);
+  connectionBroadcastTimer.unref?.();
+});
+
 // WebSocket connection hub for bidirectional PTY and live telemetry
 wss.on('connection', ws => {
+  const releaseWsConnection = beginConnection('websocket', 'ws /ws');
+  ws.on('close', () => releaseWsConnection());
+  ws.on('error', () => releaseWsConnection());
+
   ws.send(JSON.stringify({ type: 'init', telemetry, tasks, nodes, queue: getQueue() }));
+  ws.send(JSON.stringify({ type: 'cluster_log_batch', entries: listClusterLogs({ limit: 200 }) }));
+  ws.send(JSON.stringify({ type: 'connections_updated', connections: getConnectionSnapshot() }));
 
   ws.on('message', async data => {
     try {
@@ -2413,7 +2540,8 @@ wss.on('connection', ws => {
           }
         );
 
-        activePtySessions.set(sessionId, { proc: ptyProc, ws, sessionId });
+        const releasePtyConnection = beginConnection('ssh', `pty ${sshUser}@${targetIp}`);
+        activePtySessions.set(sessionId, { proc: ptyProc, ws, sessionId, releaseConnection: releasePtyConnection });
 
         ptyProc.stdout.on('data', chunk => {
           if (ws.readyState === WebSocket.OPEN) {
@@ -2428,6 +2556,7 @@ wss.on('connection', ws => {
         });
 
         ptyProc.on('error', (err: any) => {
+          releasePtyConnection();
           activePtySessions.delete(sessionId);
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(
@@ -2442,6 +2571,7 @@ wss.on('connection', ws => {
         });
 
         ptyProc.on('close', code => {
+          releasePtyConnection();
           activePtySessions.delete(sessionId);
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'terminal_exit', sessionId, code }));
@@ -2462,6 +2592,7 @@ wss.on('connection', ws => {
         const session = activePtySessions.get(msg.sessionId);
         if (session) {
           session.proc.kill('SIGTERM');
+          session.releaseConnection();
           activePtySessions.delete(msg.sessionId);
         }
       }
@@ -2486,6 +2617,7 @@ wss.on('connection', ws => {
     for (const [id, session] of activePtySessions.entries()) {
       if (session.ws === ws) {
         session.proc.kill('SIGTERM');
+        session.releaseConnection();
         activePtySessions.delete(id);
       }
     }
@@ -2499,13 +2631,18 @@ setInterval(async () => {
   if (nodes.length > 0) {
     try {
       const activeNode = nodes[0];
-      const live = await fetchLiveNodeTelemetry(activeNode);
+      const live = await withPollLog(
+        'telemetry',
+        activeNode.shortName || activeNode.name,
+        'scheduled-live-telemetry',
+        () => fetchLiveNodeTelemetry(activeNode)
+      );
       if (live && live.cpuUsage !== undefined) {
         telemetry = { ...telemetry, ...live };
         broadcast({ type: 'telemetry_tick', telemetry });
       }
     } catch {
-      // Keep existing telemetry if node probe times out
+      // Poll failure is already recorded in the cluster syslog by withPollLog.
     }
   }
 }, TELEMETRY_POLL_INTERVAL_MS);

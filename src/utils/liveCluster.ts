@@ -18,6 +18,7 @@ import {
   parsePrivilegeProbeOutput,
 } from './privilegeEscalation.ts';
 import { fetchNodeTelemetryMultiTier, type GlancesMetricPayload } from './telemetryCollector.ts';
+import { beginConnection } from './connectionRegistry.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -338,39 +339,49 @@ export async function runNodeCommand(node: NodeItem, command: string, timeoutMs 
     node.tailscaleHost.startsWith('dev-pc');
 
   if (isLocal) {
-    const { stdout } = await execFileAsync('sh', ['-c', effectiveCommand], {
-      timeout: timeoutMs,
-      env: { ...process.env, SSH_AUTH_SOCK: SSH_AGENT_SOCKET },
-    });
-    return stdout;
+    const releaseLocal = beginConnection('local', node.shortName || node.name);
+    try {
+      const { stdout } = await execFileAsync('sh', ['-c', effectiveCommand], {
+        timeout: timeoutMs,
+        env: { ...process.env, SSH_AUTH_SOCK: SSH_AGENT_SOCKET },
+      });
+      return stdout;
+    } finally {
+      releaseLocal();
+    }
   }
 
   const sshUser = node.sshUser || 'core';
   const targetHost = node.tailscaleIp || node.ip || node.tailscaleHost;
   const port = String(node.port || 22);
 
-  const { stdout } = await execFileAsync(
-    'ssh',
-    [
-      '-F',
-      '/dev/null',
-      '-o',
-      'BatchMode=yes',
-      '-o',
-      'StrictHostKeyChecking=accept-new',
-      '-o',
-      'ConnectTimeout=4',
-      '-p',
-      port,
-      `${sshUser}@${targetHost}`,
-      effectiveCommand,
-    ],
-    {
-      timeout: timeoutMs,
-      env: { ...process.env, SSH_AUTH_SOCK: SSH_AGENT_SOCKET },
-    }
-  );
-  return stdout;
+  const releaseSsh = beginConnection('ssh', `${sshUser}@${targetHost}:${port}`);
+  try {
+    const { stdout } = await execFileAsync(
+      'ssh',
+      [
+        '-F',
+        '/dev/null',
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+        '-o',
+        'ConnectTimeout=4',
+        '-p',
+        port,
+        `${sshUser}@${targetHost}`,
+        effectiveCommand,
+      ],
+      {
+        timeout: timeoutMs,
+        env: { ...process.env, SSH_AUTH_SOCK: SSH_AGENT_SOCKET },
+      }
+    );
+    return stdout;
+  } finally {
+    releaseSsh();
+  }
 }
 
 export async function runNodeElevatedCommand(
@@ -452,6 +463,7 @@ export async function testNodePrivilege(
 }
 
 export async function refreshTailscaleNodes(existingNodes: NodeItem[]): Promise<NodeItem[]> {
+  const releaseTailscale = beginConnection('tailscale', 'tailscale status --json');
   try {
     const { stdout } = await execFileAsync('tailscale', ['status', '--json'], { timeout: 3000 });
     const data = JSON.parse(stdout);
@@ -494,6 +506,8 @@ export async function refreshTailscaleNodes(existingNodes: NodeItem[]): Promise<
     });
   } catch {
     return existingNodes;
+  } finally {
+    releaseTailscale();
   }
 }
 
