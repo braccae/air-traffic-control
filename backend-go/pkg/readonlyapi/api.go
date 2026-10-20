@@ -71,6 +71,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/nodes/{id}/disks", a.handleDisks)
 	mux.HandleFunc("/api/nodes/{id}/vms", a.handleVMs)
 	mux.HandleFunc("/api/nodes/{id}/firewall", a.handleFirewall)
+	mux.HandleFunc("/api/nodes/{id}/users", a.handleUsers)
 }
 
 // nodeRecord is the subset of a host row this package needs for findNode parity.

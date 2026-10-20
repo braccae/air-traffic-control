@@ -11,7 +11,7 @@ Each handler runs the **same shell command** as its Express counterpart, over th
 same SSH runner, and returns the **same JSON envelope** (`success`, domain keys,
 `fromCache`, `cachedAt`) with the **same status codes**.
 
-## Routes ported (13)
+## Routes ported (12)
 
 | Express route | Go handler | File |
 | --- | --- | --- |
@@ -26,6 +26,7 @@ same SSH runner, and returns the **same JSON envelope** (`success`, domain keys,
 | `GET /api/nodes/:id/tailscale` | `handleNodeTailscale` | `tailscale.go` |
 | `GET /api/tailscale/derp-map` | `handleDerpMap` | `tailscale.go` |
 | `GET /api/podman/logs` | `handlePodmanLogs` | `podmanlogs.go` |
+| `GET /api/nodes/:id/users` | `handleUsers` | `users.go` |
 
 ## Routes deferred to Phase 2
 

@@ -146,3 +146,59 @@ func TestLsblkSizeJSONNumber(t *testing.T) {
 		t.Fatalf("children = %d, want 1", len(root.BlockDevices[0].Children))
 	}
 }
+
+func TestParseEtcPasswd(t *testing.T) {
+	passwd := "root:x:0:0:root:/root:/bin/bash\n" +
+		"core:x:1000:1000:Core User:/var/home/core:/bin/bash\n" +
+		"pants:x:1001:1001::/var/home/pants:/bin/bash\n" +
+		"nobody:x:65534:65534:nobody:/:/usr/sbin/nologin\n" +
+		"svc-app:x:2900:2900::/var/lib/svc-app:/usr/sbin/nologin\n"
+	subuid := "core:524288:65536\nsvc-app:655360:65536\n"
+
+	users := parseEtcPasswd(passwd, subuid)
+	if len(users) != 5 {
+		t.Fatalf("users = %d, want 5", len(users))
+	}
+
+	byName := map[string]HostUserItem{}
+	for _, u := range users {
+		byName[u.Username] = u
+	}
+
+	// core: UID 1000 -> interactive (uid >= 1000)
+	if byName["core"].IsSystemUser {
+		t.Errorf("core should NOT be a system user")
+	}
+	// pants: UID 1001 -> interactive
+	if byName["pants"].IsSystemUser {
+		t.Errorf("pants should NOT be a system user")
+	}
+	// root: UID 0 -> system
+	if !byName["root"].IsSystemUser {
+		t.Errorf("root should be a system user")
+	}
+	// nobody: UID 65534 -> system
+	if !byName["nobody"].IsSystemUser {
+		t.Errorf("nobody should be a system user")
+	}
+	// svc-app: UID 2900 but IS in subuid -> NOT a system user
+	if byName["svc-app"].IsSystemUser {
+		t.Errorf("svc-app (in subuid) should NOT be a system user")
+	}
+
+	interactive := 0
+	for _, u := range users {
+		if !u.IsSystemUser {
+			interactive++
+		}
+	}
+	if interactive != 3 {
+		t.Errorf("interactive users = %d, want 3 (core, pants, svc-app)", interactive)
+	}
+}
+
+func TestParseEtcPasswd_Empty(t *testing.T) {
+	if got := parseEtcPasswd("", ""); len(got) != 0 {
+		t.Fatalf("empty passwd should yield 0 users, got %d", len(got))
+	}
+}
