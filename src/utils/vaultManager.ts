@@ -250,6 +250,23 @@ export function extractRawVaultPayload(input: string): string {
 }
 
 /**
+ * Strips conflicting Ansible vault environment variables from the execution
+ * environment when passing --vault-password-file on the CLI.
+ *
+ * If ANSIBLE_VAULT_PASSWORD_FILE, ANSIBLE_VAULT_IDENTITY_LIST, DEFAULT_VAULT_PASSWORD_FILE,
+ * or ANSIBLE_CONFIG are present in the child process env, ansible-vault sees multiple
+ * default vault-ids and fails with exit code 5 ("default,default are available to encrypt").
+ */
+export function getVaultExecutionEnv(baseEnv?: NodeJS.ProcessEnv): Record<string, string> {
+  const executionEnv = getAnsibleExecutionEnv(baseEnv);
+  delete executionEnv.ANSIBLE_VAULT_PASSWORD_FILE;
+  delete executionEnv.ANSIBLE_VAULT_IDENTITY_LIST;
+  delete executionEnv.DEFAULT_VAULT_PASSWORD_FILE;
+  delete executionEnv.ANSIBLE_CONFIG;
+  return executionEnv;
+}
+
+/**
  * Encrypts a plaintext string into a standard YAML !vault block using ansible-vault encrypt_string.
  * Streams password via stdin so secret values never appear in process arguments or logs.
  */
@@ -280,7 +297,7 @@ export async function encryptVaultString(
     throw new Error('PASSWORD_REQUIRED: Vault password source required for encryption');
   }
 
-  const executionEnv = getAnsibleExecutionEnv(options?.env || process.env);
+  const executionEnv = getVaultExecutionEnv(options?.env || process.env);
   const targetVarName = varName || 'secret';
   const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
   const tempPassFile = path.resolve(os.tmpdir(), `.vault-pass-${id}`);
@@ -383,7 +400,7 @@ export async function decryptVaultString(
     throw new Error('PASSWORD_REQUIRED: Vault password source required for decryption');
   }
 
-  const executionEnv = getAnsibleExecutionEnv(options?.env || process.env);
+  const executionEnv = getVaultExecutionEnv(options?.env || process.env);
   const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
   const tempFile = path.resolve(os.tmpdir(), `.vault-decrypt-${id}`);
 

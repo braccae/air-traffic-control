@@ -10,6 +10,7 @@ import {
   encryptVaultString,
   decryptVaultString,
   registerVaultRoutes,
+  getVaultExecutionEnv,
   type VaultPasswordSource,
 } from './vaultManager.ts';
 import { createHostCacheStore } from './hostCacheDb.ts';
@@ -25,6 +26,7 @@ describe('Tiered Ansible Vault Credential Engine', () => {
     originalEnv = { ...process.env };
     delete process.env.ANSIBLE_VAULT_PASSWORD;
     delete process.env.ANSIBLE_VAULT_PASSWORD_FILE;
+    delete process.env.ANSIBLE_VAULT_IDENTITY_LIST;
   });
 
   afterEach(() => {
@@ -34,6 +36,27 @@ describe('Tiered Ansible Vault Credential Engine', () => {
     } catch {
       // ignore cleanup error
     }
+  });
+
+  describe('getVaultExecutionEnv', () => {
+    it('strips ANSIBLE_VAULT_PASSWORD_FILE, ANSIBLE_VAULT_IDENTITY_LIST, DEFAULT_VAULT_PASSWORD_FILE, and ANSIBLE_CONFIG', () => {
+      const mockEnv: NodeJS.ProcessEnv = {
+        PATH: '/usr/bin',
+        FOO: 'bar',
+        ANSIBLE_VAULT_PASSWORD_FILE: '/tmp/passfile',
+        ANSIBLE_VAULT_IDENTITY_LIST: 'id@/tmp/idfile',
+        DEFAULT_VAULT_PASSWORD_FILE: '/tmp/defaultpass',
+        ANSIBLE_CONFIG: '/path/to/ansible.cfg',
+      };
+      const cleaned = getVaultExecutionEnv(mockEnv);
+      assert.equal(cleaned.FOO, 'bar');
+      assert.equal(cleaned.ANSIBLE_VAULT_PASSWORD_FILE, undefined);
+      assert.equal(cleaned.ANSIBLE_VAULT_IDENTITY_LIST, undefined);
+      assert.equal(cleaned.DEFAULT_VAULT_PASSWORD_FILE, undefined);
+      assert.equal(cleaned.ANSIBLE_CONFIG, undefined);
+      assert.ok('PATH' in cleaned);
+      assert.ok('VIRTUAL_ENV' in cleaned);
+    });
   });
 
   describe('resolveVaultPasswordSource', () => {
@@ -191,6 +214,34 @@ describe('Tiered Ansible Vault Credential Engine', () => {
 
       const decrypted = await decryptVaultString(encrypted);
       assert.equal(decrypted, 'auto-secret');
+    });
+
+    it('encrypts and decrypts when ANSIBLE_VAULT_PASSWORD_FILE is set to a real file without options.password', async () => {
+      fs.writeFileSync(tmpPassFile, 'tier2-file-secret\n', 'utf8');
+      process.env.ANSIBLE_VAULT_PASSWORD_FILE = tmpPassFile;
+
+      const plaintext = 'secret-from-vault-password-file';
+      const encrypted = await encryptVaultString(plaintext, 'file_var');
+      assert.ok(encrypted.includes('file_var: !vault |'));
+      assert.ok(encrypted.includes('$ANSIBLE_VAULT;1.1;AES256'));
+
+      const decrypted = await decryptVaultString(encrypted);
+      assert.equal(decrypted, plaintext);
+    });
+
+    it('encrypts and decrypts with explicit options.password when ANSIBLE_VAULT_PASSWORD_FILE and ANSIBLE_VAULT_IDENTITY_LIST are set', async () => {
+      fs.writeFileSync(tmpPassFile, 'other-file-secret\n', 'utf8');
+      process.env.ANSIBLE_VAULT_PASSWORD_FILE = tmpPassFile;
+      process.env.ANSIBLE_VAULT_IDENTITY_LIST = 'other@/tmp/dummy-identity';
+
+      const plaintext = 'explicit-secret-value';
+      const explicitPassword = 'custom-explicit-password';
+      const encrypted = await encryptVaultString(plaintext, 'explicit_var', { password: explicitPassword });
+      assert.ok(encrypted.includes('explicit_var: !vault |'));
+      assert.ok(encrypted.includes('$ANSIBLE_VAULT;1.1;AES256'));
+
+      const decrypted = await decryptVaultString(encrypted, { password: explicitPassword });
+      assert.equal(decrypted, plaintext);
     });
 
     it('fails when decrypting with incorrect password', async () => {
