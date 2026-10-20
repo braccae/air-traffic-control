@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -12,7 +13,22 @@ func init() {
 	_ = plugin.Register(New())
 }
 
-// Plugin implements plugin.Plugin and plugin.Actor for systemd and SysV/OpenRC service management.
+// ServiceUnit represents a single system service unit.
+type ServiceUnit struct {
+	Unit        string `json:"unit"`
+	Load        string `json:"load"`
+	Active      string `json:"active"`
+	Sub         string `json:"sub"`
+	Description string `json:"description"`
+}
+
+// ServiceReadPayload represents the JSON payload returned by Reader.
+type ServiceReadPayload struct {
+	Manager  string        `json:"manager"` // "systemd", "sysv", "openrc"
+	Services []ServiceUnit `json:"services"`
+}
+
+// Plugin implements plugin.Plugin, plugin.Reader, and plugin.Actor for systemd and SysV/OpenRC service management.
 type Plugin struct{}
 
 // New returns a new system service plugin.
@@ -87,9 +103,139 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 	}, nil
 }
 
+// Read fetches all system services from the host.
+func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (any, error) {
+	if r == nil {
+		return nil, fmt.Errorf("runner is required")
+	}
+
+	isSystemd := true
+	if h.Overrides != nil {
+		if initSys, ok := h.Overrides["initSystem"]; ok && initSys != "" && initSys != "systemd" {
+			isSystemd = false
+		}
+	}
+
+	if isSystemd {
+		// 1. Try systemctl list-units with JSON output (systemd 246+)
+		jsonOut, err := r.RunCommand(ctx, "systemctl list-units --type=service --all -o json")
+		if err == nil && strings.TrimSpace(jsonOut) != "" && strings.HasPrefix(strings.TrimSpace(jsonOut), "[") {
+			var units []ServiceUnit
+			if err := json.Unmarshal([]byte(strings.TrimSpace(jsonOut)), &units); err == nil && len(units) > 0 {
+				return ServiceReadPayload{
+					Manager:  "systemd",
+					Services: units,
+				}, nil
+			}
+		}
+
+		// 2. Fallback: plain text tabular list-units
+		txtOut, err := r.RunCommand(ctx, "systemctl list-units --type=service --all --no-legend --no-pager")
+		if err == nil && strings.TrimSpace(txtOut) != "" {
+			units := parseSystemctlText(txtOut)
+			return ServiceReadPayload{
+				Manager:  "systemd",
+				Services: units,
+			}, nil
+		}
+	}
+
+	// 3. SysV / OpenRC fallback
+	sysvOut, err := r.RunCommand(ctx, "service --status-all 2>&1 || rc-status -s 2>&1")
+	if err == nil && strings.TrimSpace(sysvOut) != "" {
+		units := parseSysvText(sysvOut)
+		return ServiceReadPayload{
+			Manager:  "sysv",
+			Services: units,
+		}, nil
+	}
+
+	return ServiceReadPayload{
+		Manager:  "unknown",
+		Services: []ServiceUnit{},
+	}, nil
+}
+
+func parseSystemctlText(output string) []ServiceUnit {
+	var units []ServiceUnit
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Strip leading bullet ● or *
+		trimmed = strings.TrimPrefix(trimmed, "●")
+		trimmed = strings.TrimPrefix(trimmed, "*")
+		trimmed = strings.TrimSpace(trimmed)
+
+		fields := strings.Fields(trimmed)
+		if len(fields) < 4 {
+			continue
+		}
+
+		unit := fields[0]
+		load := fields[1]
+		active := fields[2]
+		sub := fields[3]
+		desc := ""
+		if len(fields) > 4 {
+			desc = strings.Join(fields[4:], " ")
+		}
+
+		units = append(units, ServiceUnit{
+			Unit:        unit,
+			Load:        load,
+			Active:      active,
+			Sub:         sub,
+			Description: desc,
+		})
+	}
+	return units
+}
+
+func parseSysvText(output string) []ServiceUnit {
+	var units []ServiceUnit
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) >= 3 && fields[0] == "[" && fields[2] == "]" {
+			flag := fields[1]
+			unit := ""
+			if len(fields) >= 4 {
+				unit = fields[3]
+			}
+			active := "inactive"
+			sub := "stopped"
+			if flag == "+" {
+				active = "active"
+				sub = "running"
+			}
+			units = append(units, ServiceUnit{
+				Unit:        unit + ".service",
+				Load:        "loaded",
+				Active:      active,
+				Sub:         sub,
+				Description: fmt.Sprintf("SysV service %s", unit),
+			})
+		}
+	}
+	return units
+}
+
 // Actions enumerates mutation actions supported by service plugin.
 func (p *Plugin) Actions() []plugin.ActionSpec {
 	return []plugin.ActionSpec{
+		{
+			Name:        "daemon-reload",
+			Label:       "Reload Daemon",
+			Description: "Reloads systemd manager configuration (systemctl daemon-reload)",
+			Options:     []plugin.OptionSchema{},
+		},
 		{
 			Name:        "start",
 			Label:       "Start Service",
@@ -153,6 +299,23 @@ func (p *Plugin) Actions() []plugin.ActionSpec {
 // Compile generates a declarative TaskSpec for service or reboot actions.
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
 	normAction := strings.ToLower(action)
+
+	// Daemon reload action
+	if normAction == "daemon-reload" || normAction == "daemon_reload" {
+		return plugin.TaskSpec{
+			Name: fmt.Sprintf("Reload systemd daemon on %s", h.NodeID),
+			Steps: []plugin.TaskStep{
+				{
+					Name:   "Reload systemd manager",
+					Module: "ansible.builtin.systemd",
+					Params: map[string]any{
+						"daemon_reload": true,
+						"become":        true,
+					},
+				},
+			},
+		}, nil
+	}
 
 	// Reboot action
 	if normAction == "reboot" {

@@ -187,4 +187,67 @@ func TestServicePlugin_Compile(t *testing.T) {
 			t.Errorf("expected ansible.builtin.service, got %s", spec.Steps[0].Module)
 		}
 	})
+
+	t.Run("daemon-reload action", func(t *testing.T) {
+		spec, err := actor.Compile(plugin.HostFacts{OSFamily: "linux"}, "daemon-reload", nil)
+		if err != nil {
+			t.Fatalf("Compile error: %v", err)
+		}
+		if spec.Steps[0].Params["daemon_reload"] != true {
+			t.Errorf("expected daemon_reload=true, got %v", spec.Steps[0].Params["daemon_reload"])
+		}
+	})
+}
+
+func TestServicePlugin_Read(t *testing.T) {
+	ctx := context.Background()
+	p, ok := plugin.Get("system/service")
+	if !ok {
+		t.Fatal("plugin system/service not registered")
+	}
+
+	reader, ok := p.(plugin.Reader)
+	if !ok {
+		t.Fatalf("expected system/service to implement plugin.Reader")
+	}
+
+	t.Run("systemd json read", func(t *testing.T) {
+		jsonMock := `[{"unit":"sshd.service","load":"loaded","active":"active","sub":"running","description":"OpenSSH Server"}]`
+		runner := &mockRunner{
+			responses: map[string]string{
+				"-o json": jsonMock,
+			},
+		}
+
+		res, err := reader.Read(ctx, runner, plugin.HostFacts{OSFamily: "linux"})
+		if err != nil {
+			t.Fatalf("Read error: %v", err)
+		}
+		if res == nil {
+			t.Fatal("expected non-nil response")
+		}
+	})
+
+	t.Run("systemd plain text table fallback", func(t *testing.T) {
+		textMock := `
+  accounts-daemon.service loaded active running Accounts Service
+● apparmor.service        not-found inactive dead apparmor.service
+`
+		runner := &mockRunner{
+			responses: map[string]string{
+				"--no-legend": textMock,
+			},
+			errs: map[string]error{
+				"-o json": fmt.Errorf("invalid option"),
+			},
+		}
+
+		res, err := reader.Read(ctx, runner, plugin.HostFacts{OSFamily: "linux"})
+		if err != nil {
+			t.Fatalf("Read error: %v", err)
+		}
+		if res == nil {
+			t.Fatalf("expected non-nil response")
+		}
+	})
 }

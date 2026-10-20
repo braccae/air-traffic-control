@@ -19,6 +19,7 @@ import { NetworkSharesView } from './components/NetworkSharesView.tsx';
 import { DisksSmartView } from './components/DisksSmartView.tsx';
 import { SystemLogsView } from './components/SystemLogsView.tsx';
 import { PackageUpdatesView } from './components/PackageUpdatesView.tsx';
+import { SystemServicesView } from './components/SystemServicesView.tsx';
 import { HostModulesView } from './components/HostModulesView.tsx';
 import { getPluginView } from './plugins/views/index.ts';
 import { ToastNotification, type ToastItem } from './components/ToastNotification.tsx';
@@ -1411,6 +1412,11 @@ export default function App() {
                   activeItem={activeCockpitItem}
                   storageEngine={nodeStorageEngines[selectedNode.id]}
                   onSelectItem={item => {
+                    if (item === 'terminal') {
+                      handleOpenTerminal(selectedNode.id);
+                      setActiveCockpitItem('terminal');
+                      return;
+                    }
                     setActiveCockpitItem(item);
                     setActiveOpTab(item);
                   }}
@@ -1421,6 +1427,28 @@ export default function App() {
               {/* Main Operational Workspace Grid */}
               <div className={getWorkspaceWrapperClasses(subSidebarWidth)}>
                 {/* Specific dedicated Views when selected from Menu */}
+                {(activeOpTab === 'services' || activeCockpitItem === 'services') && (
+                  <SystemServicesView node={selectedNode} />
+                )}
+
+                {activeCockpitItem === 'terminal' && (
+                  <div className="bg-[#171a2d] border border-[#26293c] rounded p-6 flex flex-col items-center justify-center text-center gap-3 font-mono">
+                    <span className="material-symbols-outlined text-[36px] text-[#b0c9ff]">terminal</span>
+                    <h3 className="text-sm font-bold text-[#dfe1fa]">Interactive Ghostty Terminal Active</h3>
+                    <p className="text-xs text-[#8d909b] max-w-md">
+                      A live WASM PTY session to <strong className="text-[#8cd6cb]">{selectedNode.name}</strong> ({selectedNode.sshUser || 'core'}@{selectedNode.tailscaleHost || selectedNode.ip}) is open in the terminal drawer below.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenTerminal(selectedNode.id)}
+                      className="px-3 py-1.5 rounded bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] text-xs font-semibold border border-[#434750]/40 cursor-pointer transition-colors flex items-center gap-2"
+                    >
+                      <span className="material-symbols-outlined text-[14px] text-[#8cd6cb]">open_in_new</span>
+                      <span>Focus Terminal Session</span>
+                    </button>
+                  </div>
+                )}
+
                 {(activeOpTab === 'logs' || activeCockpitItem === 'logs') && (
                   <SystemLogsView node={selectedNode} />
                 )}

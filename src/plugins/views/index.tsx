@@ -20,6 +20,8 @@ import { TailscaleMeshCard } from '../../components/TailscaleMeshCard.tsx';
 import { VirtualMachinesKVM } from '../../components/VirtualMachinesKVM.tsx';
 import { ResticBackupPolicy } from '../../components/ResticBackupPolicy.tsx';
 import { SystemHealthTelemetry } from '../../components/SystemHealthTelemetry.tsx';
+import { SystemServicesView } from '../../components/SystemServicesView.tsx';
+import { PackageUpdatesView } from '../../components/PackageUpdatesView.tsx';
 
 export interface PluginViewProps {
   node: NodeItem;
@@ -351,12 +353,36 @@ const SystemHealthTelemetryAdapter: React.FC<PluginViewProps> = ({ telemetry }) 
   return <SystemHealthTelemetry telemetry={telemetry} />;
 };
 
+const SystemServicesViewAdapter: React.FC<PluginViewProps> = ({ node, onRefresh }) => (
+  <SystemServicesView node={node} onRefresh={onRefresh} />
+);
+
+const PackageUpdatesViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
+  <PackageUpdatesView node={node} />
+);
+
 /**
  * Registry mapping plugin ID (`<kind>/<name>`) or kind to React view components.
  */
 export const PLUGIN_VIEW_REGISTRY: Record<string, PluginViewComponent> = {
+  // System Services & Power
+  'system/service': SystemServicesViewAdapter,
+  'system': SystemServicesViewAdapter,
+  'services': SystemServicesViewAdapter,
+
+  // Package Managers & Updates
+  'package/dnf': PackageUpdatesViewAdapter,
+  'package/apt': PackageUpdatesViewAdapter,
+  'package/apk': PackageUpdatesViewAdapter,
+  'package/bootc': PackageUpdatesViewAdapter,
+  'package/rpmostree': PackageUpdatesViewAdapter,
+  'package': PackageUpdatesViewAdapter,
+  'updates': PackageUpdatesViewAdapter,
+
   // Storage & Filesystems
   'storage/zfs': ZfsViewAdapter,
+  'storage/btrfs': ZfsViewAdapter,
+  'storage/lvm': ZfsViewAdapter,
   'storage': ZfsViewAdapter,
 
   // Network Shares
@@ -426,4 +452,6 @@ export {
   VirtualMachinesKVMAdapter as VirtualMachinesKVM,
   ResticBackupPolicyAdapter as ResticBackupPolicy,
   SystemHealthTelemetryAdapter as SystemHealthTelemetry,
+  SystemServicesViewAdapter as SystemServicesView,
+  PackageUpdatesViewAdapter as PackageUpdatesView,
 };

@@ -34,6 +34,7 @@ const SECTION_ORDER = [
   'logs',
   'package',
   'storage',
+  'disk',
   'share',
   'mount',
   'network',
@@ -41,15 +42,15 @@ const SECTION_ORDER = [
   'container',
   'vm',
   'backup',
-  'disk',
 ];
 
 const SECTION_TITLES: Record<string, string> = {
   system: 'SYSTEM',
-  telemetry: 'SYSTEM',
-  logs: 'SYSTEM',
-  package: 'SYSTEM',
+  telemetry: 'OBSERVABILITY',
+  logs: 'OBSERVABILITY',
+  package: 'PACKAGES & UPDATES',
   storage: 'STORAGE & FS',
+  disk: 'STORAGE & FS',
   share: 'SHARES',
   mount: 'MOUNTS',
   network: 'NETWORKING',
@@ -57,7 +58,6 @@ const SECTION_TITLES: Record<string, string> = {
   container: 'CONTAINERS & VMS',
   vm: 'CONTAINERS & VMS',
   backup: 'BACKUPS & SYNC',
-  disk: 'STORAGE & FS',
 };
 
 export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
@@ -101,11 +101,14 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
 
   const activePlugins = propsPlugins !== undefined ? propsPlugins : internalPlugins || [];
 
-  // Group plugins by Section Title
+  // Group plugins by Section Title (excluding raw connection and elevation plugins)
   const groupedSections: Record<string, NodePluginItem[]> = {};
 
   for (const p of activePlugins) {
     if (!p.detection?.detected) continue;
+    // Connection transports and elevation methods belong in Modules / Edit Node modal
+    if (p.kind === 'connection' || p.kind === 'elevation') continue;
+
     const kindKey = (p.section || p.kind || '').toLowerCase();
     const sectionTitle = SECTION_TITLES[kindKey] || kindKey.toUpperCase() || 'OTHER';
     if (!groupedSections[sectionTitle]) {
@@ -129,24 +132,24 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
   return (
     <aside className={`flex flex-col gap-2 w-full overflow-x-hidden scrollbar-thin ${className}`.trim()}>
       {/* Cockpit Tree Groupings */}
-      <div className="bg-[#171a2d] rounded p-2 flex flex-col gap-2 border border-[#26293c]">
+      <div className="bg-[#171a2d] rounded p-1.5 flex flex-col gap-1.5 border border-[#26293c]">
         {/* HARDCODED BASE SYSTEM GROUP: Overview & Terminal */}
         <div>
-          <span className="font-mono text-[10px] uppercase tracking-wider text-[#8d909b] px-1 font-bold">
+          <span className="font-mono text-[9px] uppercase tracking-wider text-[#8d909b] px-1 font-bold">
             SYSTEM
           </span>
-          <nav className="mt-1 flex flex-col gap-0.5">
+          <nav className="mt-0.5 flex flex-col gap-0.5">
             <button
               type="button"
               onClick={() => onSelectItem('overview')}
-              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-[11px] leading-tight cursor-pointer transition-colors ${
                 activeItem === 'overview'
-                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  ? 'bg-[#21263d] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff] shadow-[inset_0_0_12px_rgba(176,201,255,0.08)]'
                   : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
               }`}
             >
               <span className="flex items-center gap-1.5">
-                <span className="material-symbols-outlined text-[14px]">insights</span>
+                <span className="material-symbols-outlined text-[13px] text-[#8cd6cb]">insights</span>
                 <span>Overview</span>
               </span>
               <span className="w-1.5 h-1.5 rounded-full bg-[#8cd6cb]"></span>
@@ -155,17 +158,17 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
             <button
               type="button"
               onClick={() => onSelectItem('terminal')}
-              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-[11px] leading-tight cursor-pointer transition-colors ${
                 activeItem === 'terminal'
-                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  ? 'bg-[#21263d] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff] shadow-[inset_0_0_12px_rgba(176,201,255,0.08)]'
                   : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
               }`}
             >
               <span className="flex items-center gap-1.5">
-                <span className="material-symbols-outlined text-[14px]">terminal</span>
+                <span className="material-symbols-outlined text-[13px] text-[#b0c9ff]">terminal</span>
                 <span>Terminal</span>
               </span>
-              <span className="font-mono text-[10px] text-[#8cd6cb]">SSH</span>
+              <span className="font-mono text-[9px] text-[#8cd6cb] bg-[#121528] px-1 py-0.2 rounded border border-[#26293c]">SSH</span>
             </button>
           </nav>
         </div>
@@ -177,10 +180,10 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
 
           return (
             <div key={sectionTitle}>
-              <span className="font-mono text-[10px] uppercase tracking-wider text-[#8d909b] px-1 font-bold">
+              <span className="font-mono text-[9px] uppercase tracking-wider text-[#8d909b] px-1 font-bold">
                 {sectionTitle}
               </span>
-              <nav className="mt-1 flex flex-col gap-0.5">
+              <nav className="mt-0.5 flex flex-col gap-0.5">
                 {plugins.map(p => {
                   // Tab selection ID can match either p.name or p.id for compatibility
                   const isSelected =
@@ -194,20 +197,20 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
                       key={p.id}
                       type="button"
                       onClick={() => onSelectItem(p.id)}
-                      className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+                      className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-[11px] leading-tight cursor-pointer transition-colors ${
                         isSelected
-                          ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                          ? 'bg-[#21263d] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff] shadow-[inset_0_0_12px_rgba(176,201,255,0.08)]'
                           : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
                       }`}
                     >
                       <span className="flex items-center gap-1.5 truncate pr-1">
-                        <span className="material-symbols-outlined text-[14px]">
+                        <span className="material-symbols-outlined text-[13px] text-[#8d909b] shrink-0">
                           {p.icon || 'extension'}
                         </span>
                         <span className="truncate">{p.label || p.name}</span>
                       </span>
                       {p.detection?.status && (
-                        <span className="font-mono text-[10px] text-[#8cd6cb] shrink-0">
+                        <span className="font-mono text-[9px] text-[#8cd6cb] bg-[#121528] px-1 py-0.2 rounded border border-[#26293c] shrink-0">
                           {p.detection.status}
                         </span>
                       )}
@@ -225,50 +228,50 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
             <button
               type="button"
               onClick={() => onSelectItem('modules')}
-              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-xs cursor-pointer transition-colors ${
+              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-[11px] leading-tight cursor-pointer transition-colors ${
                 activeItem === 'modules'
-                  ? 'bg-[#26293c] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff]'
+                  ? 'bg-[#21263d] text-[#ffd97d] font-bold border-l-2 border-[#ffd97d] shadow-[inset_0_0_12px_rgba(255,217,125,0.08)]'
                   : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
               }`}
             >
               <span className="flex items-center gap-1.5">
-                <span className="material-symbols-outlined text-[14px] text-[#ffd97d]">
+                <span className="material-symbols-outlined text-[13px] text-[#ffd97d]">
                   extension
                 </span>
                 <span className="font-semibold text-[#ffd97d]">Modules</span>
               </span>
-              <span className="font-mono text-[10px] text-[#8d909b]">ALL</span>
+              <span className="font-mono text-[9px] text-[#8d909b] bg-[#121528] px-1 py-0.2 rounded border border-[#26293c]">ALL</span>
             </button>
           </nav>
         </div>
       </div>
 
       {/* Quick Node Spec Snapshot Card */}
-      <div className="bg-[#171a2d] rounded p-2.5 flex flex-col gap-1.5 border border-[#26293c]">
+      <div className="bg-[#171a2d] rounded p-2 flex flex-col gap-1 border border-[#26293c]">
         <div className="flex items-center justify-between">
-          <span className="font-mono text-[10px] uppercase tracking-wider text-[#8d909b] font-bold">
+          <span className="font-mono text-[9px] uppercase tracking-wider text-[#8d909b] font-bold">
             CHASSIS &amp; MOTHERBOARD
           </span>
           {onEditNode && (
             <button
               type="button"
               onClick={onEditNode}
-              className="text-[10px] font-mono text-[#b0c9ff] hover:underline cursor-pointer"
+              className="text-[9px] font-mono text-[#b0c9ff] hover:underline cursor-pointer"
             >
               Edit Specs
             </button>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <span className="material-symbols-outlined text-[#b0c9ff] text-[20px]">developer_board</span>
+        <div className="flex items-center gap-1.5">
+          <span className="material-symbols-outlined text-[#b0c9ff] text-[16px]">developer_board</span>
           <div className="flex flex-col min-w-0">
-            <span className="font-mono text-xs text-[#dfe1fa] font-semibold truncate">
+            <span className="font-mono text-[11px] text-[#dfe1fa] font-semibold truncate">
               {node.specs.motherboard}
             </span>
-            <span className="font-mono text-[10px] text-[#8d909b]">BIOS: {node.specs.bios}</span>
+            <span className="font-mono text-[9px] text-[#8d909b]">BIOS: {node.specs.bios}</span>
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-1 mt-1 pt-1 bg-[#0a0d1f]/60 p-1.5 rounded font-mono text-[10px] border border-[#26293c]/50">
+        <div className="grid grid-cols-2 gap-1 mt-0.5 bg-[#0a0d1f]/60 p-1.5 rounded font-mono text-[9px] border border-[#26293c]/50">
           <div>
             <span className="text-[#8d909b]">IPMI/BMC:</span>{' '}
             <span className="text-[#8cd6cb]">{node.specs.ipmi}</span>
