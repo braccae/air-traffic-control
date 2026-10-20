@@ -8,6 +8,7 @@ import {
   calculateClusterHealthScore,
   type DatacenterSection,
 } from '../utils/navigationViewModel.ts';
+import { CronSchedulesPanel } from './CronSchedulesPanel.tsx';
 import {
   loadQuickCommands,
   addQuickCommand,
@@ -1194,6 +1195,9 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Section 6b: Scheduled playbooks & tasks (ATC in-process cron scheduler) */}
+      <CronSchedulesPanel nodes={nodes} />
 
       {/* Section 7: Ansible Engine Configuration (ansible.cfg) */}
       <div

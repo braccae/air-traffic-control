@@ -277,7 +277,7 @@ export function formatNodeIpBadge(node: NodeItem): string {
 
 export type SidebarViewMode = 'nodes' | 'datacenter';
 
-export type DatacenterSection = 'overview' | 'playbooks' | 'vars_vault' | 'tasks' | 'storage';
+export type DatacenterSection = 'overview' | 'playbooks' | 'vars_vault' | 'tasks' | 'schedules' | 'storage';
 
 export interface DatacenterNavSection {
   id: DatacenterSection;
@@ -315,6 +315,12 @@ export function getDatacenterNavSections(playbooksCount = 4, tasksCount = 0): Da
       icon: 'terminal',
       description: 'Live job queue & operational logs',
       badge: tasksCount > 0 ? `${tasksCount} active` : undefined,
+    },
+    {
+      id: 'schedules',
+      title: 'Scheduled Jobs',
+      icon: 'schedule',
+      description: 'Cron-scheduled playbooks & tasks',
     },
     {
       id: 'storage',

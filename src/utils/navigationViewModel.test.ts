@@ -464,14 +464,14 @@ test('formatNodeIpBadge extracts tailscaleIp or LAN ip correctly', async () => {
   assert.equal(formatNodeIpBadge(withoutTs), '192.168.1.100');
 });
 
-test('getDatacenterNavSections returns all 5 navigation sections with accurate metadata and badges', async () => {
+test('getDatacenterNavSections returns all 6 navigation sections with accurate metadata and badges', async () => {
   const { getDatacenterNavSections } = await import('./navigationViewModel.ts');
 
   const sections = getDatacenterNavSections(4, 2);
-  assert.equal(sections.length, 5);
+  assert.equal(sections.length, 6);
 
   const sectionIds = sections.map(s => s.id);
-  assert.deepEqual(sectionIds, ['overview', 'playbooks', 'vars_vault', 'tasks', 'storage']);
+  assert.deepEqual(sectionIds, ['overview', 'playbooks', 'vars_vault', 'tasks', 'schedules', 'storage']);
 
   const playbooksSec = sections.find(s => s.id === 'playbooks');
   assert.equal(playbooksSec?.badge, '4 playbooks');
