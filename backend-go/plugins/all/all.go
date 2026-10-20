@@ -43,8 +43,9 @@ import (
 	// Disk & SMART plugin
 	_ "air-traffic-control/backend/plugins/disk/smart"
 
-	// Virtual machine plugin
+	// Virtual machine plugins
 	_ "air-traffic-control/backend/plugins/vm/libvirt"
+	_ "air-traffic-control/backend/plugins/vm/lxc"
 
 	// Telemetry plugin
 	_ "air-traffic-control/backend/plugins/telemetry/glances"
