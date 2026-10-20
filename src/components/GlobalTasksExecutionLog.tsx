@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import type { GlobalTaskItem, QueuedAnsibleTask } from '../types/index.ts';
+import type { GlobalTaskItem, NodeItem, QueuedAnsibleTask } from '../types/index.ts';
 import type { ManagedWindow } from '../utils/windowManager.ts';
 import { getConsoleWindowPillClasses, formatTaskQueueTabLabel, type ConsoleDrawerTab } from '../utils/navigationViewModel.ts';
 import { TaskQueueTab } from './TaskQueueTab.tsx';
+import { ClusterSyslogTab } from './ClusterSyslogTab.tsx';
 
 interface GlobalTasksExecutionLogProps {
   tasks: GlobalTaskItem[];
+  nodes?: NodeItem[];
   queue?: QueuedAnsibleTask[];
   isRunning?: boolean;
   activeDrawerTab?: ConsoleDrawerTab;
@@ -22,6 +24,7 @@ interface GlobalTasksExecutionLogProps {
 
 export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = ({
   tasks,
+  nodes = [],
   queue: initialQueue,
   isRunning: initialIsRunning,
   activeDrawerTab,
@@ -235,14 +238,6 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
     'PLAY RECAP **********************************************************************************',
     'likes-it-cold.leo-banjo.ts.net : ok=14   changed=1    unreachable=0    failed=0',
     'ping.leo-banjo.ts.net          : ok=12   changed=1    unreachable=0    failed=0',
-  ];
-
-  const syslogLogs = [
-    'Oct 18 02:15:44 likes-it-cold systemd[1]: Started Cockpit Web Service Session ws-tunnel.',
-    'Oct 18 02:15:40 likes-it-cold podman[4182]: container c9603dec9010 (uosserver) health check: PASSED',
-    'Oct 18 02:15:35 likes-it-cold restic[19482]: snapshot f7a91b2e saved to s3://restic-homelab-vault/leo-banjo',
-    'Oct 18 02:15:30 ping systemd[1]: uosserver.service: Active rootless pod (UID 1001)',
-    'Oct 18 02:15:22 dev-pc tailscaled[1104]: mesh: peer likes-it-cold latency 1.8ms (direct WireGuard)',
   ];
 
   const vaultLogs = [
@@ -542,17 +537,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
             </div>
           )}
 
-          {activeTab === 'syslog' && (
-            <div className="p-3 font-mono text-xs space-y-1 text-[#c3c6d2] bg-[#0a0d1f]">
-              {syslogLogs.map((line, idx) => (
-                <div key={idx} className="hover:bg-[#171a2d] px-1 rounded">
-                  <span className="text-[#8d909b]">{line.substring(0, 15)}</span>
-                  <span className="text-[#8cd6cb] ml-2">the-freezer</span>
-                  <span className="text-[#dfe1fa] ml-2">{line.substring(27)}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          {activeTab === 'syslog' && <ClusterSyslogTab nodes={nodes} />}
 
           {activeTab === 'vault' && (
             <div className="p-3 font-mono text-xs space-y-1 text-[#c3c6d2] bg-[#0a0d1f]">

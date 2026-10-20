@@ -1803,6 +1803,7 @@ export default function App() {
       {/* Fixed Bottom Console with Unified Window Dock */}
       <GlobalTasksExecutionLog
         tasks={tasks}
+        nodes={nodesList}
         queue={queue}
         isRunning={isQueueRunning}
         activeDrawerTab={activeConsoleTab}
