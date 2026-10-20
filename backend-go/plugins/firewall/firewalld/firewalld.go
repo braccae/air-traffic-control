@@ -3,7 +3,9 @@ package firewalld
 import (
 	"context"
 	"fmt"
+	"net"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
@@ -89,9 +91,135 @@ type ParsedFirewallRule struct {
 	Comment   string `json:"comment"`
 }
 
+// ForwardPort describes a single firewalld port-forwarding (NAT MASQ) entry.
+type ForwardPort struct {
+	Port   string `json:"port"`
+	Proto  string `json:"proto"`
+	ToPort string `json:"toport"`
+	ToAddr string `json:"toaddr,omitempty"`
+}
+
 var zoneHeaderRegex = regexp.MustCompile(`^([a-zA-Z0-9_\-]+)`)
 
-func parseFirewallListAll(listAllRaw, activeZonesRaw string) (map[string]any, []string, []string, []string, []ParsedFirewallRule) {
+// validPortOrRange reports whether s is a single port (1-65535) or a "START-END" range.
+func validPortOrRange(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if strings.Contains(s, "-") {
+		parts := strings.Split(s, "-")
+		if len(parts) != 2 {
+			return false
+		}
+		start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+		end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err1 != nil || err2 != nil {
+			return false
+		}
+		if start < 1 || start > 65535 || end < 1 || end > 65535 {
+			return false
+		}
+		return start < end
+	}
+	p, err := strconv.Atoi(s)
+	if err != nil {
+		return false
+	}
+	return p >= 1 && p <= 65535
+}
+
+// validIPOrCIDR reports whether s is a valid IP address or CIDR block.
+func validIPOrCIDR(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if net.ParseIP(s) != nil {
+		return true
+	}
+	_, _, err := net.ParseCIDR(s)
+	return err == nil
+}
+
+// parseForwardPortSpec parses one firewalld forward-port token of the form
+// "port=8080:proto=tcp:toport=80:toaddr=192.168.1.10" into a ForwardPort.
+func parseForwardPortSpec(spec string) (ForwardPort, bool) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return ForwardPort{}, false
+	}
+	fp := ForwardPort{}
+	for _, part := range strings.Split(spec, ":") {
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		switch kv[0] {
+		case "port":
+			fp.Port = kv[1]
+		case "proto":
+			fp.Proto = kv[1]
+		case "toport":
+			fp.ToPort = kv[1]
+		case "toaddr":
+			fp.ToAddr = kv[1]
+		}
+	}
+	if fp.Port == "" || fp.ToPort == "" {
+		return ForwardPort{}, false
+	}
+	if fp.Proto == "" {
+		fp.Proto = "tcp"
+	}
+	return fp, true
+}
+
+// parseForwardPortSpecs parses a whitespace-separated list of forward-port tokens.
+func parseForwardPortSpecs(raw string) []ForwardPort {
+	out := []ForwardPort{}
+	for _, tok := range strings.Fields(raw) {
+		if fp, ok := parseForwardPortSpec(tok); ok {
+			out = append(out, fp)
+		}
+	}
+	return out
+}
+
+// extractForwardPortsAndMasquerade scans the firewalld --list-all block for the
+// "forward-ports:" and "masquerade:" keys (including indented continuation lines).
+func extractForwardPortsAndMasquerade(listAllRaw string) ([]ForwardPort, bool) {
+	forwardPorts := []ForwardPort{}
+	masquerade := false
+	lines := strings.Split(listAllRaw, "\n")
+
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "forward-ports:") {
+			val := strings.TrimSpace(strings.TrimPrefix(trimmed, "forward-ports:"))
+			if val != "" {
+				forwardPorts = append(forwardPorts, parseForwardPortSpecs(val)...)
+			}
+			for j := i + 1; j < len(lines); j++ {
+				cont := strings.TrimSpace(lines[j])
+				if cont == "" {
+					continue
+				}
+				// Continuation specs always begin with "port="; anything else is a new key.
+				if !strings.HasPrefix(cont, "port=") {
+					break
+				}
+				forwardPorts = append(forwardPorts, parseForwardPortSpecs(cont)...)
+			}
+		} else if strings.HasPrefix(trimmed, "masquerade:") {
+			v := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "masquerade:")))
+			masquerade = v == "yes" || v == "true"
+		}
+	}
+	return forwardPorts, masquerade
+}
+
+func parseFirewallListAll(listAllRaw, activeZonesRaw string) (map[string]any, []string, []string, []string, []ParsedFirewallRule, []ForwardPort, bool) {
 	zones := make(map[string]map[string][]string)
 	zoneLines := strings.Split(strings.TrimSpace(activeZonesRaw), "\n")
 	currentZone := ""
@@ -137,6 +265,8 @@ func parseFirewallListAll(listAllRaw, activeZonesRaw string) (map[string]any, []
 			}
 		}
 	}
+
+	forwardPorts, masquerade := extractForwardPortsAndMasquerade(listAllRaw)
 
 	var rules []ParsedFirewallRule
 
@@ -214,7 +344,7 @@ func parseFirewallListAll(listAllRaw, activeZonesRaw string) (map[string]any, []
 		convertedZones[k] = v
 	}
 
-	return convertedZones, services, ports, richRules, rules
+	return convertedZones, services, ports, richRules, rules, forwardPorts, masquerade
 }
 
 func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (any, error) {
@@ -246,10 +376,12 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	isRunning := strings.Contains(stateRaw, "running")
 	hasNft := !strings.Contains(nftRaw, "NO_NFT") && strings.Contains(nftRaw, "table")
 
-	zones, services, ports, _, rules := parseFirewallListAll(listAllRaw, zonesRaw)
+	zones, services, ports, _, rules, forwardPorts, masquerade := parseFirewallListAll(listAllRaw, zonesRaw)
 
 	if !isRunning {
 		rules = []ParsedFirewallRule{}
+		forwardPorts = []ForwardPort{}
+		masquerade = false
 	}
 
 	status := "inactive"
@@ -265,6 +397,8 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 		"services":       services,
 		"ports":          ports,
 		"rules":          rules,
+		"forwardPorts":   forwardPorts,
+		"masquerade":     masquerade,
 	}, nil
 }
 
@@ -288,6 +422,19 @@ func (p *Plugin) Actions() []plugin.ActionSpec {
 			Options: []plugin.OptionSchema{
 				{Name: "service", Type: "string", Required: true, Description: "Service name (e.g. http, ssh)"},
 				{Name: "zone", Type: "string", Required: false, Description: "Target firewall zone"},
+				{Name: "state", Type: "select", Enum: []string{"enabled", "disabled"}, Default: "enabled", Description: "Rule state"},
+			},
+		},
+		{
+			Name:        "forward_port",
+			Label:       "Forward Port (NAT MASQ)",
+			Description: "Forward an incoming port to an internal host and port via firewalld masquerade",
+			Options: []plugin.OptionSchema{
+				{Name: "port", Type: "string", Required: true, Description: "External port or range (e.g. 8080 or 8000-8080)"},
+				{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp or udp"},
+				{Name: "toport", Type: "string", Required: true, Description: "Internal destination port (e.g. 80)"},
+				{Name: "toaddr", Type: "string", Required: false, Description: "Internal destination host IP (optional; defaults to same host)"},
+				{Name: "zone", Type: "string", Required: false, Default: "public", Description: "Target firewall zone"},
 				{Name: "state", Type: "select", Enum: []string{"enabled", "disabled"}, Default: "enabled", Description: "Rule state"},
 			},
 		},
@@ -366,6 +513,115 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 					Name:   fmt.Sprintf("Allow service %s in firewall", svc),
 					Module: "ansible.posix.firewalld",
 					Params: params,
+				},
+			},
+		}, nil
+
+	case "forward_port", "forward-port", "port_forward":
+		port, _ := opts["port"].(string)
+		port = strings.TrimSpace(port)
+		if port == "" {
+			return plugin.TaskSpec{}, fmt.Errorf("external port is required")
+		}
+		if !validPortOrRange(port) {
+			return plugin.TaskSpec{}, fmt.Errorf("invalid external port %q: must be 1-65535 or START-END", port)
+		}
+
+		proto, _ := opts["proto"].(string)
+		proto = strings.ToLower(strings.TrimSpace(proto))
+		if proto == "" {
+			proto = "tcp"
+		}
+		if proto != "tcp" && proto != "udp" {
+			return plugin.TaskSpec{}, fmt.Errorf("invalid protocol %q: must be tcp or udp", proto)
+		}
+
+		toport, _ := opts["toport"].(string)
+		toport = strings.TrimSpace(toport)
+		if toport == "" {
+			return plugin.TaskSpec{}, fmt.Errorf("internal destination port is required")
+		}
+		if !validPortOrRange(toport) {
+			return plugin.TaskSpec{}, fmt.Errorf("invalid destination port %q: must be 1-65535 or START-END", toport)
+		}
+
+		toaddr, _ := opts["toaddr"].(string)
+		toaddr = strings.TrimSpace(toaddr)
+		if toaddr != "" && !validIPOrCIDR(toaddr) {
+			return plugin.TaskSpec{}, fmt.Errorf("invalid destination address %q: must be a valid IP address or CIDR", toaddr)
+		}
+
+		zone, _ := opts["zone"].(string)
+		zone = strings.TrimSpace(zone)
+		if zone == "" {
+			zone = "public"
+		}
+
+		state, _ := opts["state"].(string)
+		if state == "" {
+			state = "enabled"
+		}
+
+		forwardSpec := map[string]any{
+			"port":   port,
+			"proto":  proto,
+			"toport": toport,
+		}
+		if toaddr != "" {
+			forwardSpec["toaddr"] = toaddr
+		}
+
+		target := "same host"
+		if toaddr != "" {
+			target = toaddr
+		}
+
+		if state == "disabled" {
+			return plugin.TaskSpec{
+				Name: fmt.Sprintf("Remove port forward %s/%s on zone %s", port, proto, zone),
+				Steps: []plugin.TaskStep{
+					{
+						Name:   fmt.Sprintf("Remove port forward %s/%s -> %s:%s", port, proto, target, toport),
+						Module: "ansible.posix.firewalld",
+						Params: map[string]any{
+							"zone":         zone,
+							"port_forward": []map[string]any{forwardSpec},
+							"state":        "disabled",
+							"permanent":    true,
+							"immediate":    true,
+							"become":       true,
+						},
+					},
+				},
+			}, nil
+		}
+
+		return plugin.TaskSpec{
+			Name: fmt.Sprintf("Forward port %s/%s on zone %s to %s:%s", port, proto, zone, target, toport),
+			Steps: []plugin.TaskStep{
+				{
+					Name:   fmt.Sprintf("Enable masquerade on zone %s", zone),
+					Module: "ansible.posix.firewalld",
+					Params: map[string]any{
+						"zone":       zone,
+						"masquerade": "true",
+						"state":      "enabled",
+						"permanent":  true,
+						"immediate":  true,
+						"become":     true,
+					},
+				},
+				{
+					Name:   fmt.Sprintf("Forward %s/%s -> %s:%s in zone %s", port, proto, target, toport, zone),
+					Module: "ansible.posix.firewalld",
+					Params: map[string]any{
+						"zone":         zone,
+						"port_forward": []map[string]any{forwardSpec},
+						"state":        "enabled",
+						"permanent":    true,
+						"immediate":    true,
+						"become":       true,
+					},
 				},
 			},
 		}, nil
