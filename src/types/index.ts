@@ -289,6 +289,17 @@ export interface RcloneMountRecord {
 }
 
 /**
+ * Metadata for one stored vault variable. Deliberately has no value/ciphertext
+ * field: the list API never exposes secret material (Secret Protection Invariant).
+ */
+export interface VaultVariable {
+  /** Variable name as it would appear in Ansible, e.g. `restic_password`. */
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
  * One audit line for a vault decryption. Records the variable NAME and metadata
  * only — never the decrypted plaintext (see the Secret Protection Invariant).
  */
@@ -306,6 +317,41 @@ export interface VaultAuditEvent {
   action: string;
   /** Which password source resolved the decryption. */
   passwordSource: 'file' | 'env' | 'ask_password' | 'inline' | string;
+}
+
+/**
+ * A global ("datacenter-wide") settings page contributed by an addon module.
+ * Mirrors backend-go/pkg/plugin.SettingsPage plus the current persisted values.
+ */
+export type GlobalSettingsFieldType = 'string' | 'text' | 'int' | 'bool' | 'select' | 'secret';
+
+export interface GlobalSettingsFieldOption {
+  value: string;
+  label: string;
+}
+
+export interface GlobalSettingsField {
+  name: string;
+  label: string;
+  type: GlobalSettingsFieldType;
+  description?: string;
+  placeholder?: string;
+  default?: unknown;
+  required?: boolean;
+  secret?: boolean;
+  options?: GlobalSettingsFieldOption[];
+  min?: number;
+  max?: number;
+}
+
+export interface GlobalSettingsPage {
+  id: string;
+  title: string;
+  icon: string;
+  description: string;
+  order: number;
+  fields: GlobalSettingsField[];
+  values: Record<string, unknown>;
 }
 
 /**
