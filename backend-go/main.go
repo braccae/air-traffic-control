@@ -21,6 +21,7 @@ import (
 	"air-traffic-control/backend/pkg/types"
 	"air-traffic-control/backend/pkg/websocket"
 	_ "air-traffic-control/backend/plugins/all"
+	"air-traffic-control/backend/webui"
 )
 
 type sshWithLocalFallbackRunner struct {
@@ -267,6 +268,24 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager) *http.ServeMux 
 	// Mount plugin framework REST API routes
 	pluginAPI := plugin.NewAPI(plugin.APIOptions{})
 	pluginAPI.RegisterRoutes(mux)
+
+	// API 404 catch-all. Mirrors server.ts: an unhandled /api/* request must
+	// return JSON, never fall through to the SPA index.html. Every /api/*
+	// handler registered above is more specific and keeps precedence.
+	apiNotFound := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("API route not found: %s %s", r.Method, r.URL.Path),
+		})
+	}
+	mux.HandleFunc("/api", apiNotFound)
+	mux.HandleFunc("/api/", apiNotFound)
+
+	// Serve the embedded React build last, so it catches everything that is not
+	// an API route or a WebSocket upgrade.
+	mux.Handle("/", webui.SPAHandler())
 
 	return mux
 }

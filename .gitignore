@@ -1,6 +1,6 @@
 node_modules/
 build/
-dist/
+/dist/
 coverage/
 .DS_Store
 *.log
@@ -9,3 +9,9 @@ coverage/
 .superpowers/
 data/bin/
 data/ansible-venv/
+
+# Embedded copy of the Vite build for the Go binary. `just build-all` copies the
+# real assets in; only .gitkeep is committed so a bare `go build` or
+# `go test ./...` still works on a fresh clone that has never run a build.
+/backend-go/webui/dist/*
+!/backend-go/webui/dist/.gitkeep

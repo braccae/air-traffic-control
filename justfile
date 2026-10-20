@@ -93,8 +93,24 @@ build:
     npm run build
 
 # Production artifact order: frontend first (emits dist/), then the Go binary.
-# The `go:embed dist` step lands in Phase 0 of the migration plan.
-build-all: build go-build
+# The Vite output and the ghostty WASM are copied into backend-go/webui/dist so
+# `go:embed` picks them up. The committed .gitkeep anchor is preserved.
+build-all: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    WASM="node_modules/ghostty-web/ghostty-vt.wasm"
+    if [[ ! -f "$WASM" ]]; then
+      echo "!! $WASM missing — run npm install" >&2
+      exit 1
+    fi
+
+    find backend-go/webui/dist -mindepth 1 ! -name '.gitkeep' -delete
+    cp -R dist/. backend-go/webui/dist/
+    cp "$WASM" backend-go/webui/dist/ghostty-vt.wasm
+
+    cd backend-go && go build -o /tmp/air-traffic-control-daemon . && ln -sf /tmp/air-traffic-control-daemon /tmp/prox-orch-daemon
+    echo ">> embedded frontend and daemon built"
 
 # ---------------------------------------------------------------------------
 # ops

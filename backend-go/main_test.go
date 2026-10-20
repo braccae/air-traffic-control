@@ -124,3 +124,58 @@ func TestPodmanProbeEndpoint_DirectUserPodmanFallback(t *testing.T) {
 	}
 }
 
+func TestAPINotFoundCatchAll_ReturnsJSON(t *testing.T) {
+	mux := newServerMux(nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/does/not/exist", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("expected json content type, got %q", ct)
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode json 404 body: %v", err)
+	}
+	if body["success"] != false {
+		t.Fatalf("expected success=false, got %v", body["success"])
+	}
+	msg, _ := body["error"].(string)
+	if !strings.Contains(msg, "/api/does/not/exist") {
+		t.Fatalf("expected error to name the request path, got %q", msg)
+	}
+}
+
+func TestAPINotFoundCatchAll_DoesNotShadowRealRoutes(t *testing.T) {
+	mux := newServerMux(nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected /api/health to still return 200, got %d", rec.Code)
+	}
+}
+
+func TestUnknownNonAPIPath_ServesSPAFallback(t *testing.T) {
+	mux := newServerMux(nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/some/client/route", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	// 200 when a real frontend build is embedded, 503 when the binary was built
+	// without one. Either way it must not be a JSON API 404.
+	if rec.Code != http.StatusOK && rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 200 or 503 for SPA fallback, got %d", rec.Code)
+	}
+	if strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
+		t.Fatal("non-API path must not be answered by the API 404 handler")
+	}
+}

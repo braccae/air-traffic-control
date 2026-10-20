@@ -1,11 +1,34 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
+import fs from 'node:fs';
 import path from 'path';
-import {defineConfig} from 'vite';
+import {defineConfig, type Plugin} from 'vite';
+
+// Dev-only: the legacy Express workflow serves /ghostty-vt.wasm straight out of
+// node_modules. When Vite runs standalone (`just dev-split`) nothing else serves
+// it, so expose it here. In production the same file is copied into the Go embed
+// tree by `just build-all`.
+function ghosttyWasmPlugin(): Plugin {
+  const wasmPath = path.resolve(import.meta.dirname, 'node_modules/ghostty-web/ghostty-vt.wasm');
+  return {
+    name: 'ghostty-wasm',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use('/ghostty-vt.wasm', (_req, res, next) => {
+        if (!fs.existsSync(wasmPath)) {
+          next();
+          return;
+        }
+        res.setHeader('Content-Type', 'application/wasm');
+        fs.createReadStream(wasmPath).pipe(res);
+      });
+    },
+  };
+}
 
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [react(), tailwindcss(), ghosttyWasmPlugin()],
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname, '.'),
