@@ -35,7 +35,7 @@ func (r *testSSHRunner) RunCommand(cfg ssh.Config, cmd string) (string, error) {
 
 func TestPodmanProbeEndpoint_ReturnsUnprivilegedUsers(t *testing.T) {
 	mgr := podman.NewManager(&testSSHRunner{}, ssh.Config{Host: "192.168.1.150", Port: 22, User: "root"})
-	mux := newServerMux(nil, mgr)
+	mux := newServerMux(nil, mgr, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/podman/probe", nil)
 	rec := httptest.NewRecorder()
@@ -97,7 +97,7 @@ func (r *failingSSHWithLocalFallback) RunCommand(cfg ssh.Config, cmd string) (st
 
 func TestPodmanProbeEndpoint_DirectUserPodmanFallback(t *testing.T) {
 	mgr := podman.NewManager(&failingSSHWithLocalFallback{}, ssh.Config{Host: "127.0.0.1", Port: 22, User: "pants"})
-	mux := newServerMux(nil, mgr)
+	mux := newServerMux(nil, mgr, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/podman/probe", nil)
 	rec := httptest.NewRecorder()
@@ -125,7 +125,7 @@ func TestPodmanProbeEndpoint_DirectUserPodmanFallback(t *testing.T) {
 }
 
 func TestAPINotFoundCatchAll_ReturnsJSON(t *testing.T) {
-	mux := newServerMux(nil, nil)
+	mux := newServerMux(nil, nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/does/not/exist", nil)
 	rec := httptest.NewRecorder()
@@ -152,7 +152,7 @@ func TestAPINotFoundCatchAll_ReturnsJSON(t *testing.T) {
 }
 
 func TestAPINotFoundCatchAll_DoesNotShadowRealRoutes(t *testing.T) {
-	mux := newServerMux(nil, nil)
+	mux := newServerMux(nil, nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 	rec := httptest.NewRecorder()
@@ -164,7 +164,7 @@ func TestAPINotFoundCatchAll_DoesNotShadowRealRoutes(t *testing.T) {
 }
 
 func TestUnknownNonAPIPath_ServesSPAFallback(t *testing.T) {
-	mux := newServerMux(nil, nil)
+	mux := newServerMux(nil, nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/some/client/route", nil)
 	rec := httptest.NewRecorder()

@@ -44,7 +44,7 @@ func (r *sshWithLocalFallbackRunner) RunCommand(cfg ssh.Config, command string) 
 	return "", fmt.Errorf("ssh and local fallback failed for host %s", cfg.Host)
 }
 
-func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager) *http.ServeMux {
+func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	if hub != nil {
@@ -266,7 +266,7 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager) *http.ServeMux 
 	})
 
 	// Mount plugin framework REST API routes
-	pluginAPI := plugin.NewAPI(plugin.APIOptions{})
+	pluginAPI := plugin.NewAPI(plugin.APIOptions{DBPath: dbPath})
 	pluginAPI.RegisterRoutes(mux)
 
 	// API 404 catch-all. Mirrors server.ts: an unhandled /api/* request must
@@ -310,6 +310,7 @@ func main() {
 	}
 
 	port := flag.Int("port", 8080, "HTTP and WebSocket server port")
+	dbFlag := flag.String("db", "", "Path to hosts-cache.sqlite (defaults to ATC_DB_PATH or auto-detected from the repo root)")
 	flag.Parse()
 
 	log.Printf("Starting Air Traffic Control Go Core Daemon on port %d...", *port)
@@ -338,7 +339,7 @@ func main() {
 		}
 	}()
 
-	mux := newServerMux(hub, podmanMgr)
+	mux := newServerMux(hub, podmanMgr, *dbFlag)
 	log.Printf("Air Traffic Control backend listening on :%d", *port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", *port), mux); err != nil {
 		log.Fatalf("Server stopped: %v", err)

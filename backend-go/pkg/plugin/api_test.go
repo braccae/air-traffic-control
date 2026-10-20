@@ -114,8 +114,8 @@ func TestAPI_NodePluginsAndModules(t *testing.T) {
 	nodeResolver := newMemoryNodeResolver()
 	runner := &dummyRunner{
 		responses: map[string]string{
-			"command -v zpool": "/usr/sbin/zpool",
-			"command -v zfs":   "/usr/sbin/zfs",
+			"command -v zpool":      "/usr/sbin/zpool",
+			"command -v zfs":        "/usr/sbin/zfs",
 			"zpool list -H -o name": "tank\n",
 		},
 	}
@@ -340,5 +340,24 @@ func TestAPI_SQLiteNodeResolver(t *testing.T) {
 	}
 	if facts.HostRoute == "" {
 		t.Errorf("expected non-empty HostRoute")
+	}
+}
+
+func TestResolveDBPath(t *testing.T) {
+	// Explicit path wins verbatim.
+	if got := plugin.ResolveDBPath("/tmp/explicit-hosts-cache.sqlite"); got != "/tmp/explicit-hosts-cache.sqlite" {
+		t.Fatalf("explicit path not honored: got %q", got)
+	}
+
+	// ATC_DB_PATH env var is consulted when no explicit path is given.
+	t.Setenv("ATC_DB_PATH", "/tmp/env-hosts-cache.sqlite")
+	if got := plugin.ResolveDBPath(""); got != "/tmp/env-hosts-cache.sqlite" {
+		t.Fatalf("ATC_DB_PATH not honored: got %q", got)
+	}
+
+	// With neither set, resolution walks upward and must never be empty.
+	t.Setenv("ATC_DB_PATH", "")
+	if got := plugin.ResolveDBPath(""); got == "" {
+		t.Fatalf("ResolveDBPath returned empty string")
 	}
 }

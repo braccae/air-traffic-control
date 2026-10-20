@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -17,17 +19,17 @@ import (
 
 // PluginSummary represents the summary returned by GET /api/plugins
 type PluginSummary struct {
-	ID           string         `json:"id"`
-	Kind         Kind           `json:"kind"`
-	Name         string         `json:"name"`
-	Label        string         `json:"label"`
-	Icon         string         `json:"icon"`
-	Description  string         `json:"description"`
-	Order        int            `json:"order"`
-	Requirements Requirements   `json:"requirements"`
-	Actions      []ActionSpec   `json:"actions,omitempty"`
-	CanRead      bool           `json:"canRead"`
-	CanAct       bool           `json:"canAct"`
+	ID           string       `json:"id"`
+	Kind         Kind         `json:"kind"`
+	Name         string       `json:"name"`
+	Label        string       `json:"label"`
+	Icon         string       `json:"icon"`
+	Description  string       `json:"description"`
+	Order        int          `json:"order"`
+	Requirements Requirements `json:"requirements"`
+	Actions      []ActionSpec `json:"actions,omitempty"`
+	CanRead      bool         `json:"canRead"`
+	CanAct       bool         `json:"canAct"`
 }
 
 // NodePluginItem represents a detected plugin in GET /api/nodes/:id/plugins
@@ -133,6 +135,42 @@ func NewSQLiteNodeResolver(dbPath string) (*SQLiteNodeResolver, error) {
 	}, nil
 }
 
+// ResolveDBPath locates the hosts cache database. An explicit path or the
+// ATC_DB_PATH environment variable takes precedence. Otherwise it walks upward
+// from the current working directory looking for data/hosts-cache.sqlite, so
+// the daemon works whether it is launched from the repo root or from
+// backend-go/. It never returns an empty string.
+func ResolveDBPath(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if env := os.Getenv("ATC_DB_PATH"); env != "" {
+		return env
+	}
+
+	const rel = "data/hosts-cache.sqlite"
+	if _, err := os.Stat(rel); err == nil {
+		return rel
+	}
+
+	if wd, err := os.Getwd(); err == nil {
+		dir := wd
+		for {
+			candidate := filepath.Join(dir, rel)
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+
+	return rel
+}
+
 // Close closes the underlying SQLite database
 func (r *SQLiteNodeResolver) Close() error {
 	r.mu.Lock()
@@ -144,16 +182,16 @@ func (r *SQLiteNodeResolver) Close() error {
 }
 
 type sqliteNodeRecord struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	ShortName     string `json:"shortName"`
-	IP            string `json:"ip"`
-	Port          int    `json:"port"`
-	SSHUser       string `json:"sshUser"`
-	TailscaleIP   string `json:"tailscaleIp"`
-	TailscaleHost string `json:"tailscaleHost"`
-	NodeType      string `json:"nodeType"`
-	PrivilegeMethod string `json:"privilegeMethod"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	ShortName       string            `json:"shortName"`
+	IP              string            `json:"ip"`
+	Port            int               `json:"port"`
+	SSHUser         string            `json:"sshUser"`
+	TailscaleIP     string            `json:"tailscaleIp"`
+	TailscaleHost   string            `json:"tailscaleHost"`
+	NodeType        string            `json:"nodeType"`
+	PrivilegeMethod string            `json:"privilegeMethod"`
 	PluginOverrides map[string]string `json:"pluginOverrides"`
 }
 
@@ -349,6 +387,11 @@ type APIOptions struct {
 	NodeResolver   NodeResolver
 	RunnerResolver RunnerResolver
 	Cache          *ProbeCache
+	// DBPath optionally overrides the hosts-cache.sqlite location used to
+	// auto-wire the default SQLite-backed NodeResolver. When empty, ATC_DB_PATH
+	// is consulted, then the path is resolved relative to the current working
+	// directory by walking upward.
+	DBPath string
 }
 
 // NewAPI constructs a new API instance
@@ -360,10 +403,14 @@ func NewAPI(opts APIOptions) *API {
 
 	nodeRes := opts.NodeResolver
 	if nodeRes == nil {
-		// Attempt to use sqlite db if present
-		dbPath := "data/hosts-cache.sqlite"
+		// Auto-wire the SQLite-backed resolver. Resolve the database path
+		// robustly rather than relying on a CWD-relative literal, because the
+		// daemon may be launched from the repo root or from backend-go/.
+		dbPath := ResolveDBPath(opts.DBPath)
 		if r, err := NewSQLiteNodeResolver(dbPath); err == nil {
 			nodeRes = r
+		} else {
+			log.Printf("plugin: node resolver unavailable (%v); endpoints that require a node resolver will fail", err)
 		}
 	}
 
@@ -441,6 +488,12 @@ func (a *API) handleNodeRoutes(w http.ResponseWriter, r *http.Request) {
 
 	nodeID := parts[0]
 
+	// /api/nodes/:id/exec
+	if len(parts) == 2 && parts[1] == "exec" && r.Method == http.MethodPost {
+		a.handleNodeExec(w, r, nodeID)
+		return
+	}
+
 	// /api/nodes/:id/plugins/refresh
 	if len(parts) == 3 && parts[1] == "plugins" && parts[2] == "refresh" && r.Method == http.MethodPost {
 		a.handleRefresh(w, r, nodeID)
@@ -477,6 +530,48 @@ func (a *API) handleNodeRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.NotFound(w, r)
+}
+
+// ExecRequestBody holds the command payload for POST /api/nodes/:id/exec
+type ExecRequestBody struct {
+	Command string `json:"command"`
+}
+
+// handleNodeExec executes a command over the node's pooled persistent connection
+func (a *API) handleNodeExec(w http.ResponseWriter, r *http.Request, nodeID string) {
+	ctx := r.Context()
+	var req ExecRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Command) == "" {
+		http.Error(w, "command is required", http.StatusBadRequest)
+		return
+	}
+
+	_, runner, err := a.resolveFactsAndRunner(ctx, nodeID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	out, err := runner.RunCommand(ctx, req.Command)
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"error":   err.Error(),
+			"stdout":  out,
+		})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"stdout":  out,
+	})
 }
 
 // handleRefresh implements POST /api/nodes/:id/plugins/refresh
