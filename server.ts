@@ -76,7 +76,7 @@ import {
   ensureAnsibleVenv,
   REQUIRED_VENV_PACKAGES,
 } from './src/utils/ansibleVenvManager.ts';
-import { registerVaultRoutes } from './src/utils/vaultManager.ts';
+import { materializeVaultVarsFile, registerVaultRoutes } from './src/utils/vaultManager.ts';
 import { registerRcloneRoutes } from './src/utils/rcloneManager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1826,6 +1826,8 @@ registerPlaybookRoutes(app, playbookDir, {
 registerVaultRoutes(app, {
   // Decryption audit rows persist in data/hosts-cache.sqlite (vault_audit_log).
   auditStore: hostCache,
+  // Named vault variables persist as AES256 ciphertext in vault_variables.
+  variableStore: hostCache,
   action: 'POST /api/vault/decrypt',
 });
 
@@ -2061,6 +2063,12 @@ app.post('/api/playbook/run', (req, res) => {
     args.push('--extra-vars', typeof extraVars === 'string' ? extraVars : JSON.stringify(extraVars));
   }
 
+  // Vault store -> ephemeral owner-only vars file (ansible-vault ciphertext).
+  const vaultVars = materializeVaultVarsFile(hostCache);
+  if (vaultVars) {
+    args.push('--extra-vars', `@${vaultVars.filePath}`);
+  }
+
   const proc = spawn('ansible-playbook', args, {
     cwd: __dirname,
     env: { ...process.env, ANSIBLE_FORCE_COLOR: '1' },
@@ -2070,6 +2078,7 @@ app.post('/api/playbook/run', (req, res) => {
 
   proc.on('error', (err: any) => {
     activePlaybookProcs.delete(taskId);
+    vaultVars?.cleanup();
     newTask.status = 'FAILED';
     newTask.progress = 100;
     newTask.progressEta = `Spawn error: ${err?.code || err?.message || 'Failed to spawn runner'}`;
@@ -2119,6 +2128,7 @@ app.post('/api/playbook/run', (req, res) => {
 
   proc.on('close', code => {
     activePlaybookProcs.delete(taskId);
+    vaultVars?.cleanup();
     if (newTask.status === 'FAILED') {
       return;
     }
@@ -2214,10 +2224,21 @@ app.post('/api/queue/execute', async (req, res) => {
 
   broadcast({ type: 'queue_execution_started', taskId, queue: getQueue() });
 
-  const { result, remainingCount, haltedOnError } = await executeNextQueueTask(inv, {
-    cwd: __dirname,
-    taskId,
-  });
+  // Expose the SQLite vault store to the playbook as an owner-only vars file;
+  // it contains ansible-vault ciphertext only and is removed when the run ends.
+  const vaultVars = materializeVaultVarsFile(hostCache);
+
+  let queueOutcome: Awaited<ReturnType<typeof executeNextQueueTask>>;
+  try {
+    queueOutcome = await executeNextQueueTask(inv, {
+      cwd: __dirname,
+      taskId,
+      vaultVarsFile: vaultVars?.filePath,
+    });
+  } finally {
+    vaultVars?.cleanup();
+  }
+  const { result, remainingCount, haltedOnError } = queueOutcome;
 
   broadcast({
     type: 'queue_execution_finished',

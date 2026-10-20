@@ -20,6 +20,11 @@ export interface ExecuteQueueOptions {
   env?: Record<string, string>;
   cwd?: string;
   taskId?: string;
+  /**
+   * Ephemeral YAML vars file (ansible-vault ciphertext) built from the vault
+   * store. Passed as `--extra-vars @path`; the caller owns its cleanup.
+   */
+  vaultVarsFile?: string;
   execCommand?: (
     command: string,
     args: string[],
@@ -373,6 +378,10 @@ export async function executeQueueTaskOneByOne(
       args.push('--limit', task.targetNodeName || task.targetNodeId);
     }
     args.push(ephemeralFile);
+
+    if (options?.vaultVarsFile) {
+      args.push('--extra-vars', `@${options.vaultVarsFile}`);
+    }
 
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),

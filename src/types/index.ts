@@ -308,6 +308,17 @@ export interface VaultAuditEvent {
   passwordSource: 'file' | 'env' | 'ask_password' | 'inline' | string;
 }
 
+/**
+ * Metadata for one stored vault variable. Deliberately has no value/ciphertext
+ * field: the list API never exposes secret material (Secret Protection Invariant).
+ */
+export interface VaultVariable {
+  /** Variable name as it would appear in Ansible, e.g. `restic_password`. */
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface QueuedAnsibleTask {
   id: string;
   title: string;

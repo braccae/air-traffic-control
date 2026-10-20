@@ -145,7 +145,6 @@ export class SubprocessTaskRegistry {
       capturedChars: 0,
       nextSeq: 1,
       listeners: new Set(),
-      listenersSinceSeq: new Map(),
       cancelled: false,
       logDir,
     };
@@ -251,7 +250,6 @@ export class SubprocessTaskRegistry {
     record.listeners.add(listener);
     return () => {
       record.listeners.delete(listener);
-      record.listenersSinceSeq.delete(listener);
     };
   }
 
@@ -275,7 +273,6 @@ export class SubprocessTaskRegistry {
         }
       }
       record.listeners.clear();
-      record.listenersSinceSeq.clear();
     }
   }
 
@@ -310,7 +307,6 @@ export class SubprocessTaskRegistry {
     this.emit(record, { type: 'exit', task: this.snapshot(record), exitCode });
 
     record.listeners.clear();
-    record.listenersSinceSeq.clear();
     record.proc = null;
 
     this.finishedOrder.push(info.id);
@@ -330,7 +326,6 @@ export class SubprocessTaskRegistry {
         listener(ev);
       } catch {
         record.listeners.delete(listener);
-        record.listenersSinceSeq.delete(listener);
       }
     }
   }

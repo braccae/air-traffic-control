@@ -19,6 +19,7 @@ import {
   type QuickCommandCategory,
 } from '../utils/quickCommandsManager.ts';
 import type { AnsibleConfigSettings } from '../utils/ansibleConfigManager.ts';
+import { VaultSettingsPage } from './VaultSettingsPage.tsx';
 
 export interface DatacenterGlobalViewProps {
   datacenterName?: string;
@@ -29,6 +30,9 @@ export interface DatacenterGlobalViewProps {
   onOpenPlaybookModal: (playbookName?: string) => void;
   onOpenPlaybookEditor: (playbookName?: string) => void;
   onOpenGroupVars: () => void;
+  /** Opens the full-page vault editor (falls back to onOpenGroupVars). */
+  onOpenVaultEditor?: () => void;
+  onSelectSection?: (section: DatacenterSection) => void;
   onToggleTasksDrawer?: () => void;
   onRunPlaybookQuick?: (playbook: string, target?: string) => void;
 }
@@ -89,6 +93,8 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
   onOpenPlaybookModal,
   onOpenPlaybookEditor,
   onOpenGroupVars,
+  onOpenVaultEditor,
+  onSelectSection,
   onToggleTasksDrawer,
   onRunPlaybookQuick,
 }) => {
@@ -398,6 +404,13 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
         .filter(cg => cg.nodes.length > 0)
     : clusterGroups;
 
+  // Full-page vault editor: the sidebar's "Vars & Vault Secrets" section.
+  if (activeSection === 'vars_vault') {
+    return (
+      <VaultSettingsPage onBack={onSelectSection ? () => onSelectSection('overview') : undefined} />
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4 w-full">
       {/* Datacenter Header */}
@@ -518,7 +531,7 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
           {/* Action 3: Cluster Vars & Vault */}
           <button
             type="button"
-            onClick={onOpenGroupVars}
+            onClick={onOpenVaultEditor || onOpenGroupVars}
             className="group flex flex-col p-3 rounded-lg bg-[#171a2d] hover:bg-[#1f2338] border border-[#26293c] hover:border-[#d9b9ff]/50 transition-all text-left cursor-pointer shadow-xs"
           >
             <div className="flex items-center justify-between w-full mb-1">

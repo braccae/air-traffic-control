@@ -14,6 +14,7 @@ import type {
   RcloneRemoteRecord,
   RcloneMountRecord,
   VaultAuditEvent,
+  VaultVariable,
 } from '../types/index.ts';
 
 export interface CachedHostTelemetry {
@@ -86,6 +87,10 @@ export interface HostCacheStore {
   recordVaultAuditEvent(event: VaultAuditEvent): void;
   getVaultAuditEvents(filter?: { variableName?: string; host?: string; limit?: number }): VaultAuditEvent[];
   countVaultAuditEvents(): number;
+  listVaultVariables(): VaultVariable[];
+  getVaultVariableBlock(name: string): string | null;
+  upsertVaultVariable(name: string, vaultBlock: string): void;
+  deleteVaultVariable(name: string): boolean;
   close(): void;
 }
 
@@ -211,6 +216,16 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
       host TEXT NOT NULL,
       action TEXT NOT NULL,
       password_source TEXT NOT NULL
+    );
+
+    -- Ansible Vault variables. Only the ansible-vault ciphertext block is stored:
+    -- there is no plaintext column, so the Secret Protection Invariant is a
+    -- property of the schema rather than of the code paths reading it.
+    CREATE TABLE IF NOT EXISTS vault_variables (
+      name TEXT PRIMARY KEY,
+      vault_block TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_hosts_sort ON hosts(sort_order ASC, id ASC);
@@ -407,6 +422,20 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
     FROM vault_audit_log WHERE variable_name = ? AND host = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?
   `);
   const stmtCountVaultAudit = db.prepare('SELECT COUNT(*) as cnt FROM vault_audit_log');
+
+  // Note: the list statement deliberately does not select vault_block.
+  const stmtListVaultVariables = db.prepare(`
+    SELECT name, created_at, updated_at FROM vault_variables ORDER BY name ASC
+  `);
+  const stmtSelectVaultVariableBlock = db.prepare('SELECT vault_block FROM vault_variables WHERE name = ?');
+  const stmtUpsertVaultVariable = db.prepare(`
+    INSERT INTO vault_variables (name, vault_block, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(name) DO UPDATE SET
+      vault_block = excluded.vault_block,
+      updated_at = excluded.updated_at
+  `);
+  const stmtDeleteVaultVariable = db.prepare('DELETE FROM vault_variables WHERE name = ?');
 
   const mapVaultAuditRow = (r: any): VaultAuditEvent => ({
     id: String(r.id),
@@ -899,6 +928,34 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
     countVaultAuditEvents(): number {
       const row = stmtCountVaultAudit.get() as { cnt: number } | undefined;
       return Number(row?.cnt ?? 0);
+    },
+
+    listVaultVariables(): VaultVariable[] {
+      const rows = stmtListVaultVariables.all() as Array<{
+        name: string;
+        created_at: number;
+        updated_at: number;
+      }>;
+      return rows.map(r => ({
+        name: String(r.name),
+        createdAt: Number(r.created_at),
+        updatedAt: Number(r.updated_at),
+      }));
+    },
+
+    getVaultVariableBlock(name: string): string | null {
+      const row = stmtSelectVaultVariableBlock.get(name) as { vault_block: string } | undefined;
+      return row ? String(row.vault_block) : null;
+    },
+
+    upsertVaultVariable(name: string, vaultBlock: string): void {
+      const now = Date.now();
+      stmtUpsertVaultVariable.run(name, vaultBlock, now, now);
+    },
+
+    deleteVaultVariable(name: string): boolean {
+      const res = stmtDeleteVaultVariable.run(name);
+      return Number(res.changes) > 0;
     },
 
     close(): void {
