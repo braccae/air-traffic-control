@@ -573,22 +573,17 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
     }
 
     let metricsSource: 'glances' | 'pcp' | 'cockpit-bridge' | 'kernel' = 'kernel';
-    let metricsWarning: string | undefined;
 
     if (glancesPayload && (glancesPayload.source === 'http_rest' || glancesPayload.source === 'ssh_localhost_curl' || glancesPayload.source === 'cli_stdout_json')) {
       metricsSource = 'glances';
-      metricsWarning = undefined;
     } else if (hasGlances) {
       metricsSource = 'glances';
     } else if (hasPcp || glancesPayload?.source === 'pcp_fallback') {
       metricsSource = 'pcp';
-      metricsWarning = 'Glances not installed on host. Falling back to PCP (Performance Co-Pilot) daemon.';
     } else if (hasCockpit) {
       metricsSource = 'cockpit-bridge';
-      metricsWarning = 'Glances not installed on host. Sourcing system metrics via Cockpit Bridge.';
     } else {
       metricsSource = 'kernel';
-      metricsWarning = 'Glances not installed on host. Sourcing metrics directly from /proc & sysfs.';
     }
 
     const cpuUsage = glancesPayload && typeof glancesPayload.cpu.total === 'number' && glancesPayload.cpu.total >= 0
@@ -613,7 +608,6 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
       uptime: uptimeRaw,
       osDescription: osPretty,
       metricsSource,
-      metricsWarning,
     };
   } catch {
     return {
@@ -623,7 +617,6 @@ export async function fetchLiveNodeTelemetry(node: NodeItem): Promise<Partial<Te
       memoryUsedGiB: +(node.specs.ramGiB * 0.4).toFixed(1),
       zfsScrubStatus: `Host: ${node.shortName} (Cached)`,
       metricsSource: 'cockpit-bridge',
-      metricsWarning: 'Glances not reachable. Using cached Cockpit system telemetry.',
     };
   }
 }

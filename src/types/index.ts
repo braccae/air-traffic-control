@@ -114,7 +114,6 @@ export interface TelemetryData {
   packageWatts: number;
   sparkline: number[];
   metricsSource?: 'glances' | 'pcp' | 'cockpit-bridge' | 'kernel';
-  metricsWarning?: string;
   buffCacheGiB?: number;
 }
 
