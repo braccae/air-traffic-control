@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"air-traffic-control/backend/pkg/ansqueue"
 	"air-traffic-control/backend/pkg/hostcache"
 	"air-traffic-control/backend/pkg/tailscale"
 )
@@ -34,11 +35,16 @@ type Store interface {
 	UpsertHosts(nodes []hostcache.NodeRecord) error
 	DeleteHost(id string) (bool, error)
 	GetAllTagChunks() ([]hostcache.TagChunk, error)
+	InvalidateHostSections(hostID string) error
+	DeleteHostContainerCache(hostID string) error
+	DeleteHostTelemetry(hostID string) error
+	SaveTask(t hostcache.Task) error
 }
 
 // Options configures the node API surface.
 type Options struct {
 	Store           Store
+	QueueStore      *ansqueue.Store
 	Runner          CommandRunner
 	Broadcast       func(event map[string]any)
 	Now             func() time.Time
@@ -50,6 +56,7 @@ type Options struct {
 // API handles node CRUD and hardware probing requests.
 type API struct {
 	store           Store
+	queueStore      *ansqueue.Store
 	runner          CommandRunner
 	broadcast       func(event map[string]any)
 	now             func() time.Time
@@ -72,6 +79,7 @@ func New(opts Options) (*API, error) {
 	}
 	api := &API{
 		store:           opts.Store,
+		queueStore:      opts.QueueStore,
 		runner:          opts.Runner,
 		broadcast:       opts.Broadcast,
 		now:             now,
@@ -86,14 +94,24 @@ func New(opts Options) (*API, error) {
 	return api, nil
 }
 
-// Register mounts the /api/nodes/ subtree on mux.
+// Register mounts the /api/nodes/ subtree and /api/podman/action on mux.
 func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/nodes/", a.handleNodesSubtree)
+	mux.HandleFunc("/api/podman/action", a.HandlePodmanAction)
 }
 
 func (a *API) emit(event map[string]any) {
 	if a.broadcast != nil {
 		a.broadcast(event)
+	}
+}
+
+func (a *API) emitQueueUpdated() {
+	if a.queueStore != nil && a.broadcast != nil {
+		a.broadcast(map[string]any{
+			"type":  "queue_updated",
+			"queue": a.queueStore.Snapshot(),
+		})
 	}
 }
 
@@ -191,6 +209,103 @@ func (a *API) handleNodesSubtree(w http.ResponseWriter, r *http.Request) {
 			a.notFound(w, r)
 			return
 		}
+	}
+
+	parts := strings.SplitN(sub, "/", 2)
+	nodeID := parts[0]
+	rest := parts[1]
+
+	// 1. POST /api/nodes/:id/interfaces/:name/toggle
+	// 2. POST /api/nodes/:id/interfaces/connect
+	if strings.HasPrefix(rest, "interfaces/") {
+		ifRest := strings.TrimPrefix(rest, "interfaces/")
+		if ifRest == "connect" && r.Method == http.MethodPost {
+			a.handleInterfaceConnect(w, r, nodeID)
+			return
+		}
+		if strings.HasSuffix(ifRest, "/toggle") && r.Method == http.MethodPost {
+			ifaceName := strings.TrimSuffix(ifRest, "/toggle")
+			a.handleInterfaceToggle(w, r, nodeID, ifaceName)
+			return
+		}
+	}
+
+	// 3. POST /api/nodes/:id/firewall/rules
+	// 4. DELETE /api/nodes/:id/firewall/rules/:ruleId
+	if rest == "firewall/rules" && r.Method == http.MethodPost {
+		a.handleFirewallAddRule(w, r, nodeID)
+		return
+	}
+	if strings.HasPrefix(rest, "firewall/rules/") && r.Method == http.MethodDelete {
+		ruleID := strings.TrimPrefix(rest, "firewall/rules/")
+		a.handleFirewallDeleteRule(w, r, nodeID, ruleID)
+		return
+	}
+
+	// 5. POST /api/nodes/:id/disks/:name/smart-test
+	if strings.HasPrefix(rest, "disks/") && strings.HasSuffix(rest, "/smart-test") && r.Method == http.MethodPost {
+		diskName := strings.TrimSuffix(strings.TrimPrefix(rest, "disks/"), "/smart-test")
+		a.handleDiskSmartTest(w, r, nodeID, diskName)
+		return
+	}
+
+	// 6. POST /api/nodes/:id/zfs/:pool/scrub
+	if strings.HasPrefix(rest, "zfs/") && strings.HasSuffix(rest, "/scrub") && r.Method == http.MethodPost {
+		poolName := strings.TrimSuffix(strings.TrimPrefix(rest, "zfs/"), "/scrub")
+		a.handleZfsScrub(w, r, nodeID, poolName)
+		return
+	}
+
+	// 7. POST /api/nodes/:id/vms/:name/action
+	// 8. POST /api/nodes/:id/vms/create
+	if rest == "vms/create" && r.Method == http.MethodPost {
+		a.handleVmCreate(w, r, nodeID)
+		return
+	}
+	if strings.HasPrefix(rest, "vms/") && strings.HasSuffix(rest, "/action") && r.Method == http.MethodPost {
+		vmName := strings.TrimSuffix(strings.TrimPrefix(rest, "vms/"), "/action")
+		a.handleVmAction(w, r, nodeID, vmName)
+		return
+	}
+
+	// 9. POST /api/nodes/:id/shares/reload
+	// 10. POST /api/nodes/:id/shares/nfs
+	// 11. POST /api/nodes/:id/shares/smb
+	if rest == "shares/reload" && r.Method == http.MethodPost {
+		a.handleSharesReload(w, r, nodeID)
+		return
+	}
+	if rest == "shares/nfs" && r.Method == http.MethodPost {
+		a.handleSharesNfs(w, r, nodeID)
+		return
+	}
+	if rest == "shares/smb" && r.Method == http.MethodPost {
+		a.handleSharesSmb(w, r, nodeID)
+		return
+	}
+
+	// 12. POST /api/nodes/:id/users/create
+	// 13. POST /api/nodes/:id/users/:user/password
+	// 14. POST /api/nodes/:id/users/:user/smbpassword
+	if rest == "users/create" && r.Method == http.MethodPost {
+		a.handleUsersCreate(w, r, nodeID)
+		return
+	}
+	if strings.HasPrefix(rest, "users/") && strings.HasSuffix(rest, "/password") && r.Method == http.MethodPost {
+		user := strings.TrimSuffix(strings.TrimPrefix(rest, "users/"), "/password")
+		a.handleUsersPassword(w, r, nodeID, user)
+		return
+	}
+	if strings.HasPrefix(rest, "users/") && strings.HasSuffix(rest, "/smbpassword") && r.Method == http.MethodPost {
+		user := strings.TrimSuffix(strings.TrimPrefix(rest, "users/"), "/smbpassword")
+		a.handleUsersSmbPassword(w, r, nodeID, user)
+		return
+	}
+
+	// 15. POST /api/nodes/:id/reboot
+	if rest == "reboot" && r.Method == http.MethodPost {
+		a.handleReboot(w, r, nodeID)
+		return
 	}
 
 	if a.fallback != nil {

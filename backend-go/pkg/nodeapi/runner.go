@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"air-traffic-control/backend/pkg/cockpit"
 	"air-traffic-control/backend/pkg/ssh"
 )
 
@@ -38,11 +39,21 @@ func (r *sshRunner) RunNodeCommand(ctx context.Context, node *Object, command st
 	tailscaleHost, _ := node.GetString("tailscaleHost")
 	tailscaleIp, _ := node.GetString("tailscaleIp")
 	sshUser, _ := node.GetString("sshUser")
+	privMethod, _ := node.GetString("privilegeMethod")
 	port := 22
 	if rawPort, ok := node.Get("port"); ok {
 		if p := parsePositiveInt(rawPort); p > 0 {
 			port = p
 		}
+	}
+
+	effectiveUser := sshUser
+	if effectiveUser == "" {
+		effectiveUser = "core"
+	}
+	effectiveCommand := command
+	if (privMethod == "run0" || privMethod == "doas") && (strings.HasPrefix(command, "sudo ") || strings.HasPrefix(command, "sudo -n ")) {
+		effectiveCommand = cockpit.WrapElevatedCommand(command, cockpit.ElevationMethod(privMethod), effectiveUser)
 	}
 
 	isLocal := ip == "127.0.0.1" ||
@@ -51,7 +62,7 @@ func (r *sshRunner) RunNodeCommand(ctx context.Context, node *Object, command st
 		strings.HasPrefix(tailscaleHost, "dev-pc")
 
 	if isLocal {
-		cmd := exec.CommandContext(ctx, "sh", "-c", command)
+		cmd := exec.CommandContext(ctx, "sh", "-c", effectiveCommand)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return string(out), fmt.Errorf("local command failed (%w): %s", err, strings.TrimSpace(string(out)))
@@ -74,16 +85,12 @@ func (r *sshRunner) RunNodeCommand(ctx context.Context, node *Object, command st
 		return "", errors.New("no host address available for node")
 	}
 
-	if sshUser == "" {
-		sshUser = "core"
-	}
-
 	cfg := ssh.Config{
 		Host:    targetHost,
 		Port:    port,
-		User:    sshUser,
+		User:    effectiveUser,
 		Timeout: timeout,
 	}
 
-	return r.pool.RunCommand(ctx, cfg, command)
+	return r.pool.RunCommand(ctx, cfg, effectiveCommand)
 }

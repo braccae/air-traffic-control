@@ -1,11 +1,13 @@
 package ssh
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -292,11 +294,13 @@ func (p *ClientPool) runCommandOnce(ctx context.Context, cfg Config, command str
 	}
 
 	done := make(chan struct{})
-	var out []byte
+	var stdout, stderr bytes.Buffer
+	session.Stdout = &stdout
+	session.Stderr = &stderr
 	var runErr error
 
 	go func() {
-		out, runErr = session.CombinedOutput(formattedCmd)
+		runErr = session.Run(formattedCmd)
 		close(done)
 	}()
 
@@ -306,9 +310,16 @@ func (p *ClientPool) runCommandOnce(ctx context.Context, cfg Config, command str
 		return "", ctx.Err()
 	case <-done:
 		if runErr != nil {
-			return string(out), fmt.Errorf("ssh command execution failed: %w (output: %s)", runErr, string(out))
+			combined := stdout.String()
+			if stderr.Len() > 0 {
+				if combined != "" && !strings.HasSuffix(combined, "\n") {
+					combined += "\n"
+				}
+				combined += stderr.String()
+			}
+			return combined, fmt.Errorf("ssh command execution failed: %w (output: %s)", runErr, combined)
 		}
-		return string(out), nil
+		return stdout.String(), nil
 	}
 }
 

@@ -231,3 +231,51 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 
 	return res, nil
 }
+
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	return []plugin.ActionSpec{
+		{
+			Name:        "smart_test",
+			Label:       "SMART Self-Test",
+			Description: "Initiate a SMART short background self-test on a storage drive",
+			Options: []plugin.OptionSchema{
+				{Name: "disk", Type: "string", Required: true, Description: "Block device name (e.g. sda, nvme0n1)"},
+			},
+		},
+	}
+}
+
+func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
+	norm := strings.ToLower(action)
+	if norm != "smart_test" && norm != "short_test" && norm != "smart-test" {
+		return plugin.TaskSpec{}, fmt.Errorf("unsupported smart action: %s", action)
+	}
+
+	disk, _ := opts["disk"].(string)
+	if disk == "" {
+		disk, _ = opts["device"].(string)
+	}
+	if disk == "" {
+		disk, _ = opts["name"].(string)
+	}
+	if disk == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("disk name is required")
+	}
+
+	cleanDisk := strings.TrimPrefix(disk, "/dev/")
+
+	return plugin.TaskSpec{
+		Name: fmt.Sprintf("SMART self-test on /dev/%s", cleanDisk),
+		Steps: []plugin.TaskStep{
+			{
+				Name:   fmt.Sprintf("Initiate SMART short self-test on /dev/%s", cleanDisk),
+				Module: "ansible.builtin.command",
+				Params: map[string]any{
+					"cmd":    fmt.Sprintf("smartctl -t short /dev/%s", cleanDisk),
+					"become": true,
+				},
+			},
+		},
+	}, nil
+}
+

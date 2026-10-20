@@ -177,8 +177,9 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 		if hub != nil {
 			queueBroadcast = func(event map[string]any) { hub.BroadcastJSON(event) }
 		}
+		qStore := ansqueue.New(store.SQLDB())
 		if qAPI, err := ansqueue.NewAPI(ansqueue.APIOptions{
-			Store: ansqueue.New(store.SQLDB()),
+			Store: qStore,
 			RunOptions: ansqueue.Options{
 				WorkDir:     ansqueue.ResolveWorkDir(),
 				Invalidator: ansqueue.NewCacheInvalidator(store),
@@ -193,6 +194,7 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 		// Mount the node lifecycle and hardware probe API (CRUD, testSsh, probes).
 		if nAPI, err := nodeapi.New(nodeapi.Options{
 			Store:        store,
+			QueueStore:   qStore,
 			Runner:       nodeapi.NewSSHRunner(sshManager.Pool()),
 			Broadcast:    queueBroadcast,
 			Fallback:     pluginAPI.NodeRoutesHandler(),
