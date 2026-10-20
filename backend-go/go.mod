@@ -5,6 +5,7 @@ go 1.27.1
 require (
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	golang.org/x/crypto v0.57.0
+	modernc.org/sqlite v1.60.1
 	tailscale.com v1.104.1
 )
 
@@ -59,5 +60,4 @@ require (
 	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
-	modernc.org/sqlite v1.60.1 // indirect
 )
