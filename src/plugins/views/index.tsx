@@ -10,6 +10,7 @@ import {
 // Import existing custom views
 import { ZfsManagementView } from '../../components/ZfsManagementView.tsx';
 import { NetworkSharesView } from '../../components/NetworkSharesView.tsx';
+import type { ShareScope } from '../../utils/sharesManager.ts';
 import { SystemLogsView } from '../../components/SystemLogsView.tsx';
 import { PodmanManager } from '../../components/PodmanManager.tsx';
 import { DisksSmartView } from '../../components/DisksSmartView.tsx';
@@ -285,13 +286,21 @@ export const GenericPluginView: React.FC<PluginViewProps> = ({
 };
 
 // Adapters for custom components to conform to PluginViewProps interface
-const ZfsViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
-  <ZfsManagementView node={node} />
-);
+const ZfsViewAdapter: React.FC<PluginViewProps> = ({ node, pluginId }) => {
+  const targetType =
+    pluginId === 'storage/btrfs'
+      ? 'btrfs'
+      : pluginId === 'storage/lvm'
+      ? 'lvm'
+      : pluginId === 'storage/zfs'
+      ? 'zfs'
+      : 'all';
+  return <ZfsManagementView node={node} targetType={targetType} />;
+};
 
 const NetworkSharesViewAdapter: React.FC<PluginViewProps> = ({ node, pluginId }) => {
-  const scope: 'smb' | 'nfs' | 'all' =
-    pluginId === 'share/smb' ? 'smb' : pluginId === 'share/nfs' ? 'nfs' : 'all';
+  const scope: ShareScope =
+    pluginId === 'share/nfs' ? 'nfs' : pluginId === 'share/smb' ? 'smb' : 'all';
   return <NetworkSharesView node={node} scope={scope} />;
 };
 
@@ -324,8 +333,8 @@ const FirewallViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
   <FirewallView node={node} />
 );
 
-const TailscaleExplorerViewAdapter: React.FC<PluginViewProps> = ({ onOpenTerminal }) => (
-  <TailscaleExplorerView onOpenTerminalForHost={onOpenTerminal} />
+const TailscaleExplorerViewAdapter: React.FC<PluginViewProps> = ({ node, onOpenTerminal }) => (
+  <TailscaleExplorerView node={node} onOpenTerminalForHost={onOpenTerminal} />
 );
 
 const TailscaleMeshCardAdapter: React.FC<PluginViewProps> = ({ node }) => (
