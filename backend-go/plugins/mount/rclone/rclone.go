@@ -1,12 +1,14 @@
-// Package rclone implements the mount/rclone plugin: rclone remote detection and
-// declarative compilation of the unit/file/mount tasks that install a remote on a
+// Package rclone implements the mount/rclone plugin: rclone remote detection,
+// datacenter-wide global settings (SettingsPageProvider), and declarative
+// compilation of the unit/drop-in/file/mount tasks that install a remote on a
 // device and expose it as a live mount.
 //
 // Secrets never reach this plugin in plaintext. The coordinator decrypts a remote
-// in memory, converts secret fields to rclone's own obscured form (rclone obscure),
-// and passes the resulting rclone.conf section as opaque text. This plugin writes
+// from ATC's Ansible Vault store (vault_variables) with Vault Audit logging,
+// converts secret fields to rclone's own obscured form (rclone obscure), and
+// passes the resulting rclone.conf section as opaque text. This plugin writes
 // that section with ansible.builtin.blockinfile guarded by no_log, so neither unit
-// files nor Ansible logs ever contain rclone credentials.
+// files, drop-ins, nor Ansible logs ever contain rclone credentials.
 package rclone
 
 import (
@@ -15,13 +17,26 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/systemd"
 )
 
 func init() {
 	_ = plugin.Register(New())
 }
 
-// Plugin provides rclone remote inspection and mount installation.
+// SettingsPageID is the route slug of the datacenter-wide rclone settings page
+// contributed by this module.
+const SettingsPageID = "mount/rclone"
+
+// Defaults for rclone mounts when per-install overrides are omitted.
+const (
+	DefaultMountBaseDir = "/mnt/rclone"
+	DefaultMountPolicy  = "systemd-mount"
+	DefaultMountOptions = "--vfs-cache-mode writes --dir-cache-time 5m"
+	DefaultMountUser    = "root"
+)
+
+// Plugin provides rclone remote inspection, global defaults, and mount installation.
 type Plugin struct{}
 
 // New constructs a new rclone plugin instance.
@@ -39,6 +54,78 @@ func (p *Plugin) Meta() plugin.Meta {
 	}
 }
 
+// SettingsPage implements plugin.SettingsPageProvider so datacenter-wide rclone
+// defaults and remote management appear in the Datacenter Settings view and the
+// global settings framework.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return plugin.SettingsPage{
+		ID:          SettingsPageID,
+		Title:       "Rclone Remotes & Mount Defaults",
+		Icon:        "cloud_queue",
+		Description: "Datacenter-wide rclone remote defaults (base mount path, default mount strategy, VFS cache flags) and guided rclone.conf remote vault storage.",
+		Order:       25,
+		Fields: []plugin.SettingsField{
+			{
+				Name:        "defaultMountBaseDir",
+				Label:       "Default Mount Base Directory",
+				Type:        plugin.SettingsFieldString,
+				Default:     DefaultMountBaseDir,
+				Required:    true,
+				Placeholder: DefaultMountBaseDir,
+				Description: "Base directory under which remotes mount by default (e.g. /mnt/rclone/<remote>).",
+			},
+			{
+				Name:        "defaultPolicy",
+				Label:       "Default Client Mount Policy",
+				Type:        plugin.SettingsFieldSelect,
+				Default:     DefaultMountPolicy,
+				Description: "Default mount strategy used when installing a remote to a Linux client.",
+				Options: []plugin.SettingsFieldOption{
+					{Value: "systemd-mount", Label: "systemd mount (rclone-<name>.service)"},
+					{Value: "systemd-automount", Label: "systemd automount (.mount + .automount pair)"},
+					{Value: "fstab", Label: "/etc/fstab entry (fuse.rclone)"},
+					{Value: "script", Label: "Service script (/usr/local/bin/rclone-mount-<name>.sh)"},
+				},
+			},
+			{
+				Name:        "defaultMountOptions",
+				Label:       "Default rclone Mount Flags",
+				Type:        plugin.SettingsFieldString,
+				Default:     DefaultMountOptions,
+				Placeholder: DefaultMountOptions,
+				Description: "Extra flags passed to `rclone mount` when a client does not specify custom options.",
+			},
+			{
+				Name:        "defaultMountUser",
+				Label:       "Default Mount Owner User",
+				Type:        plugin.SettingsFieldString,
+				Default:     DefaultMountUser,
+				Placeholder: DefaultMountUser,
+				Description: "System user that owns the FUSE mount process on target hosts.",
+			},
+			{
+				Name:        "configPasswordVaultVar",
+				Label:       "rclone.conf Encryption Password Vault Variable",
+				Type:        plugin.SettingsFieldSecret,
+				Secret:      true,
+				Placeholder: "vault_rclone_config_password",
+				Description: "Optional Ansible Vault variable holding RCLONE_CONFIG_PASS. Never stored or returned in plaintext.",
+			},
+		},
+	}
+}
+
+func globalSetting(field, fallback string) string {
+	store := plugin.GlobalSettingsStore()
+	if store == nil {
+		return fallback
+	}
+	if v, ok := store.Value(SettingsPageID, field); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return fallback
+}
+
 func (p *Plugin) Compatible(h plugin.HostFacts) bool {
 	// FUSE mounts are a Linux concept; rclone mount is not usable on Windows or
 	// router/switch targets.
@@ -52,7 +139,7 @@ func (p *Plugin) Requirements() plugin.Requirements {
 			"apt": {"rclone", "fuse3"},
 			"apk": {"rclone", "fuse"},
 		},
-		ControllerCollections: []string{"ansible.posix", "community.general"},
+		ControllerCollections: []string{"ansible.builtin", "ansible.posix", "community.general"},
 	}
 }
 
@@ -135,6 +222,7 @@ func (p *Plugin) Actions() []plugin.ActionSpec {
 				{Name: "policy", Type: "select", Required: false, Default: "systemd-mount", Enum: []string{"systemd-mount", "systemd-automount", "fstab", "script"}, Description: "Mount strategy"},
 				{Name: "mountOptions", Type: "string", Required: false, Default: "--vfs-cache-mode writes --dir-cache-time 5m", Description: "Extra rclone mount arguments"},
 				{Name: "mountUser", Type: "string", Required: false, Default: "root", Description: "User that owns the FUSE mount"},
+				{Name: "scope", Type: "select", Required: false, Default: "system", Enum: []string{"system", "user"}, Description: "systemd manager scope"},
 			},
 		},
 		{
@@ -145,6 +233,7 @@ func (p *Plugin) Actions() []plugin.ActionSpec {
 				{Name: "name", Type: "string", Required: true, Description: "rclone remote name"},
 				{Name: "mountTarget", Type: "string", Required: false, Description: "Mount point to unmount"},
 				{Name: "policy", Type: "select", Required: false, Default: "systemd-mount", Enum: []string{"systemd-mount", "systemd-automount", "fstab", "script"}, Description: "Mount strategy used at install time"},
+				{Name: "scope", Type: "select", Required: false, Default: "system", Enum: []string{"system", "user"}, Description: "systemd manager scope"},
 			},
 		},
 	}
@@ -153,9 +242,9 @@ func (p *Plugin) Actions() []plugin.ActionSpec {
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
 	switch strings.ToLower(action) {
 	case "install_remote":
-		return compileInstall(opts)
+		return compileInstall(h, opts)
 	case "remove_remote":
-		return compileRemove(opts)
+		return compileRemove(h, opts)
 	default:
 		return plugin.TaskSpec{}, fmt.Errorf("unsupported rclone action: %s", action)
 	}
@@ -170,7 +259,21 @@ func str(opts map[string]any, key, def string) string {
 	return def
 }
 
-func compileInstall(opts map[string]any) (plugin.TaskSpec, error) {
+// isNonSystemdHost reports whether the target host uses OpenRC / SysV rather
+// than systemd, matching backend-go/plugins/system/service conventions.
+func isNonSystemdHost(h plugin.HostFacts) bool {
+	if h.Overrides != nil {
+		if initSys, ok := h.Overrides["initSystem"]; ok && initSys != "" && initSys != "systemd" {
+			return true
+		}
+		if osDesc, ok := h.Overrides["osDescription"]; ok && strings.Contains(strings.ToLower(osDesc), "alpine") {
+			return true
+		}
+	}
+	return false
+}
+
+func compileInstall(h plugin.HostFacts, opts map[string]any) (plugin.TaskSpec, error) {
 	name := str(opts, "name", "")
 	if name == "" {
 		return plugin.TaskSpec{}, fmt.Errorf("remote name is required")
@@ -189,12 +292,23 @@ func compileInstall(opts map[string]any) (plugin.TaskSpec, error) {
 	if !strings.HasPrefix(target, "/") || strings.ContainsAny(target, "\n\r\x00;`$&|<>\"") {
 		return plugin.TaskSpec{}, fmt.Errorf("invalid mountTarget %q: must be a safe absolute path", target)
 	}
-	policy := str(opts, "policy", "systemd-mount")
-	mountOptions := str(opts, "mountOptions", "--vfs-cache-mode writes --dir-cache-time 5m")
-	mountUser := str(opts, "mountUser", "root")
+	policy := str(opts, "policy", globalSetting("defaultPolicy", DefaultMountPolicy))
+	mountOptions := str(opts, "mountOptions", globalSetting("defaultMountOptions", DefaultMountOptions))
+	mountUser := str(opts, "mountUser", globalSetting("defaultMountUser", DefaultMountUser))
 
 	if !validPolicy(policy) {
 		return plugin.TaskSpec{}, fmt.Errorf("invalid mount policy %q", policy)
+	}
+
+	scope, err := systemd.ParseScope(str(opts, "scope", "system"))
+	if err != nil {
+		return plugin.TaskSpec{}, err
+	}
+
+	// Non-systemd Linux fallback: if systemd is absent and a systemd-mount or
+	// systemd-automount policy was requested, degrade gracefully to fstab.
+	if isNonSystemdHost(h) && (policy == "systemd-mount" || policy == "systemd-automount") {
+		policy = "fstab"
 	}
 
 	// Every policy starts by ensuring the remote config section exists on the host.
@@ -205,9 +319,10 @@ func compileInstall(opts map[string]any) (plugin.TaskSpec, error) {
 			Name:   fmt.Sprintf("Ensure rclone config directory for %s", name),
 			Module: "ansible.builtin.file",
 			Params: map[string]any{
-				"path":  "/root/.config/rclone",
-				"state": "directory",
-				"mode":  "0700",
+				"path":   "/root/.config/rclone",
+				"state":  "directory",
+				"mode":   "0700",
+				"become": true,
 			},
 		},
 		{
@@ -220,17 +335,36 @@ func compileInstall(opts map[string]any) (plugin.TaskSpec, error) {
 				"marker": fmt.Sprintf("# {mark} ATC rclone remote: %s", name),
 				"block":  configContent,
 				"no_log": true,
+				"become": true,
 			},
 		},
 	}
 
 	switch policy {
 	case "systemd-mount":
-		steps = append(steps, serviceUnitSteps(name, target, mountOptions, mountUser, false)...)
+		unitSteps, err := serviceUnitSteps(name, target, mountOptions, mountUser, scope, false)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+		steps = append(steps, unitSteps...)
 	case "systemd-automount":
-		steps = append(steps, serviceUnitSteps(name, target, mountOptions, mountUser, true)...)
+		unitSteps, err := serviceUnitSteps(name, target, mountOptions, mountUser, scope, true)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+		steps = append(steps, unitSteps...)
 	case "fstab":
 		steps = append(steps,
+			plugin.TaskStep{
+				Name:   fmt.Sprintf("Create directory %s", target),
+				Module: "ansible.builtin.file",
+				Params: map[string]any{
+					"path":   target,
+					"state":  "directory",
+					"mode":   "0755",
+					"become": true,
+				},
+			},
 			plugin.TaskStep{
 				Name:   fmt.Sprintf("Mount rclone remote %s via fstab", name),
 				Module: "ansible.posix.mount",
@@ -240,11 +374,16 @@ func compileInstall(opts map[string]any) (plugin.TaskSpec, error) {
 					"fstype": "fuse.rclone",
 					"opts":   fmt.Sprintf("x-systemd.automount,_netdev,user,args2env,%s", strings.ReplaceAll(mountOptions, " ", ",")),
 					"state":  "mounted",
+					"become": true,
 				},
 			},
 		)
 	case "script":
-		steps = append(steps, scriptPolicySteps(name, target, mountOptions, mountUser)...)
+		scriptSteps, err := scriptPolicySteps(name, target, mountOptions, mountUser, scope)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+		steps = append(steps, scriptSteps...)
 	}
 
 	return plugin.TaskSpec{
@@ -256,96 +395,196 @@ func compileInstall(opts map[string]any) (plugin.TaskSpec, error) {
 	}, nil
 }
 
-// serviceUnitSteps compiles the systemd service (and, for automount, the
-// .mount/.automount pair) that keeps the rclone mount active.
-func serviceUnitSteps(name, target, mountOptions, mountUser string, automount bool) []plugin.TaskStep {
-	serviceName := fmt.Sprintf("rclone-%s", name)
+// systemdUnitParams builds the parameter map for `ansible.builtin.systemd_service`
+// respecting system vs user scope conventions from `backend-go/pkg/systemd`.
+func systemdUnitParams(scope systemd.Scope, extra map[string]any) map[string]any {
+	params := make(map[string]any, len(extra)+2)
+	for k, v := range extra {
+		params[k] = v
+	}
+	if scope == systemd.ScopeUser {
+		params["scope"] = string(systemd.ScopeUser)
+	} else {
+		params["become"] = true
+	}
+	return params
+}
+
+// serviceUnitSteps compiles the systemd unit(s), their `/etc/systemd/system/<unit>.d/atc-rclone.conf`
+// drop-in subfolder overrides, and `ansible.builtin.systemd_service` activation steps.
+func serviceUnitSteps(name, target, mountOptions, mountUser string, scope systemd.Scope, automount bool) ([]plugin.TaskStep, error) {
 	steps := []plugin.TaskStep{
 		{
 			Name:   fmt.Sprintf("Create directory %s", target),
 			Module: "ansible.builtin.file",
 			Params: map[string]any{
-				"path":  target,
-				"state": "directory",
-				"mode":  "0755",
-			},
-		},
-		{
-			Name:   fmt.Sprintf("Install %s.service", serviceName),
-			Module: "ansible.builtin.copy",
-			Params: map[string]any{
-				"dest":    fmt.Sprintf("/etc/systemd/system/%s.service", serviceName),
-				"content": serviceUnit(name, target, mountOptions, mountUser),
-				"mode":    "0644",
+				"path":   target,
+				"state":  "directory",
+				"mode":   "0755",
+				"become": true,
 			},
 		},
 	}
 
 	if automount {
+		mountUnitName, err := systemd.NormalizeUnitName(MountUnitName(target))
+		if err != nil {
+			return nil, err
+		}
+		automountUnitName, err := systemd.NormalizeUnitName(AutomountUnitName(target))
+		if err != nil {
+			return nil, err
+		}
+		dropInDir := DropInDir(mountUnitName)
+		dropInFile := DropInPath(mountUnitName, DefaultDropInFile)
+
 		steps = append(steps,
 			plugin.TaskStep{
-				Name:   fmt.Sprintf("Install %s.mount", serviceName),
+				Name:   fmt.Sprintf("Install %s", mountUnitName),
 				Module: "ansible.builtin.copy",
 				Params: map[string]any{
-					"dest":    fmt.Sprintf("/etc/systemd/system/%s.mount", serviceName),
+					"dest":    fmt.Sprintf("/etc/systemd/system/%s", mountUnitName),
 					"content": mountUnit(name, target, mountOptions),
+					"owner":   "root",
+					"group":   "root",
 					"mode":    "0644",
+					"become":  true,
 				},
 			},
 			plugin.TaskStep{
-				Name:   fmt.Sprintf("Install %s.automount", serviceName),
-				Module: "ansible.builtin.copy",
+				Name:   fmt.Sprintf("Ensure drop-in directory %s", dropInDir),
+				Module: "ansible.builtin.file",
 				Params: map[string]any{
-					"dest":    fmt.Sprintf("/etc/systemd/system/%s.automount", serviceName),
-					"content": automountUnit(name, target),
-					"mode":    "0644",
+					"path":   dropInDir,
+					"state":  "directory",
+					"owner":  "root",
+					"group":  "root",
+					"mode":   "0755",
+					"become": true,
 				},
 			},
+			plugin.TaskStep{
+				Name:   fmt.Sprintf("Write ATC drop-in %s", dropInFile),
+				Module: "ansible.builtin.copy",
+				Params: map[string]any{
+					"dest":    dropInFile,
+					"content": mountDropIn(name, target, mountOptions),
+					"owner":   "root",
+					"group":   "root",
+					"mode":    "0644",
+					"become":  true,
+				},
+			},
+			plugin.TaskStep{
+				Name:   fmt.Sprintf("Install %s", automountUnitName),
+				Module: "ansible.builtin.copy",
+				Params: map[string]any{
+					"dest":    fmt.Sprintf("/etc/systemd/system/%s", automountUnitName),
+					"content": automountUnit(name, target),
+					"owner":   "root",
+					"group":   "root",
+					"mode":    "0644",
+					"become":  true,
+				},
+			},
+			plugin.TaskStep{
+				Name:   "Reload systemd manager configuration",
+				Module: "ansible.builtin.systemd_service",
+				Params: systemdUnitParams(scope, map[string]any{
+					"daemon_reload": true,
+				}),
+			},
+			plugin.TaskStep{
+				Name:   fmt.Sprintf("Enable and start %s", automountUnitName),
+				Module: "ansible.builtin.systemd_service",
+				Params: systemdUnitParams(scope, map[string]any{
+					"name":    automountUnitName,
+					"enabled": true,
+					"state":   "started",
+				}),
+			},
 		)
+		return steps, nil
 	}
 
-	steps = append(steps, plugin.TaskStep{
-		Name:   "Reload systemd manager configuration",
-		Module: "ansible.builtin.systemd",
-		Params: map[string]any{
-			"daemon_reload": true,
+	svcUnitName, err := systemd.NormalizeUnitName(ServiceUnitName(name))
+	if err != nil {
+		return nil, err
+	}
+	dropInDir := DropInDir(svcUnitName)
+	dropInFile := DropInPath(svcUnitName, DefaultDropInFile)
+
+	steps = append(steps,
+		plugin.TaskStep{
+			Name:   fmt.Sprintf("Install %s", svcUnitName),
+			Module: "ansible.builtin.copy",
+			Params: map[string]any{
+				"dest":    fmt.Sprintf("/etc/systemd/system/%s", svcUnitName),
+				"content": serviceUnit(name, target, mountOptions, mountUser),
+				"owner":   "root",
+				"group":   "root",
+				"mode":    "0644",
+				"become":  true,
+			},
 		},
-	})
-
-	if automount {
-		// Starting the automount unit is what actually arms the on-access mount;
-		// systemd activates the sibling .mount on first access.
-		steps = append(steps, plugin.TaskStep{
-			Name:   fmt.Sprintf("Enable and start %s.automount", serviceName),
-			Module: "ansible.builtin.systemd",
+		plugin.TaskStep{
+			Name:   fmt.Sprintf("Ensure drop-in directory %s", dropInDir),
+			Module: "ansible.builtin.file",
 			Params: map[string]any{
-				"name":    fmt.Sprintf("%s.automount", serviceName),
+				"path":   dropInDir,
+				"state":  "directory",
+				"owner":  "root",
+				"group":  "root",
+				"mode":   "0755",
+				"become": true,
+			},
+		},
+		plugin.TaskStep{
+			Name:   fmt.Sprintf("Write ATC drop-in %s", dropInFile),
+			Module: "ansible.builtin.copy",
+			Params: map[string]any{
+				"dest":    dropInFile,
+				"content": serviceDropIn(name, target, mountOptions, mountUser),
+				"owner":   "root",
+				"group":   "root",
+				"mode":    "0644",
+				"become":  true,
+			},
+		},
+		plugin.TaskStep{
+			Name:   "Reload systemd manager configuration",
+			Module: "ansible.builtin.systemd_service",
+			Params: systemdUnitParams(scope, map[string]any{
+				"daemon_reload": true,
+			}),
+		},
+		plugin.TaskStep{
+			Name:   fmt.Sprintf("Enable and start %s", svcUnitName),
+			Module: "ansible.builtin.systemd_service",
+			Params: systemdUnitParams(scope, map[string]any{
+				"name":    svcUnitName,
 				"enabled": true,
 				"state":   "started",
-			},
-		})
-	} else {
-		steps = append(steps, plugin.TaskStep{
-			Name:   fmt.Sprintf("Enable and start %s.service", serviceName),
-			Module: "ansible.builtin.systemd",
-			Params: map[string]any{
-				"name":    fmt.Sprintf("%s.service", serviceName),
-				"enabled": true,
-				"state":   "started",
-			},
-		})
-	}
+			}),
+		},
+	)
 
-	return steps
+	return steps, nil
 }
 
-func scriptPolicySteps(name, target, mountOptions, mountUser string) []plugin.TaskStep {
-	serviceName := fmt.Sprintf("rclone-%s", name)
+func scriptPolicySteps(name, target, mountOptions, mountUser string, scope systemd.Scope) ([]plugin.TaskStep, error) {
+	svcUnitName, err := systemd.NormalizeUnitName(ServiceUnitName(name))
+	if err != nil {
+		return nil, err
+	}
+	dropInDir := DropInDir(svcUnitName)
+	dropInFile := DropInPath(svcUnitName, DefaultDropInFile)
+
 	return []plugin.TaskStep{
 		{
 			Name:   fmt.Sprintf("Create directory %s", target),
 			Module: "ansible.builtin.file",
-			Params: map[string]any{"path": target, "state": "directory", "mode": "0755"},
+			Params: map[string]any{"path": target, "state": "directory", "mode": "0755", "become": true},
 		},
 		{
 			Name:   fmt.Sprintf("Install rclone-mount-%s.sh", name),
@@ -353,36 +592,66 @@ func scriptPolicySteps(name, target, mountOptions, mountUser string) []plugin.Ta
 			Params: map[string]any{
 				"dest":    fmt.Sprintf("/usr/local/bin/rclone-mount-%s.sh", name),
 				"content": mountScript(name, target, mountOptions),
+				"owner":   "root",
+				"group":   "root",
 				"mode":    "0755",
+				"become":  true,
 			},
 		},
 		{
-			Name:   fmt.Sprintf("Install %s.service", serviceName),
+			Name:   fmt.Sprintf("Install %s", svcUnitName),
 			Module: "ansible.builtin.copy",
 			Params: map[string]any{
-				"dest":    fmt.Sprintf("/etc/systemd/system/%s.service", serviceName),
+				"dest":    fmt.Sprintf("/etc/systemd/system/%s", svcUnitName),
 				"content": scriptUnit(name),
+				"owner":   "root",
+				"group":   "root",
 				"mode":    "0644",
+				"become":  true,
+			},
+		},
+		{
+			Name:   fmt.Sprintf("Ensure drop-in directory %s", dropInDir),
+			Module: "ansible.builtin.file",
+			Params: map[string]any{
+				"path":   dropInDir,
+				"state":  "directory",
+				"owner":  "root",
+				"group":  "root",
+				"mode":   "0755",
+				"become": true,
+			},
+		},
+		{
+			Name:   fmt.Sprintf("Write ATC drop-in %s", dropInFile),
+			Module: "ansible.builtin.copy",
+			Params: map[string]any{
+				"dest":    dropInFile,
+				"content": serviceDropIn(name, target, mountOptions, mountUser),
+				"owner":   "root",
+				"group":   "root",
+				"mode":    "0644",
+				"become":  true,
 			},
 		},
 		{
 			Name:   "Reload systemd manager configuration",
-			Module: "ansible.builtin.systemd",
-			Params: map[string]any{"daemon_reload": true},
+			Module: "ansible.builtin.systemd_service",
+			Params: systemdUnitParams(scope, map[string]any{"daemon_reload": true}),
 		},
 		{
-			Name:   fmt.Sprintf("Enable and start %s.service", serviceName),
-			Module: "ansible.builtin.systemd",
-			Params: map[string]any{
-				"name":    fmt.Sprintf("%s.service", serviceName),
+			Name:   fmt.Sprintf("Enable and start %s", svcUnitName),
+			Module: "ansible.builtin.systemd_service",
+			Params: systemdUnitParams(scope, map[string]any{
+				"name":    svcUnitName,
 				"enabled": true,
 				"state":   "started",
-			},
+			}),
 		},
-	}
+	}, nil
 }
 
-func compileRemove(opts map[string]any) (plugin.TaskSpec, error) {
+func compileRemove(_ plugin.HostFacts, opts map[string]any) (plugin.TaskSpec, error) {
 	name := str(opts, "name", "")
 	if name == "" {
 		return plugin.TaskSpec{}, fmt.Errorf("remote name is required")
@@ -392,24 +661,46 @@ func compileRemove(opts map[string]any) (plugin.TaskSpec, error) {
 	}
 	target := str(opts, "mountTarget", "")
 	policy := str(opts, "policy", "systemd-mount")
-	serviceName := fmt.Sprintf("rclone-%s", name)
+	scope, err := systemd.ParseScope(str(opts, "scope", "system"))
+	if err != nil {
+		return plugin.TaskSpec{}, err
+	}
+
+	unitToStop := ServiceUnitName(name)
+	if policy == "systemd-automount" && target != "" {
+		unitToStop = AutomountUnitName(target)
+	}
+	normalizedUnit, err := systemd.NormalizeUnitName(unitToStop)
+	if err != nil {
+		return plugin.TaskSpec{}, err
+	}
 
 	steps := []plugin.TaskStep{
 		{
-			Name:   fmt.Sprintf("Stop %s units", name),
-			Module: "ansible.builtin.systemd",
-			Params: map[string]any{
-				"name":    serviceName + unitSuffix(policy),
+			Name:   fmt.Sprintf("Stop %s", normalizedUnit),
+			Module: "ansible.builtin.systemd_service",
+			Params: systemdUnitParams(scope, map[string]any{
+				"name":    normalizedUnit,
 				"state":   "stopped",
 				"enabled": false,
+			}),
+		},
+		{
+			Name:   fmt.Sprintf("Remove %s unit file", normalizedUnit),
+			Module: "ansible.builtin.file",
+			Params: map[string]any{
+				"path":   fmt.Sprintf("/etc/systemd/system/%s", normalizedUnit),
+				"state":  "absent",
+				"become": true,
 			},
 		},
 		{
-			Name:   fmt.Sprintf("Remove %s unit files", name),
+			Name:   fmt.Sprintf("Remove %s drop-in directory", normalizedUnit),
 			Module: "ansible.builtin.file",
 			Params: map[string]any{
-				"path":  fmt.Sprintf("/etc/systemd/system/%s.*", serviceName),
-				"state": "absent",
+				"path":   DropInDir(normalizedUnit),
+				"state":  "absent",
+				"become": true,
 			},
 		},
 		{
@@ -419,6 +710,7 @@ func compileRemove(opts map[string]any) (plugin.TaskSpec, error) {
 				"path":   "/root/.config/rclone/rclone.conf",
 				"marker": fmt.Sprintf("# {mark} ATC rclone remote: %s", name),
 				"state":  "absent",
+				"become": true,
 			},
 		},
 	}
@@ -428,31 +720,23 @@ func compileRemove(opts map[string]any) (plugin.TaskSpec, error) {
 			Name:   fmt.Sprintf("Unmount %s", target),
 			Module: "ansible.posix.mount",
 			Params: map[string]any{
-				"path":  target,
-				"state": "unmounted",
+				"path":   target,
+				"state":  "unmounted",
+				"become": true,
 			},
 		})
 	}
 
 	steps = append(steps, plugin.TaskStep{
 		Name:   "Reload systemd manager configuration",
-		Module: "ansible.builtin.systemd",
-		Params: map[string]any{"daemon_reload": true},
+		Module: "ansible.builtin.systemd_service",
+		Params: systemdUnitParams(scope, map[string]any{"daemon_reload": true}),
 	})
 
 	return plugin.TaskSpec{
 		Name:  fmt.Sprintf("Remove rclone remote %s", name),
 		Steps: steps,
 	}, nil
-}
-
-func unitSuffix(policy string) string {
-	switch policy {
-	case "systemd-automount":
-		return ".automount"
-	default:
-		return ".service"
-	}
 }
 
 func validPolicy(policy string) bool {

@@ -50,3 +50,14 @@ test('quick commands page keeps the existing settings editor and test id', () =>
   assert.ok(html.includes('Add Command'));
   assert.ok(html.includes('Reset to Defaults'));
 });
+
+test('rclone-remotes datacenter settings page renders guided setup and vault store info', () => {
+  const html = renderToString(
+    React.createElement(DatacenterSettingsView, { page: 'rclone-remotes' })
+  );
+  assert.ok(html.includes('data-setting-id="rclone-remotes"'));
+  assert.ok(html.includes('#/datacenter/settings/storage/rclone-remotes'));
+  assert.ok(html.includes('data-testid="datacenter-rclone-remotes-settings"'));
+  assert.ok(html.includes('data-testid="rclone-guided-setup-card"'));
+  assert.ok(html.includes('vault_variables'));
+});

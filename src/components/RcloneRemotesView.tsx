@@ -1,7 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import type { NodeItem, RcloneMountPolicy, RcloneMountRecord } from '../types/index.ts';
+import type {
+  GlobalSettingsPage,
+  NodeItem,
+  RcloneMountPolicy,
+  RcloneMountRecord,
+} from '../types/index.ts';
 import type { PluginViewProps } from '../plugins/views/index.tsx';
 import { previewMountArtifacts } from '../utils/rclonePolicies.ts';
+import { fetchGlobalSettingsPages } from '../utils/globalSettingsManager.ts';
+import { GlobalSettingsPanel } from './GlobalSettingsPanel.tsx';
 
 interface ProviderField {
   name: string;
@@ -29,10 +36,22 @@ interface RemoteView {
 }
 
 const POLICIES: Array<{ id: RcloneMountPolicy; label: string; hint: string }> = [
-  { id: 'systemd-mount', label: 'systemd mount', hint: 'rclone-<name>.service (Type=notify), enabled at boot' },
-  { id: 'systemd-automount', label: 'systemd automount', hint: 'rclone-<name>.mount + .automount pair, mounted on first access' },
+  {
+    id: 'systemd-mount',
+    label: 'systemd mount',
+    hint: 'rclone-<name>.service + .service.d/atc-rclone.conf drop-in (ansible.builtin.systemd_service)',
+  },
+  {
+    id: 'systemd-automount',
+    label: 'systemd automount',
+    hint: '<escaped-target>.mount + .mount.d/atc-rclone.conf + .automount pair, mounted on first access',
+  },
   { id: 'fstab', label: 'fstab', hint: '/etc/fstab entry with x-systemd.automount,_netdev' },
-  { id: 'script', label: 'service script', hint: '/usr/local/bin/rclone-mount-<name>.sh run by a systemd service' },
+  {
+    id: 'script',
+    label: 'service script',
+    hint: '/usr/local/bin/rclone-mount-<name>.sh run by rclone-<name>.service',
+  },
 ];
 
 const card = 'bg-[#171a2d] border border-[#26293c] rounded p-4';
@@ -42,11 +61,27 @@ const btnPrimary =
   'px-2.5 py-1 rounded bg-[#2f6fed] hover:bg-[#3b7bfa] text-white text-xs font-semibold border border-[#3b7bfa]/40 cursor-pointer disabled:opacity-50';
 const input = 'w-full bg-[#0f1220] border border-[#2a2e44] rounded px-2 py-1 text-xs text-[#dfe1fa]';
 
-export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
+export interface RcloneRemotesViewProps extends Partial<PluginViewProps> {
+  /**
+   * `client` (default when `node` is passed): per-client mount policy configuration
+   * (`systemd-mount` vs `systemd-automount` vs `fstab` vs `script`) plus remote
+   * installation to this node.
+   *
+   * `datacenter` (default when `node` is omitted): datacenter-wide rclone remote
+   * management (guided `rclone.conf` setup, Ansible Vault DB storage, global plugin
+   * settings defaults, and installing selected remotes to connected devices).
+   */
+  mode?: 'client' | 'datacenter';
+}
+
+export const RcloneRemotesView: React.FC<RcloneRemotesViewProps> = ({ node, mode }) => {
+  const effectiveMode: 'client' | 'datacenter' = mode ?? (node ? 'client' : 'datacenter');
+
   const [providers, setProviders] = useState<Provider[]>([]);
   const [remotes, setRemotes] = useState<RemoteView[]>([]);
   const [mounts, setMounts] = useState<RcloneMountRecord[]>([]);
   const [nodes, setNodes] = useState<NodeItem[]>([]);
+  const [globalSettingsPage, setGlobalSettingsPage] = useState<GlobalSettingsPage | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -82,6 +117,17 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
     } catch (err: any) {
       setNotice(`Error: ${err?.message || 'Failed to load rclone data'}`);
     }
+
+    if (effectiveMode === 'datacenter') {
+      try {
+        const pages = await fetchGlobalSettingsPages();
+        const rclonePage = pages.find(p => p.id === 'mount/rclone') || null;
+        setGlobalSettingsPage(rclonePage);
+      } catch {
+        /* global settings optional when daemon is offline */
+      }
+    }
+
     if (node?.id) {
       try {
         const mRes = await fetch(`/api/rclone/nodes/${encodeURIComponent(node.id)}/mounts`);
@@ -90,11 +136,17 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
         /* mounts are best-effort */
       }
     }
-  }, [node?.id]);
+  }, [node?.id, effectiveMode]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (node?.id) {
+      setInstallNodeId(node.id);
+    }
+  }, [node?.id]);
 
   // Seed default field values when the selected provider changes.
   useEffect(() => {
@@ -124,8 +176,8 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
       }
       setNotice(
         verifyOnSave
-          ? `Remote "${data.remote.name}" verified against the provider and stored.`
-          : `Remote "${data.remote.name}" stored.`
+          ? `Remote "${data.remote.name}" verified against the provider and stored in Ansible Vault.`
+          : `Remote "${data.remote.name}" stored in Ansible Vault.`
       );
       setRemoteName('');
       await refresh();
@@ -163,13 +215,15 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
 
   const installRemote = async () => {
     if (!installRemoteId) return;
+    const targetNodeId = effectiveMode === 'client' && node?.id ? node.id : installNodeId;
+    if (!targetNodeId) return;
     setBusy(true);
     setNotice(null);
     try {
       const res = await fetch(`/api/rclone/remotes/${encodeURIComponent(installRemoteId)}/install`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodeId: installNodeId, mountTarget, policy, mountOptions }),
+        body: JSON.stringify({ nodeId: targetNodeId, mountTarget, policy, mountOptions }),
       });
       const data = await res.json();
       if (!res.ok || !data.success) {
@@ -177,7 +231,7 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
       }
       setNotice(
         `Staged "${data.task?.title || 'install task'}" (${policy}) into the Ansible queue for ${
-          data.mount?.nodeId || installNodeId
+          data.mount?.nodeId || targetNodeId
         }.`
       );
       setInstallRemoteId(null);
@@ -216,18 +270,32 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
 
   const preview =
     installRemoteId && remotes.find(r => r.id === installRemoteId)
-      ? previewMountArtifacts(policy, remotes.find(r => r.id === installRemoteId)!.name, mountTarget || '/mnt/rclone/x', mountOptions)
+      ? previewMountArtifacts(
+          policy,
+          remotes.find(r => r.id === installRemoteId)!.name,
+          mountTarget || '/mnt/rclone/x',
+          mountOptions
+        )
       : [];
 
   return (
-    <div className="flex flex-col gap-3 font-mono">
+    <div
+      className="flex flex-col gap-3 font-mono"
+      data-testid={effectiveMode === 'datacenter' ? 'datacenter-rclone-remotes-settings' : 'client-rclone-mounts-view'}
+    >
       <div className={`${card} flex items-center justify-between`}>
         <div className="flex items-center gap-2">
           <span className="material-symbols-outlined text-[#b0c9ff] text-[22px]">cloud_queue</span>
           <div>
-            <h3 className="text-sm font-bold text-[#dfe1fa]">rclone Remotes</h3>
+            <h3 className="text-sm font-bold text-[#dfe1fa]">
+              {effectiveMode === 'datacenter'
+                ? 'Datacenter rclone Remotes & Vault Store'
+                : `rclone Mount Policies — ${node?.name || 'this client'}`}
+            </h3>
             <span className="text-[11px] text-[#8d909b]">
-              {remotes.length} remote(s) · {mounts.length} mount(s) on {node?.name || 'this client'}
+              {effectiveMode === 'datacenter'
+                ? `${remotes.length} remote(s) stored in ATC DB · Secrets encrypted in Ansible Vault (vault_variables)`
+                : `${mounts.length} mount(s) on ${node?.name || 'this client'} · ${remotes.length} datacenter remote(s) available`}
             </span>
           </div>
         </div>
@@ -248,9 +316,29 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
         </div>
       )}
 
-      {/* Guided setup */}
-      <div className={card}>
-        <span className="text-[10px] uppercase font-bold text-[#8d909b] block mb-2">Guided remote setup</span>
+      {/* Datacenter global module settings (contributed by mount/rclone SettingsPageProvider) */}
+      {effectiveMode === 'datacenter' && globalSettingsPage && (
+        <GlobalSettingsPanel
+          page={globalSettingsPage}
+          onSaved={updated => setGlobalSettingsPage(updated)}
+        />
+      )}
+
+      {/* Guided remote setup (datacenter-wide rclone.conf wizard) */}
+      <div className={card} data-testid="rclone-guided-setup-card">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-[10px] uppercase font-bold text-[#8d909b]">
+            Guided remote setup (datacenter rclone.conf)
+          </span>
+          {effectiveMode === 'client' && (
+            <a
+              href="#/datacenter/settings/storage/rclone-remotes"
+              className="text-[10px] text-[#79c0ff] hover:underline"
+            >
+              Open in Datacenter Settings →
+            </a>
+          )}
+        </div>
         <div className="grid grid-cols-1 gap-2">
           <label className="text-[11px] text-[#8d909b]">
             Provider
@@ -295,13 +383,17 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
           </button>
         </div>
         <p className="text-[10px] text-[#6f727d] mt-2">
-          Secrets are encrypted at rest in the ATC database. Only rclone's obscured config is pushed to devices.
+          Secrets are encrypted in ATC's Ansible Vault store (<code>vault_variables</code>) and masked as{' '}
+          <code>•••••••• (vault: rclone_&lt;remote&gt;_&lt;field&gt;)</code>. Every decryption is logged to the Vault
+          Audit trail.
         </p>
       </div>
 
       {/* Remote list */}
-      <div className={card}>
-        <span className="text-[10px] uppercase font-bold text-[#8d909b] block mb-2">Configured remotes</span>
+      <div className={card} data-testid="rclone-configured-remotes-card">
+        <span className="text-[10px] uppercase font-bold text-[#8d909b] block mb-2">
+          Configured datacenter remotes
+        </span>
         {remotes.length === 0 ? (
           <p className="text-xs text-[#6f727d]">No remotes yet. Create one above.</p>
         ) : (
@@ -310,7 +402,7 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
               <tr className="text-left text-[#8d909b]">
                 <th className="py-1">Name</th>
                 <th>Provider</th>
-                <th>Secrets</th>
+                <th>Vault Secrets</th>
                 <th className="text-right">Actions</th>
               </tr>
             </thead>
@@ -321,8 +413,8 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
                   <td className="text-[#b0c9ff]">{r.provider}</td>
                   <td className="text-[#8cd6cb]">
                     {Object.entries(r.fields)
-                      .filter(([, v]) => v === '••••••••')
-                      .map(([k]) => k)
+                      .filter(([, v]) => String(v).startsWith('••••••••'))
+                      .map(([k, v]) => `${k}: ${v}`)
                       .join(', ') || '—'}
                   </td>
                   <td className="text-right">
@@ -333,11 +425,12 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
                       className={btn}
                       onClick={() => {
                         setInstallRemoteId(r.id);
+                        if (node?.id) setInstallNodeId(node.id);
                         setMountTarget(`/mnt/rclone/${r.name}`);
                       }}
                       disabled={busy}
                     >
-                      Install
+                      {effectiveMode === 'client' && node ? `Install on ${node.name}` : 'Install to Device'}
                     </button>{' '}
                     <button className={btn} onClick={() => deleteRemote(r.id)} disabled={busy}>
                       Delete
@@ -352,14 +445,19 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
 
       {/* Install panel */}
       {installRemoteId && (
-        <div className={card}>
+        <div className={card} data-testid="rclone-install-panel">
           <span className="text-[10px] uppercase font-bold text-[#8d909b] block mb-2">
             Install to device — mount policy
           </span>
           <div className="grid grid-cols-2 gap-2">
             <label className="text-[11px] text-[#8d909b]">
               Target device
-              <select className={input} value={installNodeId} onChange={e => setInstallNodeId(e.target.value)}>
+              <select
+                className={input}
+                value={effectiveMode === 'client' && node?.id ? node.id : installNodeId}
+                onChange={e => setInstallNodeId(e.target.value)}
+                disabled={effectiveMode === 'client' && Boolean(node?.id)}
+              >
                 <option value="">Select a device…</option>
                 {nodes.map(n => (
                   <option key={n.id} value={n.id}>
@@ -391,7 +489,11 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
             Installs: {preview.join(', ') || '—'}
           </div>
           <div className="flex gap-2 mt-3">
-            <button className={btnPrimary} onClick={installRemote} disabled={busy || !installNodeId}>
+            <button
+              className={btnPrimary}
+              onClick={installRemote}
+              disabled={busy || !(effectiveMode === 'client' && node?.id ? node.id : installNodeId)}
+            >
               Stage install
             </button>
             <button className={btn} onClick={() => setInstallRemoteId(null)} disabled={busy}>
@@ -401,52 +503,60 @@ export const RcloneRemotesView: React.FC<PluginViewProps> = ({ node }) => {
         </div>
       )}
 
-      {/* Per-client mounts + policy */}
-      <div className={card}>
-        <span className="text-[10px] uppercase font-bold text-[#8d909b] block mb-2">
-          Mounts on {node?.name || 'this client'}
-        </span>
-        {mounts.length === 0 ? (
-          <p className="text-xs text-[#6f727d]">No remotes installed on this client.</p>
-        ) : (
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-left text-[#8d909b]">
-                <th className="py-1">Remote</th>
-                <th>Target</th>
-                <th>Status</th>
-                <th>Mount policy</th>
-              </tr>
-            </thead>
-            <tbody>
-              {mounts.map(m => (
-                <tr key={`${m.nodeId}-${m.remoteId}`} className="border-t border-[#26293c]">
-                  <td className="py-1 text-[#dfe1fa]">{m.remoteName}</td>
-                  <td className="text-[#b0c9ff]">{m.mountTarget}</td>
-                  <td className={m.status === 'failed' ? 'text-[#ffb4ab]' : 'text-[#8cd6cb]'}>
-                    {m.status}
-                    {m.error ? ` — ${m.error}` : ''}
-                  </td>
-                  <td>
-                    <select
-                      className={input}
-                      value={m.policy}
-                      onChange={e => changePolicy(m, e.target.value as RcloneMountPolicy)}
-                      disabled={busy}
-                    >
-                      {POLICIES.map(p => (
-                        <option key={p.id} value={p.id}>
-                          {p.label}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
+      {/* Per-client mounts + policy (shown on client node pages) */}
+      {(effectiveMode === 'client' || Boolean(node)) && (
+        <div className={card} data-testid="rclone-client-mounts-card">
+          <span className="text-[10px] uppercase font-bold text-[#8d909b] block mb-2">
+            Per-client mount policy on {node?.name || 'this client'}
+          </span>
+          {mounts.length === 0 ? (
+            <p className="text-xs text-[#6f727d]">
+              No remotes installed on this client. Select a remote above to install and configure its mount policy.
+            </p>
+          ) : (
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-[#8d909b]">
+                  <th className="py-1">Remote</th>
+                  <th>Target</th>
+                  <th>Status</th>
+                  <th>Mount policy (systemd-mount / systemd-automount / fstab / script)</th>
+                  <th>Artifacts</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+              </thead>
+              <tbody>
+                {mounts.map(m => (
+                  <tr key={`${m.nodeId}-${m.remoteId}`} className="border-t border-[#26293c]">
+                    <td className="py-1 text-[#dfe1fa]">{m.remoteName}</td>
+                    <td className="text-[#b0c9ff]">{m.mountTarget}</td>
+                    <td className={m.status === 'failed' ? 'text-[#ffb4ab]' : 'text-[#8cd6cb]'}>
+                      {m.status}
+                      {m.error ? ` — ${m.error}` : ''}
+                    </td>
+                    <td>
+                      <select
+                        className={input}
+                        value={m.policy}
+                        onChange={e => changePolicy(m, e.target.value as RcloneMountPolicy)}
+                        disabled={busy}
+                      >
+                        {POLICIES.map(p => (
+                          <option key={p.id} value={p.id}>
+                            {p.label}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="text-[10px] text-[#8d909b]">
+                      {previewMountArtifacts(m.policy, m.remoteName, m.mountTarget, mountOptions).join(', ')}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   );
 };

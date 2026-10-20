@@ -19,6 +19,7 @@ import {
 import type { AnsibleConfigSettings } from '../utils/ansibleConfigManager.ts';
 import { DatacenterVarsPage } from './DatacenterVarsPage.tsx';
 import { DatacenterPlaybooksPage } from './DatacenterPlaybooksPage.tsx';
+import { RcloneRemotesView } from './RcloneRemotesView.tsx';
 
 export interface DatacenterSettingsViewProps {
   page: DatacenterSettingPageId;
@@ -767,6 +768,13 @@ export const DatacenterSettingsView: React.FC<DatacenterSettingsViewProps> = ({ 
     return (
       <SettingsPageFrame page={meta.id}>
         <DatacenterVarsPage showHeader={false} />
+      </SettingsPageFrame>
+    );
+  }
+  if (meta.category === 'storage') {
+    return (
+      <SettingsPageFrame page={meta.id}>
+        <RcloneRemotesView mode="datacenter" />
       </SettingsPageFrame>
     );
   }

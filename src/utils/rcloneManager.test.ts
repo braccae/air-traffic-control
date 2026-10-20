@@ -12,14 +12,21 @@ import {
   sanitizeMountTarget,
   isValidMountPolicy,
   serializeRemoteConfig,
+  serializeRemoteConfigToVault,
   deserializeRemoteConfig,
+  deserializeRemoteConfigFromVault,
   maskRemoteConfig,
   remoteView,
+  buildRcloneVaultVarName,
   encryptSecret,
   decryptSecret,
   buildRcloneConfigSection,
   buildSystemdServiceUnit,
+  buildSystemdServiceDropIn,
   buildSystemdAutomountUnits,
+  buildSystemdMountUnitName,
+  buildSystemdAutomountUnitName,
+  buildSystemdDropInPath,
   buildFstabLine,
   buildMountScript,
   previewMountArtifacts,
@@ -72,7 +79,53 @@ test('mount policy validation', () => {
   assert.ok(!isValidMountPolicy('nfs'));
 });
 
-test('secret values are encrypted at rest and masked for display', () => {
+test('secret values are encrypted in Ansible Vault store and masked as •••••••• (vault: <var_name>)', async () => {
+  const prevPass = process.env.ANSIBLE_VAULT_PASSWORD;
+  process.env.ANSIBLE_VAULT_PASSWORD = 'rclone-vault-unit-pass';
+  const hostCache = createHostCacheStore(':memory:');
+  try {
+    const stored = await serializeRemoteConfigToVault(
+      'hetzner',
+      'sftp',
+      { host: 'h', user: 'u', pass: 'p@ss' },
+      hostCache
+    );
+    assert.ok(!stored.includes('p@ss'), 'plaintext secret must not be stored');
+    assert.ok(stored.includes('"host":"h"'), 'non-secret fields stay readable');
+    assert.ok(stored.includes('vault:rclone_hetzner_pass'), 'secret field references vault variable');
+
+    const varName = buildRcloneVaultVarName('hetzner', 'pass');
+    assert.equal(varName, 'rclone_hetzner_pass');
+    const vaultBlock = hostCache.getVaultVariableBlock(varName);
+    assert.ok(vaultBlock && vaultBlock.includes('$ANSIBLE_VAULT;1.1;AES256'));
+    assert.ok(!vaultBlock!.includes('p@ss'));
+
+    const masked = maskRemoteConfig(stored, 'hetzner');
+    assert.equal(masked.pass, '•••••••• (vault: rclone_hetzner_pass)');
+    assert.equal(masked.host, 'h');
+
+    const roundtrip = await deserializeRemoteConfigFromVault(stored, hostCache, {
+      auditStore: hostCache,
+      actor: 'tester',
+      host: 'edge-01',
+      action: 'unit-test-decrypt',
+    });
+    assert.deepEqual(roundtrip, { host: 'h', user: 'u', pass: 'p@ss' });
+
+    const auditEvents = hostCache.getVaultAuditEvents({ variableName: varName });
+    assert.equal(auditEvents.length, 1);
+    assert.equal(auditEvents[0].variableName, 'rclone_hetzner_pass');
+    assert.equal(auditEvents[0].actor, 'tester');
+    assert.equal(auditEvents[0].host, 'edge-01');
+    assert.equal(auditEvents[0].action, 'unit-test-decrypt');
+  } finally {
+    hostCache.close();
+    if (prevPass === undefined) delete process.env.ANSIBLE_VAULT_PASSWORD;
+    else process.env.ANSIBLE_VAULT_PASSWORD = prevPass;
+  }
+});
+
+test('legacy secret helper compatibility', () => {
   const blob = encryptSecret('super-secret', KEY);
   assert.ok(blob.startsWith('enc:v1:'));
   assert.ok(!blob.includes('super-secret'));
@@ -80,53 +133,68 @@ test('secret values are encrypted at rest and masked for display', () => {
   assert.throws(() => decryptSecret(blob, Buffer.alloc(32, 9)));
 
   const stored = serializeRemoteConfig('sftp', { host: 'h', user: 'u', pass: 'p@ss' }, KEY);
-  assert.ok(!stored.includes('p@ss'), 'plaintext secret must not be stored');
-  assert.ok(stored.includes('"host":"h"'), 'non-secret fields stay readable');
-
-  const masked = maskRemoteConfig(stored);
-  assert.equal(masked.pass, '••••••••');
+  const masked = maskRemoteConfig(stored, 'hetzner');
+  assert.equal(masked.pass, '•••••••• (vault: rclone_hetzner_pass)');
   assert.equal(masked.host, 'h');
 
   const roundtrip = deserializeRemoteConfig(stored, KEY);
   assert.deepEqual(roundtrip, { host: 'h', user: 'u', pass: 'p@ss' });
 });
 
-test('remoteView never leaks decrypted secrets', () => {
+test('remoteView never leaks decrypted secrets and uses vault mask format', () => {
   const record: RcloneRemoteRecord = {
     id: 'r1',
     name: 'hetzner',
     provider: 'sftp',
     type: 'sftp',
-    configJson: serializeRemoteConfig('sftp', { host: 'h', user: 'u', pass: 'topsecret' }, KEY),
+    configJson: JSON.stringify({ host: 'h', user: 'u', pass: 'vault:rclone_hetzner_pass' }),
     createdAt: 1,
     updatedAt: 2,
   };
   const view = remoteView(record);
-  assert.equal(view.fields.pass, '••••••••');
+  assert.equal(view.fields.pass, '•••••••• (vault: rclone_hetzner_pass)');
   assert.ok(!JSON.stringify(view).includes('topsecret'));
 });
 
-test('preview: each mount policy installs different artifacts', () => {
+test('preview: each mount policy installs different systemd units and drop-in artifacts', () => {
   const a = previewMountArtifacts('systemd-mount', 'hetzner', '/mnt/rclone/hetzner');
   const b = previewMountArtifacts('systemd-automount', 'hetzner', '/mnt/rclone/hetzner');
   const c = previewMountArtifacts('fstab', 'hetzner', '/mnt/rclone/hetzner');
   const d = previewMountArtifacts('script', 'hetzner', '/mnt/rclone/hetzner');
-  assert.deepEqual(a, ['/etc/systemd/system/rclone-hetzner.service']);
-  assert.ok(b.some(p => p.endsWith('.automount')));
+  assert.deepEqual(a, [
+    '/etc/systemd/system/rclone-hetzner.service',
+    '/etc/systemd/system/rclone-hetzner.service.d/atc-rclone.conf',
+  ]);
+  assert.deepEqual(b, [
+    '/etc/systemd/system/mnt-rclone-hetzner.mount',
+    '/etc/systemd/system/mnt-rclone-hetzner.mount.d/atc-rclone.conf',
+    '/etc/systemd/system/mnt-rclone-hetzner.automount',
+  ]);
+  assert.equal(buildSystemdMountUnitName('/mnt/rclone/hetzner'), 'mnt-rclone-hetzner.mount');
+  assert.equal(buildSystemdAutomountUnitName('/mnt/rclone/hetzner'), 'mnt-rclone-hetzner.automount');
+  assert.equal(
+    buildSystemdDropInPath('mnt-rclone-hetzner.mount'),
+    '/etc/systemd/system/mnt-rclone-hetzner.mount.d/atc-rclone.conf'
+  );
   assert.ok(c[0].includes('fuse.rclone'));
   assert.ok(d.some(p => p.endsWith('.sh')));
   assert.notDeepEqual(a, b);
   assert.notDeepEqual(b, d);
 });
 
-test('generated units/scripts never embed credentials', () => {
+test('generated units, drop-ins, and scripts never embed credentials', () => {
   const service = buildSystemdServiceUnit('hetzner', '/mnt/rclone/hetzner', '--vfs-cache-mode writes');
   assert.ok(service.includes('ExecStart=/usr/bin/rclone mount hetzner: /mnt/rclone/hetzner'));
   assert.ok(!/pass|secret|key/i.test(service.replace(/vfs-cache-mode|RestartSec|After|Wants|Description|ExecStop|Type|User/g, '')));
 
-  const { mountUnit, automountUnit } = buildSystemdAutomountUnits('hetzner', '/mnt/rclone/hetzner', '--vfs-cache-mode writes');
+  const dropIn = buildSystemdServiceDropIn('hetzner', '/mnt/rclone/hetzner', '--vfs-cache-mode writes');
+  assert.ok(dropIn.includes('[Service]'));
+  assert.ok(dropIn.includes('RCLONE_CONFIG=/root/.config/rclone/rclone.conf'));
+
+  const { mountUnit, automountUnit, mountDropIn } = buildSystemdAutomountUnits('hetzner', '/mnt/rclone/hetzner', '--vfs-cache-mode writes');
   assert.ok(mountUnit.includes('Type=fuse.rclone'));
   assert.ok(automountUnit.includes('[Automount]'));
+  assert.ok(mountDropIn.includes('[Mount]'));
 
   const fstab = buildFstabLine('hetzner', '/mnt/rclone/hetzner', '--vfs-cache-mode writes');
   assert.ok(fstab.includes('x-systemd.automount'));
@@ -170,7 +238,7 @@ test('verifyRemoteConfig reports honest failure for unreachable provider', { ski
 });
 
 // ---------------------------------------------------------------------------
-// Route-level integration: DB persistence + install/policy re-stage
+// Route-level integration: Vault store + Vault Audit log + install/policy re-stage
 // ---------------------------------------------------------------------------
 
 type Handler = (req: any, res: any) => any;
@@ -203,11 +271,11 @@ function makeRecorderApp() {
   return { app, call };
 }
 
-test('install route persists a mount and stages a policy-specific task', async () => {
-  const prevKey = process.env.ATC_RCLONE_KEY;
-  process.env.ATC_RCLONE_KEY = 'unit-test-key';
+test('install & verify routes persist secrets in vault_variables, log Vault Audit events, and stage policy-specific tasks', async () => {
+  const prevPass = process.env.ANSIBLE_VAULT_PASSWORD;
+  process.env.ANSIBLE_VAULT_PASSWORD = 'unit-test-vault-password';
+  const hostCache = createHostCacheStore(':memory:');
   try {
-    const hostCache = createHostCacheStore(':memory:');
     const node = {
       id: 'node-1',
       name: 'edge-01',
@@ -226,6 +294,7 @@ test('install route persists a mount and stages a policy-specific task', async (
     const { app, call } = makeRecorderApp();
     registerRcloneRoutes(app, {
       hostCache,
+      actor: 'cody@atc',
       getNode: id => (id === node.id ? node : null),
       compileInstall: async (_nodeId, options): Promise<RcloneCompiledTask> => {
         compiled.push({ policy: options.policy, options });
@@ -234,7 +303,7 @@ test('install route persists a mount and stages a policy-specific task', async (
             ? 'ansible.posix.mount'
             : options.policy === 'script'
             ? 'ansible.builtin.copy'
-            : 'ansible.builtin.systemd';
+            : 'ansible.builtin.systemd_service';
         return { name: `Install ${options.name}`, steps: [{ name: 'x', module, params: { a: 1 } }] };
       },
       stageTask: task => {
@@ -243,20 +312,34 @@ test('install route persists a mount and stages a policy-specific task', async (
       },
     });
 
-    // Create a remote (guided setup stores it in the DB).
+    // Create a remote (guided setup stores secret in vault_variables and reference in rclone_remotes).
     const created = await call('POST', '/api/rclone/remotes', {
       body: { name: 'hetzner', provider: 'sftp', fields: { host: 'h', user: 'u', pass: 'p' } },
     });
     assert.equal(created.statusCode, 200);
     assert.equal(created.payload.remote.name, 'hetzner');
-    assert.equal(created.payload.remote.fields.pass, '••••••••');
+    assert.equal(created.payload.remote.fields.pass, '•••••••• (vault: rclone_hetzner_pass)');
     const remoteId = created.payload.remote.id;
 
-    // The stored blob must not contain the plaintext secret.
+    // The stored configJson must reference vault_variables and never contain the plaintext secret.
     const stored = hostCache.getRcloneRemote(remoteId)!;
     assert.ok(!stored.configJson.includes('"p"'), 'plaintext secret must not be persisted');
+    assert.ok(stored.configJson.includes('vault:rclone_hetzner_pass'));
+    const vaultBlock = hostCache.getVaultVariableBlock('rclone_hetzner_pass');
+    assert.ok(vaultBlock && vaultBlock.includes('$ANSIBLE_VAULT;1.1;AES256'));
 
-    // Install with systemd-mount.
+    // Verify route decrypts the vault variable and records a Vault Audit event.
+    await call('POST', '/api/rclone/remotes/:id/verify', {
+      params: { id: remoteId },
+      body: { actor: 'auditor@atc' },
+    });
+    const verifyAudit = hostCache.getVaultAuditEvents({ variableName: 'rclone_hetzner_pass' });
+    assert.equal(verifyAudit.length, 1);
+    assert.equal(verifyAudit[0].actor, 'auditor@atc');
+    assert.equal(verifyAudit[0].host, 'coordinator');
+    assert.equal(verifyAudit[0].action, 'rclone.verifyRemote:hetzner');
+
+    // Install with systemd-mount -> decrypts secret, logs audit event for target host, stages task.
     const install = await call('POST', '/api/rclone/remotes/:id/install', {
       params: { id: remoteId },
       body: { nodeId: node.id, mountTarget: '/mnt/rclone/hetzner', policy: 'systemd-mount' },
@@ -264,19 +347,32 @@ test('install route persists a mount and stages a policy-specific task', async (
     assert.equal(install.statusCode, 200);
     assert.ok(install.payload.task, 'expected a staged queue task');
     assert.equal(install.payload.mount.policy, 'systemd-mount');
+    assert.equal(
+      install.payload.secretsMasked.pass,
+      '•••••••• (vault: rclone_hetzner_pass)'
+    );
     assert.equal(staged.length, 1);
-    assert.equal(staged[0].steps[0].module, 'ansible.builtin.systemd');
+    assert.equal(staged[0].steps[0].module, 'ansible.builtin.systemd_service');
     assert.equal(staged[0].targetNodeId, node.id);
     // Obscured config is passed to the compiler, never the plaintext password.
     assert.ok(compiled[0].options.configContent.includes('type = sftp'));
     assert.ok(!compiled[0].options.configContent.includes('pass = p\n'));
+
+    // Check Vault Audit log recorded the install decryption against edge-01.ts.net.
+    const installAudit = hostCache.getVaultAuditEvents({
+      variableName: 'rclone_hetzner_pass',
+      host: 'edge-01.ts.net',
+    });
+    assert.equal(installAudit.length, 1);
+    assert.equal(installAudit[0].actor, 'cody@atc');
+    assert.equal(installAudit[0].action, 'rclone.install:hetzner (systemd-mount)');
 
     // Mount persisted for the node.
     const mounts = hostCache.getRcloneMounts(node.id);
     assert.equal(mounts.length, 1);
     assert.equal(mounts[0].remoteId, remoteId);
 
-    // Change the mount policy → re-install stages a *different* task.
+    // Change the mount policy -> re-install stages a *different* task and logs another audit event.
     const repolicy = await call('POST', '/api/rclone/remotes/:id/install', {
       params: { id: remoteId },
       body: { nodeId: node.id, mountTarget: '/mnt/rclone/hetzner', policy: 'fstab' },
@@ -286,17 +382,19 @@ test('install route persists a mount and stages a policy-specific task', async (
     assert.equal(staged[1].steps[0].module, 'ansible.posix.mount');
     assert.notEqual(staged[0].steps[0].module, staged[1].steps[0].module);
     assert.equal(hostCache.getRcloneMount(node.id, remoteId)!.policy, 'fstab');
+    assert.equal(hostCache.getVaultAuditEvents({ variableName: 'rclone_hetzner_pass' }).length, 3);
   } finally {
-    if (prevKey === undefined) delete process.env.ATC_RCLONE_KEY;
-    else process.env.ATC_RCLONE_KEY = prevKey;
+    hostCache.close();
+    if (prevPass === undefined) delete process.env.ANSIBLE_VAULT_PASSWORD;
+    else process.env.ANSIBLE_VAULT_PASSWORD = prevPass;
   }
 });
 
 test('install route rejects missing node, bad policy, and unknown node', async () => {
-  const prevKey = process.env.ATC_RCLONE_KEY;
-  process.env.ATC_RCLONE_KEY = 'unit-test-key';
+  const prevPass = process.env.ANSIBLE_VAULT_PASSWORD;
+  process.env.ANSIBLE_VAULT_PASSWORD = 'unit-test-vault-password';
+  const hostCache = createHostCacheStore(':memory:');
   try {
-    const hostCache = createHostCacheStore(':memory:');
     const { app, call } = makeRecorderApp();
     registerRcloneRoutes(app, {
       hostCache,
@@ -325,7 +423,8 @@ test('install route rejects missing node, bad policy, and unknown node', async (
     });
     assert.equal(unknownNode.statusCode, 404);
   } finally {
-    if (prevKey === undefined) delete process.env.ATC_RCLONE_KEY;
-    else process.env.ATC_RCLONE_KEY = prevKey;
+    hostCache.close();
+    if (prevPass === undefined) delete process.env.ANSIBLE_VAULT_PASSWORD;
+    else process.env.ANSIBLE_VAULT_PASSWORD = prevPass;
   }
 });
