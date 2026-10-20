@@ -55,10 +55,13 @@ func New(opts Options) (*API, error) {
 // pattern than the plugin API's "/api/nodes/" subtree so the two coexist without
 // a ServeMux conflict.
 func (a *API) Register(mux *http.ServeMux) {
-	// NOTE: /api/telemetry and /api/nodes/:id/telemetry/glances are DEFERRED to
-	// Phase 2 — they depend on the telemetryCollector.ts multi-tier chain
-	// (glances REST/SSH/CLI + PCP + cockpit-bridge) and the client NodeItem.specs
-	// model. See PHASE1_REPORT.md.
+	// Phase 1b: the two telemetry routes and the podman container list that the
+	// Phase 1 port deferred. All read-only, all over the real SSH runner.
+	mux.HandleFunc("/api/telemetry", a.handleTelemetry)
+	mux.HandleFunc("/api/podman/containers", a.handlePodmanContainers)
+	mux.HandleFunc("/api/nodes/{id}/telemetry/glances", a.handleNodeGlances)
+	mux.HandleFunc("/api/nodes/{id}/containers", a.handleNodeContainers)
+
 	mux.HandleFunc("/api/system/logs", a.handleSystemLogs)
 	mux.HandleFunc("/api/podman/logs", a.handlePodmanLogs)
 	mux.HandleFunc("/api/tailscale/derp-map", a.handleDerpMap)
@@ -150,6 +153,36 @@ func splitMarker(s, marker string) (string, string) {
 		return s, ""
 	}
 	return s[:idx], s[idx+len(marker):]
+}
+
+// splitMarkerLine splits s on the first occurrence of marker that occupies a
+// whole line (only surrounding whitespace allowed), mirroring the Express
+// `echo "===MARKER==="` boundaries.
+//
+// splitMarker cannot be used for scripts whose output can contain the script
+// text itself (the podman probe starts with `ps -eo ... args`, which prints the
+// running shell's argv — markers included — when the SSH transport uses a wide
+// pty). Anchoring on the line keeps every section intact on both transports.
+func splitMarkerLine(s, marker string) (string, string) {
+	offset := 0
+	for {
+		idx := strings.Index(s[offset:], marker)
+		if idx < 0 {
+			return s, ""
+		}
+		start := offset + idx
+		end := start + len(marker)
+		lineStart := start == 0 || s[start-1] == '\n'
+		rest := s[end:]
+		lineTail := rest
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+			lineTail = rest[:nl]
+		}
+		if lineStart && strings.TrimSpace(lineTail) == "" {
+			return s[:start], rest
+		}
+		offset = end
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
