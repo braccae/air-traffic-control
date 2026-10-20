@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/plugins/firewall/firewalld"
 	_ "air-traffic-control/backend/plugins/all"
 )
 
@@ -22,17 +23,36 @@ func (m *mockRunner) RunCommand(ctx context.Context, cmd string) (string, error)
 	return "", nil
 }
 
+// readFixture mirrors real `firewall-cmd --list-all` output, including a
+// masquerade flag and a single port-forward entry.
+const readFixture = "running\n" +
+	"===ZONES===\n" +
+	"public\n  interfaces: eth0\n" +
+	"trusted\n  interfaces: tailscale0\n" +
+	"===LIST_ALL===\n" +
+	"public (active)\n" +
+	"  services: ssh dhcpv6-client\n" +
+	"  ports: 8080/tcp 9000/udp\n" +
+	"  masquerade: yes\n" +
+	"  forward-ports: port=8080:proto=tcp:toport=80:toaddr=192.168.1.10\n" +
+	"===NFT===\n" +
+	"table inet firewalld"
+
+func newMockRunner() *mockRunner {
+	return &mockRunner{
+		responses: map[string]string{
+			"firewall-cmd --state": readFixture,
+		},
+	}
+}
+
 func TestFirewalldPlugin_ProbeReadAndCompile(t *testing.T) {
 	p, ok := plugin.Get("firewall/firewalld")
 	if !ok {
 		t.Fatalf("firewall/firewalld not registered")
 	}
 
-	runner := &mockRunner{
-		responses: map[string]string{
-			"firewall-cmd --state": "running\n===ZONES===\npublic\n  interfaces: eth0\ntrusted\n  interfaces: tailscale0\n===LIST_ALL===\npublic (active)\n  services: ssh dhcpv6-client\n  ports: 8080/tcp 9000/udp\n===NFT===\ntable inet firewalld",
-		},
-	}
+	runner := newMockRunner()
 
 	det, err := p.Probe(context.Background(), runner, plugin.HostFacts{OSFamily: "linux"})
 	if err != nil {
@@ -67,5 +87,112 @@ func TestFirewalldPlugin_ProbeReadAndCompile(t *testing.T) {
 	}
 	if task.Steps[0].Params["port"] != "443/tcp" || task.Steps[0].Params["zone"] != "public" {
 		t.Errorf("unexpected task params: %+v", task.Steps[0].Params)
+	}
+}
+
+func TestFirewalldPlugin_ReadForwardPortsAndMasquerade(t *testing.T) {
+	p, ok := plugin.Get("firewall/firewalld")
+	if !ok {
+		t.Fatalf("firewall/firewalld not registered")
+	}
+
+	reader := p.(plugin.Reader)
+	data, err := reader.Read(context.Background(), newMockRunner(), plugin.HostFacts{OSFamily: "linux"})
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+
+	m := data.(map[string]any)
+
+	if m["masquerade"] != true {
+		t.Errorf("expected masquerade=true, got %v", m["masquerade"])
+	}
+
+	fps, ok := m["forwardPorts"].([]firewalld.ForwardPort)
+	if !ok {
+		t.Fatalf("forwardPorts is not []firewalld.ForwardPort: %T", m["forwardPorts"])
+	}
+	if len(fps) != 1 {
+		t.Fatalf("expected 1 forward port, got %d: %+v", len(fps), fps)
+	}
+	if fps[0].Port != "8080" {
+		t.Errorf("expected forward port '8080', got %q", fps[0].Port)
+	}
+	if fps[0].Proto != "tcp" {
+		t.Errorf("expected forward proto 'tcp', got %q", fps[0].Proto)
+	}
+	if fps[0].ToPort != "80" {
+		t.Errorf("expected forward toport '80', got %q", fps[0].ToPort)
+	}
+	if fps[0].ToAddr != "192.168.1.10" {
+		t.Errorf("expected forward toaddr '192.168.1.10', got %q", fps[0].ToAddr)
+	}
+}
+
+func TestFirewalldPlugin_CompileForwardPort(t *testing.T) {
+	p, ok := plugin.Get("firewall/firewalld")
+	if !ok {
+		t.Fatalf("firewall/firewalld not registered")
+	}
+	actor := p.(plugin.Actor)
+
+	task, err := actor.Compile(plugin.HostFacts{NodeID: "node1"}, "forward_port", map[string]any{
+		"port":   "8080",
+		"proto":  "tcp",
+		"toport": "80",
+		"toaddr": "192.168.1.10",
+		"zone":   "public",
+	})
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	if len(task.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d: %+v", len(task.Steps), task.Steps)
+	}
+	for i, step := range task.Steps {
+		if step.Module != "ansible.posix.firewalld" {
+			t.Errorf("step %d: unexpected module %q", i, step.Module)
+		}
+	}
+	if task.Steps[0].Params["masquerade"] != "true" {
+		t.Errorf("step 0 should enable masquerade, got params %+v", task.Steps[0].Params)
+	}
+	if task.Steps[0].Params["zone"] != "public" {
+		t.Errorf("step 0 zone mismatch: %+v", task.Steps[0].Params)
+	}
+
+	pf, ok := task.Steps[1].Params["port_forward"].([]map[string]any)
+	if !ok {
+		t.Fatalf("step 1 port_forward is not []map[string]any: %T", task.Steps[1].Params["port_forward"])
+	}
+	if len(pf) != 1 {
+		t.Fatalf("expected 1 port_forward element, got %d", len(pf))
+	}
+	if pf[0]["port"] != "8080" || pf[0]["proto"] != "tcp" || pf[0]["toport"] != "80" || pf[0]["toaddr"] != "192.168.1.10" {
+		t.Errorf("unexpected port_forward spec: %+v", pf[0])
+	}
+}
+
+func TestFirewalldPlugin_CompileForwardPortValidation(t *testing.T) {
+	p, ok := plugin.Get("firewall/firewalld")
+	if !ok {
+		t.Fatalf("firewall/firewalld not registered")
+	}
+	actor := p.(plugin.Actor)
+
+	cases := []struct {
+		name string
+		opts map[string]any
+	}{
+		{"invalid external port", map[string]any{"port": "70000", "proto": "tcp", "toport": "80"}},
+		{"invalid protocol", map[string]any{"port": "8080", "proto": "icmp", "toport": "80"}},
+		{"missing destination port", map[string]any{"port": "8080", "proto": "tcp"}},
+		{"invalid destination address", map[string]any{"port": "8080", "proto": "tcp", "toport": "80", "toaddr": "not-an-ip"}},
+		{"missing external port", map[string]any{"proto": "tcp", "toport": "80"}},
+	}
+	for _, tc := range cases {
+		if _, err := actor.Compile(plugin.HostFacts{NodeID: "node1"}, "forward_port", tc.opts); err == nil {
+			t.Errorf("%s: expected an error, got none", tc.name)
+		}
 	}
 }

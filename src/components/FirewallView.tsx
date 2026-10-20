@@ -1,9 +1,83 @@
 import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../types/index.ts';
 import { validatePortOrRange, validateCidrOrIp, validateInterfaceName } from '../utils/firewallRules.ts';
+import { compileDaemonPluginMutation, stageTaskInQueue } from '../utils/drivers/index.ts';
 
 interface FirewallViewProps {
   node: NodeItem;
+}
+
+export interface FirewallPortForward {
+  port: string;
+  proto: string;
+  toport: string;
+  toaddr?: string;
+}
+
+export interface FirewallPortForwardInput {
+  port: string;
+  proto: string;
+  toport: string;
+  toaddr?: string;
+  zone?: string;
+}
+
+/**
+ * Compiles a firewalld port-forward (NAT MASQ) mutation through the Go daemon and
+ * stages it into the Ansible mutation queue. Fails loudly and honestly when the
+ * daemon rejects the action or the queue is unreachable (Zero-Mock Policy).
+ */
+export async function stageFirewallPortForward(
+  node: NodeItem,
+  input: FirewallPortForwardInput
+): Promise<{ success: boolean; title?: string; error?: string }> {
+  const port = (input.port || '').trim();
+  const toport = (input.toport || '').trim();
+  const toaddr = (input.toaddr || '').trim();
+  const proto = ((input.proto || 'tcp').trim() || 'tcp').toLowerCase();
+  const zone = ((input.zone || 'public').trim() || 'public');
+
+  const portVal = validatePortOrRange(port);
+  if (!portVal.valid) {
+    return { success: false, error: portVal.error || 'Invalid external port or range' };
+  }
+
+  const toPortVal = validatePortOrRange(toport);
+  if (!toPortVal.valid) {
+    return { success: false, error: toPortVal.error || 'Invalid internal destination port' };
+  }
+
+  if (proto !== 'tcp' && proto !== 'udp') {
+    return { success: false, error: `Unsupported protocol '${proto}'. Allowed: tcp, udp` };
+  }
+
+  if (toaddr) {
+    const addrVal = validateCidrOrIp(toaddr);
+    if (!addrVal.valid) {
+      return { success: false, error: addrVal.error || 'Invalid destination address' };
+    }
+  }
+
+  try {
+    const task = await compileDaemonPluginMutation(node, 'firewall', 'firewalld', 'forward_port', {
+      port: portVal.normalized,
+      proto,
+      toport: toPortVal.normalized,
+      toaddr: toaddr || undefined,
+      zone,
+    });
+    const target = toaddr || 'same host';
+    task.title = `Forward ${zone} ${portVal.normalized}/${proto} to ${target}:${toPortVal.normalized} on ${
+      node.shortName || node.name
+    }`;
+    const res = await stageTaskInQueue(task);
+    if (res.success) {
+      return { success: true, title: task.title };
+    }
+    return { success: false, error: res.error || 'Failed to stage port forward' };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Error staging port forward' };
+  }
 }
 
 export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
@@ -36,6 +110,17 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Port forwarding (NAT MASQ) state
+  const [forwardPorts, setForwardPorts] = useState<FirewallPortForward[]>([]);
+  const [masquerade, setMasquerade] = useState<boolean>(false);
+  const [fwdPort, setFwdPort] = useState('');
+  const [fwdProto, setFwdProto] = useState('tcp');
+  const [fwdToPort, setFwdToPort] = useState('');
+  const [fwdToAddr, setFwdToAddr] = useState('');
+  const [fwdZone, setFwdZone] = useState('public');
+  const [stagingForward, setStagingForward] = useState(false);
+  const [fwdError, setFwdError] = useState<string | null>(null);
+
   const fetchFirewall = (refresh = false) => {
     setLoading(true);
     fetch(`/api/nodes/${encodeURIComponent(node.id)}/firewall${refresh ? '?refresh=true' : ''}`)
@@ -52,8 +137,23 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
       .finally(() => setLoading(false));
   };
 
+  const fetchForwardPorts = () => {
+    fetch(`/api/nodes/${encodeURIComponent(node.id)}/plugins/firewall/firewalld`)
+      .then(res => res.json())
+      .then(data => {
+        setForwardPorts(Array.isArray(data?.forwardPorts) ? data.forwardPorts : []);
+        if (typeof data?.masquerade === 'boolean') setMasquerade(data.masquerade);
+      })
+      .catch(() => {});
+  };
+
+  const refreshAll = (refresh = false) => {
+    fetchFirewall(refresh);
+    fetchForwardPorts();
+  };
+
   useEffect(() => {
-    fetchFirewall(false);
+    refreshAll(false);
   }, [node.id, node.shortName]);
 
   const handlePreset = (preset: {
@@ -122,7 +222,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
         throw new Error(data.error || 'Failed to add firewall rule');
       }
 
-      fetchFirewall(true);
+      refreshAll(true);
       setNewPort('');
       setNewSource('');
       setNewComment('');
@@ -131,6 +231,33 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
       setErrorMessage(err?.message || 'Error adding firewall rule');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleStageForward = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFwdError(null);
+    setStagingForward(true);
+    try {
+      const res = await stageFirewallPortForward(node, {
+        port: fwdPort,
+        proto: fwdProto,
+        toport: fwdToPort,
+        toaddr: fwdToAddr,
+        zone: fwdZone,
+      });
+      if (!res.success) {
+        setFwdError(res.error || 'Failed to stage port forward');
+        return;
+      }
+      setFwdPort('');
+      setFwdToPort('');
+      setFwdToAddr('');
+      fetchForwardPorts();
+    } catch (err: any) {
+      setFwdError(err?.message || 'Error staging port forward');
+    } finally {
+      setStagingForward(false);
     }
   };
 
@@ -144,7 +271,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
         method: 'DELETE',
       });
       if (res.ok) {
-        fetchFirewall(true);
+        refreshAll(true);
       }
     } catch {
       // error
@@ -171,7 +298,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
           </span>
           <button
             type="button"
-            onClick={() => fetchFirewall(true)}
+            onClick={() => refreshAll(true)}
             disabled={loading}
             className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded transition-colors border border-[#434750]/40 font-mono text-xs cursor-pointer disabled:opacity-50"
           >
@@ -473,6 +600,142 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
             ))}
           </tbody>
         </table>
+      </div>
+
+      {/* Port Forwarding (NAT MASQ) */}
+      <div className="mt-4 pt-3 border-t border-[#26293c] font-mono text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[#d9b9ff] text-[18px]">alt_route</span>
+            <h4 className="font-sans text-[13px] text-[#dfe1fa] font-bold">Port Forwarding (NAT MASQ)</h4>
+            <span
+              className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                masquerade
+                  ? 'bg-[#8cd6cb]/15 text-[#8cd6cb] border-[#8cd6cb]/30'
+                  : 'bg-[#26293c] text-[#8d909b] border-[#434750]/40'
+              }`}
+            >
+              MASQUERADE: {masquerade ? 'ENABLED' : 'DISABLED'}
+            </span>
+          </div>
+          <p className="text-[10px] text-[#8d909b]">
+            Forward an external port to an internal host &amp; port; staged as a declarative firewalld task.
+          </p>
+        </div>
+
+        {fwdError && (
+          <div className="mt-2 p-2 bg-[#93000a]/20 border border-[#ffb4ab]/50 rounded text-[#ffb4ab] text-[11px] flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-[16px]">error</span>
+            <span>{fwdError}</span>
+          </div>
+        )}
+
+        <form onSubmit={handleStageForward} className="mt-2.5 grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-2 items-end">
+          <div>
+            <label className="block text-[10px] text-[#8d909b] mb-0.5">EXTERNAL PORT</label>
+            <input
+              type="text"
+              required
+              value={fwdPort}
+              onChange={e => setFwdPort(e.target.value)}
+              placeholder="e.g. 8080"
+              className="w-full bg-[#171a2d] border border-[#26293c] rounded px-2 py-1 text-[#dfe1fa]"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[10px] text-[#8d909b] mb-0.5">PROTOCOL</label>
+            <select
+              value={fwdProto}
+              onChange={e => setFwdProto(e.target.value)}
+              className="w-full bg-[#171a2d] border border-[#26293c] rounded px-2 py-1 text-[#dfe1fa]"
+            >
+              <option value="tcp">TCP</option>
+              <option value="udp">UDP</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[10px] text-[#8d909b] mb-0.5">INTERNAL HOST / IP</label>
+            <input
+              type="text"
+              value={fwdToAddr}
+              onChange={e => setFwdToAddr(e.target.value)}
+              placeholder="blank = same host, or 192.168.1.10"
+              className="w-full bg-[#171a2d] border border-[#26293c] rounded px-2 py-1 text-[#dfe1fa]"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[10px] text-[#8d909b] mb-0.5">INTERNAL PORT</label>
+            <input
+              type="text"
+              required
+              value={fwdToPort}
+              onChange={e => setFwdToPort(e.target.value)}
+              placeholder="e.g. 80"
+              className="w-full bg-[#171a2d] border border-[#26293c] rounded px-2 py-1 text-[#dfe1fa]"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[10px] text-[#8d909b] mb-0.5">ZONE</label>
+            <select
+              value={fwdZone}
+              onChange={e => setFwdZone(e.target.value)}
+              className="w-full bg-[#171a2d] border border-[#26293c] rounded px-2 py-1 text-[#dfe1fa]"
+            >
+              <option value="public">public (default)</option>
+              <option value="internal">internal</option>
+              <option value="trusted">trusted</option>
+              <option value="dmz">dmz</option>
+              <option value="external">external</option>
+            </select>
+          </div>
+
+          <div className="flex justify-end lg:col-span-1">
+            <button
+              type="submit"
+              disabled={stagingForward}
+              title="Stage firewalld port-forward task into Ansible Mutation Queue"
+              className="w-full flex items-center justify-center gap-1.5 bg-[#d9b9ff] hover:bg-[#e9d4ff] text-[#2a0a54] font-bold px-3 py-1 rounded transition-colors shadow-sm cursor-pointer disabled:opacity-50"
+            >
+              <span className="material-symbols-outlined text-[15px]">alt_route</span>
+              <span>{stagingForward ? 'Staging...' : 'Stage Port Forward'}</span>
+            </button>
+          </div>
+        </form>
+
+        <div className="overflow-x-auto mt-2.5">
+          <table className="w-full text-left">
+            <thead className="bg-[#0a0d1f] text-[#8d909b] text-[10px] uppercase">
+              <tr className="h-7">
+                <th className="px-3">External</th>
+                <th className="px-3">Proto</th>
+                <th className="px-3">Internal Host</th>
+                <th className="px-3">Internal Port</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#26293c]/60">
+              {forwardPorts.length === 0 ? (
+                <tr className="h-9">
+                  <td className="px-3 text-[#8d909b]" colSpan={4}>
+                    No port forwards configured in the active zone.
+                  </td>
+                </tr>
+              ) : (
+                forwardPorts.map((fp, i) => (
+                  <tr key={`${fp.port}-${fp.proto}-${fp.toport}-${i}`} className="h-9 hover:bg-[#26293c]/40 transition-colors">
+                    <td className="px-3 font-semibold text-[#dfe1fa]">{fp.port}</td>
+                    <td className="px-3 uppercase text-[#d9b9ff]">{fp.proto}</td>
+                    <td className="px-3 text-[#8d909b]">{fp.toaddr || 'same host'}</td>
+                    <td className="px-3 font-semibold text-[#dfe1fa]">{fp.toport}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   );
