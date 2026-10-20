@@ -27,7 +27,7 @@ func (p *Plugin) Meta() plugin.Meta {
 		Kind:        plugin.KindElevation,
 		Name:        "none",
 		Label:       "none (direct execution)",
-		Icon:        "user-check",
+		Icon:        "person_check",
 		Description: "Direct command execution for root user or unprivileged tasks",
 		Order:       40,
 	}

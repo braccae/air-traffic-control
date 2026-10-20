@@ -27,7 +27,7 @@ func (p *Plugin) Meta() plugin.Meta {
 		Kind:        plugin.KindPackage,
 		Name:        "apk",
 		Label:       "APK (Alpine)",
-		Icon:        "box",
+		Icon:        "package_2",
 		Description: "Alpine Linux package manager",
 		Order:       50,
 	}

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../types/index.ts';
+import { resolvePluginIcon } from '../utils/pluginIcons.ts';
 
 export interface NodeModuleItem {
   id: string;
@@ -365,7 +366,7 @@ export const HostModulesView: React.FC<HostModulesViewProps> = ({
                                   : 'text-[#6d7182]'
                               }`}
                             >
-                              {mod.icon || 'extension'}
+                              {resolvePluginIcon(mod.icon)}
                             </span>
                             <div className="min-w-0">
                               <h4 className="text-xs font-bold text-[#dfe1fa] truncate">

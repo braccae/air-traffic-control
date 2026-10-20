@@ -27,7 +27,7 @@ func (p *Plugin) Meta() plugin.Meta {
 		Kind:        plugin.KindElevation,
 		Name:        "doas",
 		Label:       "doas (OpenBSD/Alpine)",
-		Icon:        "shield-alert",
+		Icon:        "admin_panel_settings",
 		Description: "Lightweight OpenBSD and Alpine Linux privilege escalation",
 		Order:       30,
 	}

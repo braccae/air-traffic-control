@@ -27,7 +27,7 @@ func (p *Plugin) Meta() plugin.Meta {
 		Kind:        plugin.KindElevation,
 		Name:        "run0",
 		Label:       "run0 (systemd polkit)",
-		Icon:        "shield-check",
+		Icon:        "verified_user",
 		Description: "Modern systemd transient polkit session (preferred elevation)",
 		Order:       10,
 	}

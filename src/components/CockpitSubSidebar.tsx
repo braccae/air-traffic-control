@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../types/index.ts';
+import { resolvePluginIcon } from '../utils/pluginIcons.ts';
 
 export interface NodePluginItem {
   id: string;
@@ -205,7 +206,7 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
                     >
                       <span className="flex items-center gap-1.5 truncate pr-1">
                         <span className="material-symbols-outlined text-[13px] text-[#8d909b] shrink-0">
-                          {p.icon || 'extension'}
+                          {resolvePluginIcon(p.icon)}
                         </span>
                         <span className="truncate">{p.label || p.name}</span>
                       </span>

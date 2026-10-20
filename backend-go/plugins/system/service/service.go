@@ -43,7 +43,7 @@ func (p *Plugin) Meta() plugin.Meta {
 		Kind:        plugin.KindSystem,
 		Name:        "service",
 		Label:       "System Services & Power",
-		Icon:        "activity",
+		Icon:        "settings_suggest",
 		Description: "System service lifecycle (systemd / OpenRC) and node power/reboot control",
 		Order:       10,
 	}

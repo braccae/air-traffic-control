@@ -27,7 +27,7 @@ func (p *Plugin) Meta() plugin.Meta {
 		Kind:        plugin.KindPackage,
 		Name:        "dnf",
 		Label:       "DNF / RPM",
-		Icon:        "box",
+		Icon:        "package_2",
 		Description: "Fedora, AlmaLinux, RHEL, and CentOS package manager",
 		Order:       30,
 	}

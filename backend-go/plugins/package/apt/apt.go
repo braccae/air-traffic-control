@@ -27,7 +27,7 @@ func (p *Plugin) Meta() plugin.Meta {
 		Kind:        plugin.KindPackage,
 		Name:        "apt",
 		Label:       "APT / Dpkg",
-		Icon:        "box",
+		Icon:        "package_2",
 		Description: "Debian, Ubuntu, and Raspbian package manager",
 		Order:       40,
 	}

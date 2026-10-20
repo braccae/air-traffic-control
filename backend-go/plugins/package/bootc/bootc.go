@@ -27,7 +27,7 @@ func (p *Plugin) Meta() plugin.Meta {
 		Kind:        plugin.KindPackage,
 		Name:        "bootc",
 		Label:       "bootc (Bootable Containers)",
-		Icon:        "container",
+		Icon:        "deployed_code",
 		Description: "Transactional container-based operating system updater",
 		Order:       10,
 	}

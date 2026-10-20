@@ -28,7 +28,7 @@ func (p *Plugin) Meta() plugin.Meta {
 		Kind:        plugin.KindConnection,
 		Name:        "local",
 		Label:       "Local / Loopback",
-		Icon:        "server",
+		Icon:        "dns",
 		Description: "Direct controller local execution via exec.CommandContext",
 		Order:       1,
 	}
