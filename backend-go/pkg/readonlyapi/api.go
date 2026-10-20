@@ -75,6 +75,12 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/nodes/{id}/vms", a.handleVMs)
 	mux.HandleFunc("/api/nodes/{id}/firewall", a.handleFirewall)
 	mux.HandleFunc("/api/nodes/{id}/users", a.handleUsers)
+
+	// systemd: unit list, per-unit property state, and per-unit journal, all
+	// read from systemd's own machine-readable interfaces.
+	mux.HandleFunc("/api/nodes/{id}/systemd/units", a.handleSystemdUnits)
+	mux.HandleFunc("/api/nodes/{id}/systemd/unit", a.handleSystemdUnit)
+	mux.HandleFunc("/api/nodes/{id}/systemd/journal", a.handleSystemdJournal)
 }
 
 // nodeRecord is the subset of a host row this package needs for findNode parity.

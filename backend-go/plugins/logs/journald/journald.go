@@ -3,13 +3,29 @@ package journald
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/systemd"
 )
 
 func init() {
 	_ = plugin.Register(New())
+}
+
+var (
+	// reJournalUnit matches a unit filter with or without its type suffix.
+	reJournalUnit = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:_.@-]*$`)
+	// reJournalPriority matches a syslog priority name or numeric level.
+	reJournalPriority = regexp.MustCompile(`^[0-7]$|^(emerg|emergency|alert|crit|critical|err|error|warn|warning|notice|info|debug)$`)
+	// reJournalLines matches a plain positive line count.
+	reJournalLines = regexp.MustCompile(`^[0-9]{1,5}$`)
+)
+
+// shellQuote single-quotes a value for the SSH command string.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Plugin implements systemd journald log retrieval and inspection.
@@ -73,24 +89,46 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	unit := ""
 	priority := ""
 	linesCount := "100"
+	scope := ""
 	if h.Overrides != nil {
 		if u, ok := h.Overrides["unit"]; ok && u != "" {
-			unit = u
+			unit = strings.TrimSpace(u)
 		}
 		if pr, ok := h.Overrides["priority"]; ok && pr != "" {
-			priority = pr
+			priority = strings.ToLower(strings.TrimSpace(pr))
 		}
 		if l, ok := h.Overrides["lines"]; ok && l != "" {
-			linesCount = l
+			linesCount = strings.TrimSpace(l)
+		}
+		if s, ok := h.Overrides["scope"]; ok {
+			parsed, err := systemd.ParseScope(s)
+			if err != nil {
+				return nil, err
+			}
+			if parsed == systemd.ScopeUser {
+				scope = " --user"
+			}
 		}
 	}
 
-	cmd := fmt.Sprintf("journalctl -n %s --no-pager", linesCount)
+	// Filter values are interpolated into the SSH command string, so they are
+	// validated against allow-lists rather than trusted verbatim.
+	if unit != "" && !reJournalUnit.MatchString(unit) {
+		return nil, fmt.Errorf("invalid journal unit filter %q", unit)
+	}
+	if priority != "" && !reJournalPriority.MatchString(priority) {
+		return nil, fmt.Errorf("invalid journal priority %q", priority)
+	}
+	if !reJournalLines.MatchString(linesCount) {
+		return nil, fmt.Errorf("invalid journal line count %q", linesCount)
+	}
+
+	cmd := fmt.Sprintf("journalctl%s -n %s --no-pager", scope, linesCount)
 	if unit != "" {
-		cmd += fmt.Sprintf(" -u %s", unit)
+		cmd += " -u " + shellQuote(unit)
 	}
 	if priority != "" {
-		cmd += fmt.Sprintf(" -p %s", priority)
+		cmd += " -p " + priority
 	}
 
 	out, err := r.RunCommand(ctx, cmd)

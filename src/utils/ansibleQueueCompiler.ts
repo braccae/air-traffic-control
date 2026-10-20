@@ -44,7 +44,8 @@ export function resolveNodeConnection(node: NodeItem): {
 }
 
 /**
- * Compiles a system service mutation into a QueuedAnsibleTask using ansible.builtin.systemd.
+ * Compiles a system service mutation into a QueuedAnsibleTask using
+ * ansible.builtin.systemd_service (the maintained name for the systemd module).
  */
 export function compileServiceTask(
   node: NodeItem,
@@ -57,7 +58,7 @@ export function compileServiceTask(
 
   const step: AnsibleTaskStep = {
     name: `${actionTitle} ${serviceName} service`,
-    module: 'ansible.builtin.systemd',
+    module: 'ansible.builtin.systemd_service',
     parameters: {
       name: serviceName,
       state: action,
@@ -73,7 +74,7 @@ export function compileServiceTask(
     targetSshUser: sshUser,
     targetSshPort: sshPort,
     category: 'system',
-    primaryModule: 'ansible.builtin.systemd',
+    primaryModule: 'ansible.builtin.systemd_service',
     steps: [step],
     become: true,
     becomeMethod,
