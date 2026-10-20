@@ -255,11 +255,47 @@ func (p *Plugin) Actions() []plugin.ActionSpec {
 				{Name: "dns", Type: "string", Required: false, Description: "DNS nameserver"},
 			},
 		},
+		{
+			Name:        "toggle_interface",
+			Label:       "Toggle Interface State",
+			Description: "Set network interface up or down",
+			Options: []plugin.OptionSchema{
+				{Name: "name", Type: "string", Required: true, Description: "Interface device name (e.g. eth0)"},
+				{Name: "state", Type: "select", Enum: []string{"up", "down"}, Default: "up", Description: "Interface state"},
+			},
+		},
 	}
 }
 
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
 	norm := strings.ToLower(action)
+	if norm == "toggle_interface" || norm == "toggle" {
+		ifaceName, _ := opts["name"].(string)
+		if ifaceName == "" {
+			ifaceName, _ = opts["interface"].(string)
+		}
+		if ifaceName == "" {
+			return plugin.TaskSpec{}, fmt.Errorf("interface name is required")
+		}
+		state, _ := opts["state"].(string)
+		if strings.ToLower(state) != "down" {
+			state = "up"
+		}
+		return plugin.TaskSpec{
+			Name: fmt.Sprintf("Set network interface %s %s", ifaceName, state),
+			Steps: []plugin.TaskStep{
+				{
+					Name:   fmt.Sprintf("Set interface %s %s", ifaceName, state),
+					Module: "ansible.builtin.command",
+					Params: map[string]any{
+						"cmd":    fmt.Sprintf("ip link set %s %s", ifaceName, state),
+						"become": true,
+					},
+				},
+			},
+		}, nil
+	}
+
 	if norm != "connect_interface" && norm != "interface" {
 		return plugin.TaskSpec{}, fmt.Errorf("unsupported interfaces action: %s", action)
 	}
