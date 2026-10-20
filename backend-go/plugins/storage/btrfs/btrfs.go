@@ -63,7 +63,7 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 	}
 
 	fsOut, err := r.RunCommand(ctx, "btrfs filesystem show 2>/dev/null || true")
-	if err == nil && strings.Contains(fsOut, "Label:") {
+	if err == nil && (strings.Contains(fsOut, "Label:") || strings.Contains(fsOut, "uuid:")) {
 		return plugin.Detection{
 			Detected: true,
 			Status:   "ONLINE",
@@ -72,9 +72,9 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 	}
 
 	return plugin.Detection{
-		Detected: true,
-		Status:   "ONLINE",
-		Details:  "btrfs installed",
+		Detected: false,
+		Status:   "NO_FILESYSTEMS",
+		Details:  "btrfs installed, but no active filesystems found",
 	}, nil
 }
 

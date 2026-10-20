@@ -184,8 +184,14 @@ export function isRebootRequired(
   rawStatus?: string
 ): boolean {
   if (isImmutablePackageManager(manager)) {
-    // rpm-ostree and bootc always stage new deployments that require reboot to activate
-    return updates.length > 0 || (rawStatus ? rawStatus.toLowerCase().includes('staged') : false);
+    // rpm-ostree and bootc require reboot if an update is available or an actual non-null deployment is staged
+    if (updates.length > 0) return true;
+    if (!rawStatus) return false;
+    const lower = rawStatus.toLowerCase();
+    if (lower.includes('staged: null') || lower.includes('"staged": null')) {
+      return false;
+    }
+    return lower.includes('staged') && !lower.includes('staged: null');
   }
   return updates.some(u => isKernelOrSystemUpdate(u.name));
 }
@@ -544,8 +550,7 @@ function parseBootcCheckUpdates(raw: string): PackageUpdate[] {
     }
     if (
       trimmed.startsWith('AvailableUpdate:') ||
-      trimmed.startsWith('Update available:') ||
-      trimmed.startsWith('staged:')
+      trimmed.startsWith('Update available:')
     ) {
       const match = trimmed.match(/\(([^)]+)\)/);
       if (match) {
@@ -553,6 +558,15 @@ function parseBootcCheckUpdates(raw: string): PackageUpdate[] {
       }
       const parts = trimmed.split(/:\s+/);
       if (parts.length > 1) {
+        availableImage = parts[1].split(' ')[0];
+      }
+    } else if (trimmed.startsWith('staged:') && !trimmed.includes('null')) {
+      const match = trimmed.match(/\(([^)]+)\)/);
+      if (match) {
+        availableVersion = match[1];
+      }
+      const parts = trimmed.split(/:\s+/);
+      if (parts.length > 1 && parts[1].trim() !== 'null') {
         availableImage = parts[1].split(' ')[0];
       }
     }

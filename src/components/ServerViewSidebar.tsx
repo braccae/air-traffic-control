@@ -9,8 +9,6 @@ import {
   filterNodesBySearchQuery,
   resolveNodeIcon,
   formatNodeTypeBadge,
-  formatNodeIpBadge,
-  getDatacenterNavSections,
   getDatacenterSettingCategories,
   formatDatacenterRoute,
   calculateClusterHealthScore,
@@ -117,7 +115,6 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   const datacenterName = selectedNode?.datacenter || 'leo-banjo.ts.net';
   const onlineCount = nodes.filter(n => n.status === 'online').length;
   const health = calculateClusterHealthScore(nodes);
-  const datacenterSections = getDatacenterNavSections(4, 0);
   const datacenterSettingCategories = getDatacenterSettingCategories();
 
   const inventoryTree = buildInventoryTree(visibleNodes, chunks, folders, datacenterName);
@@ -128,7 +125,6 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   const renderNodeItem = (node: NodeItem) => {
     const isSelected = node.id === selectedNodeId;
     const badgeInfo = formatNodeTypeBadge(node);
-    const ipBadge = formatNodeIpBadge(node);
 
     return (
       <div
@@ -164,16 +160,6 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
           <span className="truncate flex-1 font-semibold">{node.name}</span>
         </button>
 
-        {/* Monospaced Tailscale IP badge */}
-        {ipBadge && (
-          <span
-            className="font-mono text-[9px] text-[#8d909b] truncate max-w-[68px] shrink-0"
-            title={`IP: ${ipBadge}`}
-          >
-            {ipBadge}
-          </span>
-        )}
-
         {/* Platform tier pill (only if distinct virtualization / platform tier) */}
         {badgeInfo && (
           <span
@@ -203,27 +189,6 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
       >
         {/* Sidebar Header */}
         <div className="p-2 bg-[#0a0d1f] flex flex-col gap-1.5 border-b border-[#26293c]">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5 text-[#dfe1fa] font-mono text-xs">
-              <span className="material-symbols-outlined text-[16px] text-[#b0c9ff]">view_list</span>
-              <span className="font-bold">Tailscale Server View</span>
-            </div>
-            {viewMode === 'nodes' && (
-              <button
-                type="button"
-                aria-label="Filter server view"
-                onClick={() => setFilterOpen(prev => !prev)}
-                className={`transition-colors p-0.5 cursor-pointer rounded ${
-                  filterOpen || filterText
-                    ? 'text-[#b0c9ff] bg-[#26293c]'
-                    : 'text-[#8d909b] hover:text-[#dfe1fa]'
-                }`}
-              >
-                <span className="material-symbols-outlined text-[16px]">filter_list</span>
-              </button>
-            )}
-          </div>
-
           {/* Primary View Switcher: Nodes vs Datacenter */}
           <div className="grid grid-cols-2 gap-1 p-1 bg-[#121528] rounded border border-[#26293c]">
             <button
@@ -251,85 +216,35 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
               <span>Datacenter</span>
             </button>
           </div>
-
-          {viewMode === 'nodes' && filterOpen && (
-            <div className="flex items-center gap-1 bg-[#171a2d] px-2 py-1 rounded border border-[#313447]">
-              <span className="material-symbols-outlined text-[13px] text-[#8d909b]">search</span>
-              <input
-                type="text"
-                value={filterText}
-                onChange={e => setFilterText(e.target.value)}
-                placeholder="Filter host, IP, OS, tag..."
-                className="w-full bg-transparent text-[#dfe1fa] font-mono text-[11px] outline-none"
-              />
-              {filterText && (
-                <button
-                  type="button"
-                  onClick={() => setFilterText('')}
-                  className="text-[#8d909b] hover:text-[#dfe1fa] text-[11px] cursor-pointer"
-                >
-                  ×
-                </button>
-              )}
-            </div>
-          )}
         </div>
 
         {/* Navigation Body */}
         {viewMode === 'datacenter' ? (
           <nav className="flex-1 overflow-y-auto overflow-x-hidden p-2 font-mono text-xs space-y-2">
-            {/* Datacenter Root / Tailnet Summary */}
-            <div className="p-2 bg-[#121528] rounded border border-[#26293c] flex items-center justify-between">
-              <div className="flex items-center gap-1.5 min-w-0">
-                <span className="material-symbols-outlined text-[16px] text-[#8cd6cb]">cloud_queue</span>
-                <div className="flex flex-col min-w-0">
-                  <span className="font-bold text-[#dfe1fa] truncate text-xs">{datacenterName}</span>
-                  <span className="text-[10px] text-[#8d909b]">{onlineCount}/{nodes.length} nodes online</span>
-                </div>
-              </div>
-              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${health.statusColor} bg-[#1f2238] border border-current/20`}>
-                {health.score}%
+            {/* Datacenter Overview Quick Button */}
+            <button
+              type="button"
+              onClick={() => {
+                onSelectDatacenterSection?.('overview');
+                onSelectDatacenterSetting?.(null as unknown as DatacenterSettingPageId);
+              }}
+              title={formatDatacenterRoute({ kind: 'section', section: 'overview' })}
+              className={`w-full flex items-center gap-2 px-2.5 py-2 rounded transition-all text-left cursor-pointer ${
+                !selectedDatacenterSetting && selectedDatacenterSection === 'overview'
+                  ? 'bg-[#21263d] text-[#8cd6cb] font-bold border-l-2 border-[#8cd6cb] shadow-[inset_0_0_12px_rgba(140,214,203,0.08)]'
+                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+              }`}
+            >
+              <span className="material-symbols-outlined text-[16px] shrink-0 text-[#8cd6cb]">
+                dashboard
               </span>
-            </div>
-
-            {/* Category 1: Cluster operations */}
-            <div className="space-y-1" data-testid="datacenter-nav-category-cluster">
-              <div className="px-1 text-[10px] font-bold uppercase tracking-wider text-[#8d909b] flex items-center gap-1">
-                <span className="material-symbols-outlined text-[13px] text-[#8cd6cb]">hub</span>
-                <span>Cluster</span>
+              <div className="flex-1 min-w-0">
+                <div className="truncate text-xs font-semibold">Datacenter Overview</div>
+                <div className="text-[10px] text-[#8d909b] truncate">Mesh, health & quick actions</div>
               </div>
-              {datacenterSections.map(sec => {
-                const isActive = !selectedDatacenterSetting && selectedDatacenterSection === sec.id;
-                return (
-                  <button
-                    key={sec.id}
-                    type="button"
-                    onClick={() => onSelectDatacenterSection?.(sec.id)}
-                    title={formatDatacenterRoute({ kind: 'section', section: sec.id })}
-                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded transition-all text-left cursor-pointer ${
-                      isActive
-                        ? 'bg-[#21263d] text-[#8cd6cb] font-bold border-l-2 border-[#8cd6cb] shadow-[inset_0_0_12px_rgba(140,214,203,0.08)]'
-                        : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
-                    }`}
-                  >
-                    <span className="material-symbols-outlined text-[16px] shrink-0 text-[#8cd6cb]">
-                      {sec.icon}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div className="truncate text-xs font-semibold">{sec.title}</div>
-                      <div className="text-[10px] text-[#8d909b] truncate">{sec.description}</div>
-                    </div>
-                    {sec.badge && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#26293c] text-[#8cd6cb] font-mono border border-[#8cd6cb]/30 shrink-0">
-                        {sec.badge}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
+            </button>
 
-            {/* Category 2: Settings — one page per individual setting (deep-linkable) */}
+            {/* Category: Settings — one page per individual setting (deep-linkable) */}
             <div className="space-y-1.5 pt-2 border-t border-[#26293c]/60" data-testid="datacenter-nav-category-settings">
               <div className="px-1 text-[10px] font-bold uppercase tracking-wider text-[#8d909b] flex items-center gap-1">
                 <span className="material-symbols-outlined text-[13px] text-[#b0c9ff]">settings</span>
@@ -408,10 +323,47 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
             {/* Top Inventory Title */}
             <div className="px-2 pt-1 pb-0.5 text-[10px] font-bold uppercase tracking-wider text-[#8d909b] flex items-center justify-between">
               <span>Inventory</span>
-              <span className="text-[10px] text-[#c3c6d2] font-normal">
-                {visibleNodes.length} {visibleNodes.length === 1 ? 'host' : 'hosts'}
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-[#c3c6d2] font-normal">
+                  {visibleNodes.length} {visibleNodes.length === 1 ? 'host' : 'hosts'}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Filter server view"
+                  onClick={() => setFilterOpen(prev => !prev)}
+                  className={`transition-colors p-0.5 cursor-pointer rounded ${
+                    filterOpen || filterText
+                      ? 'text-[#b0c9ff] bg-[#26293c]'
+                      : 'text-[#8d909b] hover:text-[#dfe1fa]'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[15px]">filter_list</span>
+                </button>
+              </div>
             </div>
+
+            {filterOpen && (
+              <div className="mx-1 mb-1 flex items-center gap-1 bg-[#171a2d] px-2 py-1 rounded border border-[#313447]">
+                <span className="material-symbols-outlined text-[13px] text-[#8d909b]">search</span>
+                <input
+                  type="text"
+                  autoFocus
+                  value={filterText}
+                  onChange={e => setFilterText(e.target.value)}
+                  placeholder="Filter host, IP, OS, tag..."
+                  className="w-full bg-transparent text-[#dfe1fa] font-mono text-[11px] outline-none"
+                />
+                {filterText && (
+                  <button
+                    type="button"
+                    onClick={() => setFilterText('')}
+                    className="text-[#8d909b] hover:text-[#dfe1fa] text-[11px] cursor-pointer"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* SECTION 1: Tailscale */}
             <div className="space-y-0.5">
@@ -425,7 +377,9 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                   {tailnetCollapsed ? 'arrow_right' : 'arrow_drop_down'}
                 </span>
                 <span className="material-symbols-outlined text-[14px] text-[#b0c9ff]">cloud_queue</span>
-                <span className="font-bold text-[#dfe1fa] truncate">{inventoryTree.tailscale.shortName}</span>
+                <span className="font-bold text-[#dfe1fa] truncate">
+                  {inventoryTree.tailscale.shortName?.replace(/\.ts\.net$/i, '') || inventoryTree.tailscale.shortName}
+                </span>
                 <span className="ml-auto text-[#8cd6cb] text-[10px] font-bold">
                   ({tsOnlineCount}/{tsTotalCount} up)
                 </span>
@@ -628,28 +582,11 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
         )}
 
         {/* Footer */}
-        {viewMode === 'datacenter' ? (
-          <div className="p-2 bg-[#0a0d1f] flex items-center justify-between text-[#c3c6d2] font-mono text-xs border-t border-[#26293c]">
-            <span className="flex items-center gap-1">
-              <span className="material-symbols-outlined text-[14px] text-[#8cd6cb]">cloud_done</span>
-              <span className="truncate max-w-[130px]">{datacenterName}</span>
-            </span>
-            <span className="text-[#8cd6cb]">
-              Quorum: {onlineCount}/{nodes.length} online
-            </span>
-          </div>
-        ) : (
+        {viewMode === 'datacenter' ? null : (
           <div className="p-2 bg-[#0a0d1f] flex items-center justify-between text-[#c3c6d2] font-mono text-xs border-t border-[#26293c]">
             <span className="flex items-center gap-1">
               <span className="material-symbols-outlined text-[14px] text-[#8cd6cb]">network_ping</span>
               <span>RTT: {selectedNode?.rttMs || '1.8ms'}</span>
-            </span>
-            <span
-              className="flex items-center gap-1 text-[#8cd6cb]"
-              title={`SSH Session: ${selectedNode?.sshUser || 'core'}@${selectedNode?.tailscaleHost || selectedNode?.ip}`}
-            >
-              <span className="material-symbols-outlined text-[13px]">vpn_key</span>
-              <span className="truncate max-w-[110px]">{selectedNode?.shortName || 'host'}</span>
             </span>
           </div>
         )}
