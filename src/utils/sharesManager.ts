@@ -29,6 +29,46 @@ export interface HostUserItem {
 }
 
 /**
+ * Which protocol a shares tab is scoped to.
+ * - 'smb' — only Samba/SMB shares and SMB settings
+ * - 'nfs' — only NFS exports and NFS settings
+ * - 'all' — combined view
+ */
+export type ShareScope = 'smb' | 'nfs' | 'all';
+
+/** A single detected share row as rendered in the shares table. */
+export interface ShareRow {
+  id: string;
+  name: string;
+  protocol: string;
+  path: string;
+  permissions: string;
+  clientsCount: number;
+  status: string;
+}
+
+/**
+ * Classifies a share's protocol label as 'nfs' or 'smb'.
+ * Samba labels ('Samba / SMB', 'Cockpit ZFS (Samba)', 'Samba Registry') all map to 'smb';
+ * only labels containing 'nfs' map to 'nfs'.
+ */
+export function shareScopeOf(protocol: string): 'smb' | 'nfs' {
+  return (protocol || '').toLowerCase().includes('nfs') ? 'nfs' : 'smb';
+}
+
+/**
+ * Filters share rows down to a single protocol scope.
+ * 'all' returns the input unchanged so combined views keep every share.
+ */
+export function filterSharesByScope<T extends { protocol: string }>(
+  shares: T[],
+  scope: ShareScope
+): T[] {
+  if (scope === 'all') return shares;
+  return shares.filter(share => shareScopeOf(share.protocol) === scope);
+}
+
+/**
  * Escapes single quotes for safe shell command interpolation.
  */
 export function escapeShellSingleQuote(str: string): string {

@@ -289,9 +289,11 @@ const ZfsViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
   <ZfsManagementView node={node} />
 );
 
-const NetworkSharesViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
-  <NetworkSharesView node={node} />
-);
+const NetworkSharesViewAdapter: React.FC<PluginViewProps> = ({ node, pluginId }) => {
+  const scope: 'smb' | 'nfs' | 'all' =
+    pluginId === 'share/smb' ? 'smb' : pluginId === 'share/nfs' ? 'nfs' : 'all';
+  return <NetworkSharesView node={node} scope={scope} />;
+};
 
 const SystemLogsViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
   <SystemLogsView node={node} />

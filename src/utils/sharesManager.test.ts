@@ -15,6 +15,8 @@ import {
   buildUserCreateCommand,
   buildUserPasswdCommand,
   buildSmbPasswdCommand,
+  shareScopeOf,
+  filterSharesByScope,
 } from './sharesManager.ts';
 
 test('escapeShellSingleQuote escapes single quotes correctly', () => {
@@ -222,4 +224,40 @@ test('buildUserCreateCommand, buildUserPasswdCommand and buildSmbPasswdCommand g
   const smbPasswdCmd = buildSmbPasswdCommand('jellyfin_user', "smb'pass$$");
   assert.match(smbPasswdCmd, /sudo smbpasswd -s -a 'jellyfin_user'/);
   assert.match(smbPasswdCmd, /'smb'\\''pass\$\$'/);
+});
+
+test('shareScopeOf classifies Samba labels as smb and NFS labels as nfs', () => {
+  assert.equal(shareScopeOf('Samba / SMB'), 'smb');
+  assert.equal(shareScopeOf('Cockpit ZFS (Samba)'), 'smb');
+  assert.equal(shareScopeOf('Samba Registry'), 'smb');
+  assert.equal(shareScopeOf('NFS Export'), 'nfs');
+  assert.equal(shareScopeOf('nfs export'), 'nfs');
+  // Empty / unknown labels default to smb (never silently treated as NFS)
+  assert.equal(shareScopeOf(''), 'smb');
+});
+
+test('filterSharesByScope returns only rows matching the requested protocol', () => {
+  const rows = [
+    { id: 'smb-media', name: 'media', protocol: 'Samba / SMB', path: '/tank/media', permissions: 'Read/Write', clientsCount: 0, status: 'Active (smbd)' },
+    { id: 'smb-zfs', name: 'archive', protocol: 'Cockpit ZFS (Samba)', path: '/tank/archive', permissions: 'Read-only', clientsCount: 0, status: 'Exported' },
+    { id: 'nfs-data', name: 'data', protocol: 'NFS Export', path: '/srv/data', permissions: 'Read/Write', clientsCount: 1, status: 'Active (nfs-server)' },
+    { id: 'nfs-backup', name: 'backup', protocol: 'NFS Export', path: '/srv/backup', permissions: 'Read-only', clientsCount: 1, status: 'Exported' },
+  ];
+
+  const smbOnly = filterSharesByScope(rows, 'smb');
+  assert.deepEqual(smbOnly.map(r => r.id), ['smb-media', 'smb-zfs']);
+  assert.ok(smbOnly.every(r => !r.protocol.toLowerCase().includes('nfs')));
+
+  const nfsOnly = filterSharesByScope(rows, 'nfs');
+  assert.deepEqual(nfsOnly.map(r => r.id), ['nfs-data', 'nfs-backup']);
+  assert.ok(nfsOnly.every(r => r.protocol.toLowerCase().includes('nfs')));
+
+  // 'all' returns the input untouched (same contents, same order)
+  assert.deepEqual(filterSharesByScope(rows, 'all'), rows);
+});
+
+test('filterSharesByScope on an empty list stays empty for every scope', () => {
+  assert.deepEqual(filterSharesByScope([], 'smb'), []);
+  assert.deepEqual(filterSharesByScope([], 'nfs'), []);
+  assert.deepEqual(filterSharesByScope([], 'all'), []);
 });
