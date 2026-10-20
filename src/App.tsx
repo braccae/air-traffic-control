@@ -1341,6 +1341,8 @@ export default function App() {
               datacenterName={selectedNode?.datacenter || 'leo-banjo.ts.net'}
               nodes={nodesList}
               tasks={tasks}
+              queue={queue}
+              isQueueRunning={isQueueRunning}
               activeSection={datacenterSection}
               onSelectNode={handleSelectNode}
               onOpenPlaybookModal={playbookName => {

@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import type { NodeItem, GlobalTaskItem } from '../types/index.ts';
+import type { NodeItem, GlobalTaskItem, QueuedAnsibleTask } from '../types/index.ts';
+import { DatacenterSummaryView } from './DatacenterSummaryView.tsx';
 import {
   groupNodesByDynamicCluster,
   resolveNodeIcon,
   formatNodeTypeBadge,
   formatNodeIpBadge,
-  calculateClusterHealthScore,
   type DatacenterSection,
 } from '../utils/navigationViewModel.ts';
 import {
@@ -25,6 +25,9 @@ export interface DatacenterGlobalViewProps {
   datacenterName?: string;
   nodes: NodeItem[];
   tasks: GlobalTaskItem[];
+  /** Live Ansible mutation queue, fed from the coordinator websocket. */
+  queue?: QueuedAnsibleTask[];
+  isQueueRunning?: boolean;
   activeSection?: DatacenterSection;
   onSelectNode: (node: NodeItem) => void;
   onOpenPlaybookModal: (playbookName?: string) => void;
@@ -88,6 +91,8 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
   datacenterName = 'leo-banjo.ts.net',
   nodes,
   tasks,
+  queue = [],
+  isQueueRunning = false,
   activeSection,
   onSelectNode,
   onOpenPlaybookModal,
@@ -177,7 +182,6 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
     }
   };
 
-  const health = calculateClusterHealthScore(nodes);
   const clusterGroups = groupNodesByDynamicCluster(nodes);
 
   // Sync quick commands reactively across windows / storage events
@@ -384,11 +388,6 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
     });
   }, [nodes]);
 
-  const pveCount = nodes.filter(n => n.group === 'tag:pve' || n.badge === 'PVE').length;
-  const vmCount = nodes.filter(n => n.group === 'tag:vm' || n.badge === 'VM').length;
-  const lxcCount = nodes.filter(n => n.nodeType === 'lxc' || n.badge === 'LXC').length;
-  const hostCount = nodes.filter(n => n.group === 'tag:host' || n.nodeType === 'linux').length;
-
   const filteredClusters = filterQuery.trim()
     ? clusterGroups
         .map(cg => ({
@@ -413,6 +412,7 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
 
   return (
     <div className="flex flex-col gap-4 w-full">
+<<<<<<< HEAD
       {/* Datacenter Header */}
       <div
         id="datacenter-overview"
@@ -581,6 +581,27 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
           </button>
         </div>
       </div>
+=======
+      {/* Summary / overview: quick actions, recent console tasks, live storage probes */}
+      <DatacenterSummaryView
+        datacenterName={datacenterName}
+        nodes={nodes}
+        tasks={tasks}
+        queue={queue}
+        isQueueRunning={isQueueRunning}
+        onSelectNode={onSelectNode}
+        onOpenPlaybookModal={onOpenPlaybookModal}
+        onOpenPlaybookEditor={onOpenPlaybookEditor}
+        onOpenGroupVars={onOpenGroupVars}
+        onOpenConsole={onToggleTasksDrawer}
+        onOpenSection={section => {
+          const el =
+            document.getElementById(`datacenter-${section}`) ||
+            document.getElementById(`datacenter-${section.replace('_', '-')}`);
+          el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }}
+      />
+>>>>>>> wt/t_a49a3587
 
       {/* Section 2: Global Playbooks Library */}
       <div
