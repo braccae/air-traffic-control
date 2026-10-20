@@ -2,12 +2,18 @@ import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../types/index.ts';
 import { ShareEditorModal } from './modals/ShareEditorModal.tsx';
 import { UserManagerModal } from './modals/UserManagerModal.tsx';
+import { filterSharesByScope, type ShareScope } from '../utils/sharesManager.ts';
 
 interface NetworkSharesViewProps {
   node: NodeItem;
+  /**
+   * Restricts the view to a single protocol. 'smb' shows only Samba shares and
+   * SMB settings; 'nfs' shows only NFS exports; 'all' (default) is the combined view.
+   */
+  scope?: ShareScope;
 }
 
-export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) => {
+export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node, scope = 'all' }) => {
   const [loading, setLoading] = useState(false);
   const [shares, setShares] = useState<Array<{
     id: string;
@@ -124,12 +130,20 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
           }
         }
 
-        if (detectedShares.length > 0) {
-          setShares(detectedShares);
+        const scopedShares = filterSharesByScope(detectedShares, scope);
+
+        if (scopedShares.length > 0) {
+          setShares(scopedShares);
           setNotice('');
         } else {
           setShares([]);
-          setNotice(`Host ${node.shortName} has no exported NFS or user-defined Samba shares configured.`);
+          setNotice(
+            scope === 'smb'
+              ? `Host ${node.shortName} has no user-defined Samba shares configured.`
+              : scope === 'nfs'
+              ? `Host ${node.shortName} has no exported NFS shares configured.`
+              : `Host ${node.shortName} has no exported NFS or user-defined Samba shares configured.`
+          );
         }
       })
       .catch(() => {
@@ -166,10 +180,18 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
           <span className="material-symbols-outlined text-[#ffd97d] text-[22px]">share</span>
           <div>
             <h3 className="font-sans text-sm text-[#dfe1fa] font-bold">
-              Network File Shares: NFS &amp; Samba ({node.shortName})
+              {scope === 'smb'
+                ? `Samba / SMB Shares (${node.shortName})`
+                : scope === 'nfs'
+                ? `NFS Exports (${node.shortName})`
+                : `Network File Shares: NFS & Samba (${node.shortName})`}
             </h3>
             <p className="font-mono text-[11px] text-[#8d909b]">
-              Real-time exported shares, Cockpit file-sharing mounts, and smbd services
+              {scope === 'smb'
+                ? 'Samba share definitions and smbd service status'
+                : scope === 'nfs'
+                ? 'Exported NFS shares and nfs-server status'
+                : 'Real-time exported shares, Cockpit file-sharing mounts, and smbd services'}
             </p>
           </div>
         </div>
@@ -183,25 +205,29 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
             className="flex items-center gap-1 bg-[#b0c9ff] hover:bg-[#82aaff] text-[#0a0d1f] font-bold px-2.5 py-1 rounded transition-colors cursor-pointer shadow-xs"
           >
             <span className="material-symbols-outlined text-[15px]">add</span>
-            <span>Add Share</span>
+            <span>{scope === 'nfs' ? 'Add NFS Export' : scope === 'smb' ? 'Add SMB Share' : 'Add Share'}</span>
           </button>
-          <button
-            type="button"
-            onClick={() => setShowUserModal(true)}
-            className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#ffd97d] px-2.5 py-1 rounded transition-colors border border-[#ffd97d]/40 cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[15px]">manage_accounts</span>
-            <span>Manage Users &amp; Passwords</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleReloadShares}
-            disabled={reloading || loading}
-            className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded transition-colors border border-[#434750]/40 cursor-pointer disabled:opacity-50"
-          >
-            <span className={`material-symbols-outlined text-[14px] ${reloading ? 'animate-spin' : ''}`}>refresh</span>
-            <span>Reload Daemon</span>
-          </button>
+          {scope !== 'nfs' && (
+            <button
+              type="button"
+              onClick={() => setShowUserModal(true)}
+              className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#ffd97d] px-2.5 py-1 rounded transition-colors border border-[#ffd97d]/40 cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[15px]">manage_accounts</span>
+              <span>Manage Users &amp; Passwords</span>
+            </button>
+          )}
+          {scope !== 'nfs' && (
+            <button
+              type="button"
+              onClick={handleReloadShares}
+              disabled={reloading || loading}
+              className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded transition-colors border border-[#434750]/40 cursor-pointer disabled:opacity-50"
+            >
+              <span className={`material-symbols-outlined text-[14px] ${reloading ? 'animate-spin' : ''}`}>refresh</span>
+              <span>Reload Daemon</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => fetchShares(true)}
@@ -278,7 +304,7 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
         </div>
       )}
 
-      {sambaConfig && (
+      {sambaConfig && scope !== 'nfs' && (
         <div className="mt-4 bg-[#0a0d1f] p-3 rounded-lg border border-[#26293c] font-mono text-xs">
           <span className="text-[#ffd97d] font-bold block mb-1.5 flex items-center gap-1.5">
             <span className="material-symbols-outlined text-[15px]">settings</span>
@@ -299,6 +325,7 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node }) =>
         }}
         onSaved={() => fetchShares(true)}
         initialShare={editingShare}
+        defaultProtocol={scope === 'nfs' ? 'nfs' : 'smb'}
       />
 
       <UserManagerModal
