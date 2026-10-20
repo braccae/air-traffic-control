@@ -1,5 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import type { NodeItem, TagInventoryChunk, CustomFolder, GlobalSettingsPage } from '../types/index.ts';
+import React, { useState } from 'react';
+import type { NodeItem, TagInventoryChunk, CustomFolder } from '../types/index.ts';
+import { useContextMenu } from './ContextMenu.tsx';
+import { buildNodeContextMenu, type ContextMenuItem } from '../utils/contextMenuModel.ts';
+import { copyTextToClipboard } from '../utils/clipboard.ts';
 import {
   buildInventoryTree,
   buildHostGroupPills,
@@ -8,31 +11,36 @@ import {
   formatNodeTypeBadge,
   formatNodeIpBadge,
   getDatacenterNavSections,
+  getDatacenterSettingCategories,
+  formatDatacenterRoute,
   calculateClusterHealthScore,
   type SidebarViewMode,
-  type DatacenterSelection,
+  type DatacenterSection,
+  type DatacenterSettingPageId,
 } from '../utils/navigationViewModel.ts';
-import { fetchGlobalSettingsPages, settingsSectionId } from '../utils/globalSettingsManager.ts';
 
 interface ServerViewSidebarProps {
   nodes: NodeItem[];
   selectedNodeId: string;
   onSelectNode: (node: NodeItem) => void;
   onEditNode?: (node: NodeItem) => void;
+  onOpenTerminal?: (node: NodeItem) => void;
+  onOpenLogs?: (node: NodeItem) => void;
+  onDeleteNode?: (nodeId: string) => void;
   selectedHostGroup: string;
   onSelectHostGroup: (group: string) => void;
   isOpenMobile?: boolean;
   onCloseMobile?: () => void;
   viewMode?: SidebarViewMode;
   onSelectViewMode?: (mode: SidebarViewMode) => void;
-  selectedDatacenterSection?: DatacenterSelection;
-  onSelectDatacenterSection?: (section: DatacenterSelection) => void;
+  selectedDatacenterSection?: DatacenterSection;
+  onSelectDatacenterSection?: (section: DatacenterSection) => void;
+  selectedDatacenterSetting?: DatacenterSettingPageId | null;
+  onSelectDatacenterSetting?: (page: DatacenterSettingPageId) => void;
   chunks?: TagInventoryChunk[];
   folders?: CustomFolder[];
   onCreateFolder?: (name: string) => void;
   onDeleteFolder?: (id: string) => void;
-  /** Module-contributed global settings pages. When omitted the sidebar fetches them. */
-  settingsPages?: GlobalSettingsPage[];
 }
 
 export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
@@ -40,6 +48,9 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   selectedNodeId,
   onSelectNode,
   onEditNode,
+  onOpenTerminal,
+  onOpenLogs,
+  onDeleteNode,
   selectedHostGroup,
   onSelectHostGroup,
   isOpenMobile = false,
@@ -48,11 +59,12 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   onSelectViewMode,
   selectedDatacenterSection = 'overview',
   onSelectDatacenterSection,
+  selectedDatacenterSetting = null,
+  onSelectDatacenterSetting,
   chunks = [],
   folders = [],
   onCreateFolder,
   onDeleteFolder,
-  settingsPages: propsSettingsPages,
 }) => {
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterText, setFilterText] = useState('');
@@ -61,6 +73,32 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({});
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  const nodeMenu = useContextMenu();
+
+  const handleNodeCopy = (text: string, label: string) => {
+    void copyTextToClipboard(text, label);
+  };
+
+  const buildNodeMenu = (node: NodeItem): ContextMenuItem[] =>
+    buildNodeContextMenu(node, {
+      onSelect: onSelectNode,
+      onOpenTerminal,
+      onOpenLogs,
+      onEdit: onEditNode,
+      onDelete: onDeleteNode
+        ? (target: NodeItem) => {
+            const confirmed =
+              typeof window === 'undefined' ||
+              window.confirm(`Remove "${target.name}" from the inventory? The host itself is not modified.`);
+            if (confirmed) onDeleteNode(target.id);
+          }
+        : undefined,
+      onCopy: handleNodeCopy,
+    });
+
+  const handleNodeContextMenu = (event: React.MouseEvent, node: NodeItem) => {
+    nodeMenu.open(event, buildNodeMenu(node));
+  };
 
   const groupFilteredNodes =
     selectedHostGroup === 'all'
@@ -80,25 +118,7 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   const onlineCount = nodes.filter(n => n.status === 'online').length;
   const health = calculateClusterHealthScore(nodes);
   const datacenterSections = getDatacenterNavSections(4, 0);
-
-  // Module-contributed global settings pages (fetched unless supplied by props).
-  const [internalSettingsPages, setInternalSettingsPages] = useState<GlobalSettingsPage[] | null>(null);
-  useEffect(() => {
-    if (propsSettingsPages !== undefined) return;
-    let active = true;
-    fetchGlobalSettingsPages()
-      .then(pages => {
-        if (active) setInternalSettingsPages(pages);
-      })
-      .catch(() => {
-        if (active) setInternalSettingsPages([]);
-      });
-    return () => {
-      active = false;
-    };
-  }, [propsSettingsPages]);
-
-  const settingsPages = propsSettingsPages !== undefined ? propsSettingsPages : internalSettingsPages || [];
+  const datacenterSettingCategories = getDatacenterSettingCategories();
 
   const inventoryTree = buildInventoryTree(visibleNodes, chunks, folders, datacenterName);
   const tsNodes = inventoryTree.tailscale.tags.flatMap(t => t.nodes);
@@ -113,6 +133,8 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
     return (
       <div
         key={node.id}
+        onContextMenu={event => handleNodeContextMenu(event, node)}
+        data-context-menu="node-row"
         className={`group flex items-center gap-1 px-2 py-1.5 rounded transition-all ${
           isSelected
             ? 'bg-[#21263d] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff] shadow-[inset_0_0_12px_rgba(176,201,255,0.08)]'
@@ -270,18 +292,20 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
               </span>
             </div>
 
-            {/* Global Options Navigation Sections */}
-            <div className="space-y-1">
-              <div className="px-1 text-[10px] font-bold uppercase tracking-wider text-[#8d909b]">
-                Datacenter Global Options
+            {/* Category 1: Cluster operations */}
+            <div className="space-y-1" data-testid="datacenter-nav-category-cluster">
+              <div className="px-1 text-[10px] font-bold uppercase tracking-wider text-[#8d909b] flex items-center gap-1">
+                <span className="material-symbols-outlined text-[13px] text-[#8cd6cb]">hub</span>
+                <span>Cluster</span>
               </div>
               {datacenterSections.map(sec => {
-                const isActive = selectedDatacenterSection === sec.id;
+                const isActive = !selectedDatacenterSetting && selectedDatacenterSection === sec.id;
                 return (
                   <button
                     key={sec.id}
                     type="button"
                     onClick={() => onSelectDatacenterSection?.(sec.id)}
+                    title={formatDatacenterRoute({ kind: 'section', section: sec.id })}
                     className={`w-full flex items-center gap-2 px-2.5 py-2 rounded transition-all text-left cursor-pointer ${
                       isActive
                         ? 'bg-[#21263d] text-[#8cd6cb] font-bold border-l-2 border-[#8cd6cb] shadow-[inset_0_0_12px_rgba(140,214,203,0.08)]'
@@ -305,41 +329,50 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
               })}
             </div>
 
-            {/* Module-contributed Global Settings Pages */}
-            {settingsPages.length > 0 && (
-              <div className="space-y-1 pt-1">
-                <div className="px-1 text-[10px] font-bold uppercase tracking-wider text-[#8d909b]">
-                  Module Settings
-                </div>
-                {settingsPages.map(page => {
-                  const sectionId = settingsSectionId(page.id);
-                  const isActive = selectedDatacenterSection === sectionId;
-                  return (
-                    <button
-                      key={page.id}
-                      type="button"
-                      onClick={() => onSelectDatacenterSection?.(sectionId as DatacenterSelection)}
-                      className={`w-full flex items-center gap-2 px-2.5 py-2 rounded transition-all text-left cursor-pointer ${
-                        isActive
-                          ? 'bg-[#21263d] text-[#d9b9ff] font-bold border-l-2 border-[#d9b9ff] shadow-[inset_0_0_12px_rgba(217,185,255,0.08)]'
-                          : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
-                      }`}
-                    >
-                      <span className="material-symbols-outlined text-[16px] shrink-0 text-[#d9b9ff]">
-                        {page.icon || 'tune'}
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <div className="truncate text-xs font-semibold">{page.title}</div>
-                        <div className="text-[10px] text-[#8d909b] truncate">{page.description}</div>
-                      </div>
-                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#291e3b] text-[#d9b9ff] font-mono border border-[#d9b9ff]/30 shrink-0">
-                        module
-                      </span>
-                    </button>
-                  );
-                })}
+            {/* Category 2: Settings — one page per individual setting (deep-linkable) */}
+            <div className="space-y-1.5 pt-2 border-t border-[#26293c]/60" data-testid="datacenter-nav-category-settings">
+              <div className="px-1 text-[10px] font-bold uppercase tracking-wider text-[#8d909b] flex items-center gap-1">
+                <span className="material-symbols-outlined text-[13px] text-[#b0c9ff]">settings</span>
+                <span>Settings</span>
               </div>
-            )}
+
+              {datacenterSettingCategories.map(category => (
+                <div key={category.id} className="space-y-0.5" data-testid={`datacenter-nav-subcategory-${category.id}`}>
+                  <div
+                    className="px-2 py-1 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-[#b0c9ff]/90"
+                    title={category.description}
+                  >
+                    <span className="w-1 h-1 rounded-full bg-[#b0c9ff]/60 shrink-0" />
+                    <span className="truncate">{category.title}</span>
+                  </div>
+
+                  {category.pages.map(setting => {
+                    const isActive = selectedDatacenterSetting === setting.id;
+                    return (
+                      <button
+                        key={setting.id}
+                        type="button"
+                        onClick={() => onSelectDatacenterSetting?.(setting.id)}
+                        title={`${setting.description} — ${formatDatacenterRoute({ kind: 'setting', setting: setting.id })}`}
+                        data-testid={`datacenter-nav-setting-${setting.id}`}
+                        className={`w-full flex items-center gap-2 pl-4 pr-2 py-1.5 rounded transition-all text-left cursor-pointer ${
+                          isActive
+                            ? 'bg-[#21263d] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff] shadow-[inset_0_0_12px_rgba(176,201,255,0.08)]'
+                            : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+                        }`}
+                      >
+                        <span className="material-symbols-outlined text-[14px] shrink-0 text-[#b0c9ff]">
+                          {setting.icon}
+                        </span>
+                        <span className="flex-1 min-w-0 truncate text-[11px] font-semibold">
+                          {setting.title}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
 
             {/* Tailscale / Ansible Host Groups Box */}
             <div className="p-1.5 mt-2 bg-[#0a0d1f] rounded border border-[#26293c]/60">
@@ -621,6 +654,7 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
           </div>
         )}
       </aside>
+      {nodeMenu.menu}
     </>
   );
 };

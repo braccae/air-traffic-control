@@ -39,12 +39,17 @@ import { SearchModal } from './components/modals/SearchModal.tsx';
 import { GroupVarsModal } from './components/modals/GroupVarsModal.tsx';
 import { ClientSettingsModal } from './components/modals/ClientSettingsModal.tsx';
 import { DatacenterGlobalView } from './components/DatacenterGlobalView.tsx';
+import { DatacenterSettingsView } from './components/DatacenterSettingsView.tsx';
 import {
   updateNodeSettings,
   getSubSidebarWrapperClasses,
   getWorkspaceWrapperClasses,
+  DEFAULT_DATACENTER_ROUTE,
+  formatDatacenterRoute,
+  parseDatacenterRoute,
   type SidebarViewMode,
-  type DatacenterSelection,
+  type DatacenterSection,
+  type DatacenterRoute,
   type ConsoleDrawerTab,
 } from './utils/navigationViewModel.ts';
 import {
@@ -426,8 +431,58 @@ export default function App() {
   const [activeTopTab, setActiveTopTab] = useState('summary');
   const [activeOpTab, setActiveOpTab] = useState('overview');
   const [activeCockpitItem, setActiveCockpitItem] = useState('overview');
-  const [selectedViewMode, setSelectedViewMode] = useState<SidebarViewMode>('nodes');
-  const [datacenterSection, setDatacenterSection] = useState<DatacenterSelection>('overview');
+  // Deep-linkable datacenter routes (#/datacenter/<section> and
+  // #/datacenter/settings/<category>/<setting>) — the hash is the source of
+  // truth on load and on back/forward navigation.
+  const [selectedViewMode, setSelectedViewMode] = useState<SidebarViewMode>(() =>
+    parseDatacenterRoute(typeof window !== 'undefined' ? window.location.hash : '') ? 'datacenter' : 'nodes'
+  );
+  const [datacenterRoute, setDatacenterRoute] = useState<DatacenterRoute>(
+    () => parseDatacenterRoute(typeof window !== 'undefined' ? window.location.hash : '') ?? DEFAULT_DATACENTER_ROUTE
+  );
+  const datacenterSection: DatacenterSection =
+    datacenterRoute.kind === 'section' ? datacenterRoute.section : 'overview';
+  const activeDatacenterSetting = datacenterRoute.kind === 'setting' ? datacenterRoute.setting : null;
+
+  const writeDatacenterHash = (route: DatacenterRoute | null) => {
+    if (typeof window === 'undefined') return;
+    const nextHash = route ? formatDatacenterRoute(route) : '';
+    const current = window.location.hash;
+    if (route) {
+      if (current !== nextHash) window.history.pushState(null, '', nextHash);
+    } else if (current) {
+      window.history.pushState(null, '', window.location.pathname + window.location.search);
+    }
+  };
+
+  const navigateDatacenterRoute = (route: DatacenterRoute) => {
+    setDatacenterRoute(route);
+    setSelectedViewMode('datacenter');
+    writeDatacenterHash(route);
+  };
+
+  const handleSelectViewMode = (mode: SidebarViewMode) => {
+    setSelectedViewMode(mode);
+    writeDatacenterHash(mode === 'datacenter' ? datacenterRoute : null);
+  };
+
+  useEffect(() => {
+    const syncRouteFromHash = () => {
+      const route = parseDatacenterRoute(window.location.hash);
+      if (route) {
+        setDatacenterRoute(route);
+        setSelectedViewMode('datacenter');
+      } else {
+        setSelectedViewMode('nodes');
+      }
+    };
+    window.addEventListener('hashchange', syncRouteFromHash);
+    window.addEventListener('popstate', syncRouteFromHash);
+    return () => {
+      window.removeEventListener('hashchange', syncRouteFromHash);
+      window.removeEventListener('popstate', syncRouteFromHash);
+    };
+  }, []);
 
   const [telemetry, setTelemetry] = useState<TelemetryData>(initialTelemetry);
   const [tasks, setTasks] = useState<GlobalTaskItem[]>(initialTasks);
@@ -1317,14 +1372,19 @@ export default function App() {
         selectedNodeId={selectedNode.id}
         onSelectNode={handleSelectNode}
         onEditNode={node => setEditNodeTarget(node)}
+        onOpenTerminal={node => handleOpenTerminal(node.id)}
+        onOpenLogs={node => handleOpenLogs(node.tailscaleHost || node.ip, node.sshUser)}
+        onDeleteNode={handleDeleteNode}
         selectedHostGroup={selectedHostGroup}
         onSelectHostGroup={setSelectedHostGroup}
         isOpenMobile={mobileSidebarOpen}
         onCloseMobile={() => setMobileSidebarOpen(false)}
         viewMode={selectedViewMode}
-        onSelectViewMode={setSelectedViewMode}
+        onSelectViewMode={handleSelectViewMode}
         selectedDatacenterSection={datacenterSection}
-        onSelectDatacenterSection={setDatacenterSection}
+        onSelectDatacenterSection={section => navigateDatacenterRoute({ kind: 'section', section })}
+        selectedDatacenterSetting={activeDatacenterSetting}
+        onSelectDatacenterSetting={setting => navigateDatacenterRoute({ kind: 'setting', setting })}
         chunks={chunks}
         folders={folders}
         onCreateFolder={handleCreateFolder}
@@ -1337,12 +1397,13 @@ export default function App() {
           highContrast ? 'bg-[#080a16]' : 'bg-[#0f1224]'
         }`}>
           {selectedViewMode === 'datacenter' ? (
+            activeDatacenterSetting ? (
+              <DatacenterSettingsView page={activeDatacenterSetting} />
+            ) : (
             <DatacenterGlobalView
               datacenterName={selectedNode?.datacenter || 'leo-banjo.ts.net'}
               nodes={nodesList}
               tasks={tasks}
-              queue={queue}
-              isQueueRunning={isQueueRunning}
               activeSection={datacenterSection}
               onSelectNode={handleSelectNode}
               onOpenPlaybookModal={playbookName => {
@@ -1351,14 +1412,13 @@ export default function App() {
               }}
               onOpenPlaybookEditor={playbookName => handleOpenPlaybookEditor(playbookName)}
               onOpenGroupVars={() => setGroupVarsOpen(true)}
-              onOpenVaultEditor={() => setDatacenterSection('vars_vault')}
-              onSelectSection={setDatacenterSection}
               onToggleTasksDrawer={() => {
                 const el = document.getElementById('global-tasks-drawer');
                 el?.scrollIntoView({ behavior: 'smooth' });
               }}
               onRunPlaybookQuick={(playbook, target) => handleRunPlaybook(playbook, target || 'tag:host')}
             />
+            )
           ) : (
             <div className="flex flex-col w-full">
             {/* Secondary Context Bar & System Breadcrumb */}
@@ -1807,7 +1867,6 @@ export default function App() {
       {/* Fixed Bottom Console with Unified Window Dock */}
       <GlobalTasksExecutionLog
         tasks={tasks}
-        nodes={nodesList}
         queue={queue}
         isRunning={isQueueRunning}
         activeDrawerTab={activeConsoleTab}

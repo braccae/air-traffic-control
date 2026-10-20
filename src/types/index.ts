@@ -309,14 +309,18 @@ export interface VaultAuditEvent {
 }
 
 /**
- * Metadata for one stored vault variable. Deliberately has no value/ciphertext
- * field: the list API never exposes secret material (Secret Protection Invariant).
+ * Runs an existing playbook file (ansible/playbooks/<playbook>) as a queue task
+ * instead of compiling an ephemeral playbook from `steps`. The queue runner
+ * still executes it with ANSIBLE_STDOUT_CALLBACK=json.
  */
-export interface VaultVariable {
-  /** Variable name as it would appear in Ansible, e.g. `restic_password`. */
-  name: string;
-  createdAt: number;
-  updatedAt: number;
+export interface QueuedPlaybookRun {
+  /** File name inside ansible/playbooks, e.g. `site.yml`. */
+  playbook: string;
+  /** Inventory limit — `all` or a tag/group/host pattern. */
+  target: string;
+  checkMode?: boolean;
+  tags?: string;
+  extraVars?: string | Record<string, unknown>;
 }
 
 export interface QueuedAnsibleTask {
@@ -339,6 +343,8 @@ export interface QueuedAnsibleTask {
   category: AnsibleModuleCategory;
   primaryModule: string;
   steps: AnsibleTaskStep[];
+  /** Present when this task runs a playbook file rather than compiled steps. */
+  playbookRun?: QueuedPlaybookRun;
   secretsMasked?: Record<string, string>;
   become: boolean;
   becomeMethod?: 'run0' | 'sudo' | 'doas' | string;

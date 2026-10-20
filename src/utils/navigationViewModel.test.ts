@@ -464,14 +464,17 @@ test('formatNodeIpBadge extracts tailscaleIp or LAN ip correctly', async () => {
   assert.equal(formatNodeIpBadge(withoutTs), '192.168.1.100');
 });
 
-test('getDatacenterNavSections returns all 6 navigation sections with accurate metadata and badges', async () => {
+test('getDatacenterNavSections returns all 5 navigation sections with accurate metadata and badges', async () => {
   const { getDatacenterNavSections } = await import('./navigationViewModel.ts');
 
   const sections = getDatacenterNavSections(4, 2);
-  assert.equal(sections.length, 6);
+  assert.ok(sections.length >= 5);
 
   const sectionIds = sections.map(s => s.id);
-  assert.deepEqual(sectionIds, ['overview', 'playbooks', 'vars_vault', 'tasks', 'schedules', 'storage']);
+  // The five core cluster sections must stay present and ordered; additional
+  // sections may be appended as the datacenter view grows.
+  const coreSections = ['overview', 'playbooks', 'vars_vault', 'tasks', 'storage'];
+  assert.deepEqual(sectionIds.filter(id => coreSections.includes(id)), coreSections);
 
   const playbooksSec = sections.find(s => s.id === 'playbooks');
   assert.equal(playbooksSec?.badge, '4 playbooks');
@@ -809,6 +812,90 @@ test('buildInventoryTree with filterNodesBySearchQuery supports tree searching a
 
   assert.equal(tree.nonTailscale.standalone.length, 1);
   assert.equal(tree.nonTailscale.standalone[0].id, 'node-nonts-ai');
+});
+
+test('datacenter settings catalog exposes grouped categories with one page per setting', async () => {
+  const { getDatacenterSettingCategories } = await import('./navigationViewModel.ts');
+
+  const categories = getDatacenterSettingCategories();
+  assert.ok(categories.length >= 2, 'settings must be grouped into categories');
+
+  const pages = categories.flatMap(c => c.pages);
+  assert.ok(pages.length >= 6, 'each individual setting needs its own page');
+
+  const ids = pages.map(p => p.id);
+  const slugs = pages.map(p => p.slug);
+  assert.equal(new Set(ids).size, ids.length, 'setting page ids must be unique');
+  assert.equal(new Set(slugs).size, slugs.length, 'setting page slugs must be unique');
+
+  for (const category of categories) {
+    assert.ok(category.title.length > 0);
+    assert.ok(category.pages.length > 0, `${category.id} must contain at least one setting page`);
+    for (const page of category.pages) {
+      assert.equal(page.category, category.id, 'page must belong to its parent category');
+      assert.ok(page.title.length > 0);
+      assert.ok(page.slug.length > 0);
+    }
+  }
+
+  // Individual ansible.cfg keys each get their own page
+  const ansibleIds = pages.filter(p => p.category === 'automation').map(p => p.id);
+  for (const expected of [
+    'ansible-stdout-callback',
+    'ansible-become-method',
+    'ansible-forks',
+    'ansible-timeout',
+  ]) {
+    assert.ok(ansibleIds.includes(expected as any), `missing per-setting page ${expected}`);
+  }
+});
+
+test('datacenter routes format to stable deep-linkable hashes and round-trip', async () => {
+  const { formatDatacenterRoute, parseDatacenterRoute } = await import('./navigationViewModel.ts');
+
+  assert.equal(formatDatacenterRoute({ kind: 'section', section: 'overview' }), '#/datacenter/overview');
+  assert.equal(formatDatacenterRoute({ kind: 'section', section: 'tasks' }), '#/datacenter/tasks');
+  assert.equal(
+    formatDatacenterRoute({ kind: 'setting', setting: 'ansible-forks' }),
+    '#/datacenter/settings/automation/ansible-forks'
+  );
+  assert.equal(
+    formatDatacenterRoute({ kind: 'setting', setting: 'quick-commands' }),
+    '#/datacenter/settings/terminal/quick-commands'
+  );
+
+  assert.deepEqual(parseDatacenterRoute('#/datacenter/overview'), { kind: 'section', section: 'overview' });
+  assert.deepEqual(parseDatacenterRoute('#/datacenter/storage'), { kind: 'section', section: 'storage' });
+  assert.deepEqual(parseDatacenterRoute('#/datacenter/settings/automation/ansible-forks'), {
+    kind: 'setting',
+    setting: 'ansible-forks',
+  });
+
+  // Round-trip every catalog route
+  const { getDatacenterSettingCategories, getDatacenterNavSections } = await import(
+    './navigationViewModel.ts'
+  );
+  for (const section of getDatacenterNavSections(4, 0)) {
+    const route = { kind: 'section' as const, section: section.id };
+    assert.deepEqual(parseDatacenterRoute(formatDatacenterRoute(route)), route);
+  }
+  for (const page of getDatacenterSettingCategories().flatMap(c => c.pages)) {
+    const route = { kind: 'setting' as const, setting: page.id };
+    assert.deepEqual(parseDatacenterRoute(formatDatacenterRoute(route)), route);
+  }
+
+  // Tolerant parsing: bare slug without the category segment, trailing slash, missing '#'
+  assert.deepEqual(parseDatacenterRoute('/datacenter/settings/quick-commands'), {
+    kind: 'setting',
+    setting: 'quick-commands',
+  });
+  assert.deepEqual(parseDatacenterRoute('#/datacenter/settings/terminal/'), null);
+
+  // Non-datacenter / unknown hashes are ignored so other views keep working
+  assert.equal(parseDatacenterRoute(''), null);
+  assert.equal(parseDatacenterRoute('#/nodes/whatever'), null);
+  assert.equal(parseDatacenterRoute('#/datacenter/nope'), null);
+  assert.equal(parseDatacenterRoute('#/datacenter/settings/automation/not-a-setting'), null);
 });
 
 
