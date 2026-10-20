@@ -49,6 +49,7 @@ import (
 	// Virtual machine plugins
 	_ "air-traffic-control/backend/plugins/vm/libvirt"
 	_ "air-traffic-control/backend/plugins/vm/lxc"
+	_ "air-traffic-control/backend/plugins/vm/proxmox"
 
 	// Telemetry plugin
 	_ "air-traffic-control/backend/plugins/telemetry/glances"

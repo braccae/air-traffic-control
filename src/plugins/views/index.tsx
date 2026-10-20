@@ -20,6 +20,7 @@ import { TailscaleExplorerView } from '../../components/TailscaleExplorerView.ts
 import { TailscaleMeshCard } from '../../components/TailscaleMeshCard.tsx';
 import { VirtualMachinesKVM } from '../../components/VirtualMachinesKVM.tsx';
 import { LxcContainers } from '../../components/LxcContainers.tsx';
+import { ProxmoxView } from '../../components/ProxmoxView.tsx';
 import { ResticBackupPolicy } from '../../components/ResticBackupPolicy.tsx';
 import { RcloneRemotesView } from '../../components/RcloneRemotesView.tsx';
 import { SystemHealthTelemetry } from '../../components/SystemHealthTelemetry.tsx';
@@ -355,6 +356,10 @@ const LxcContainersAdapter: React.FC<PluginViewProps> = ({ node }) => (
   <LxcContainers node={node} />
 );
 
+const ProxmoxViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
+  <ProxmoxView node={node} pluginId="vm/proxmox" />
+);
+
 const ResticBackupPolicyAdapter: React.FC<PluginViewProps> = ({ node }) => (
   <ResticBackupPolicy
     nodeName={node.name}
@@ -433,6 +438,7 @@ export const PLUGIN_VIEW_REGISTRY: Record<string, PluginViewComponent> = {
   'firewall': FirewallViewAdapter,
 
   // VMs
+  'vm/proxmox': ProxmoxViewAdapter,
   'vm/libvirt': VirtualMachinesKVMAdapter,
   'vm/lxc': LxcContainersAdapter,
   'vm': VirtualMachinesKVMAdapter,

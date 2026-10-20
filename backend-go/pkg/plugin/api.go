@@ -193,6 +193,8 @@ type sqliteNodeRecord struct {
 	TailscaleHost   string            `json:"tailscaleHost"`
 	NodeType        string            `json:"nodeType"`
 	PrivilegeMethod string            `json:"privilegeMethod"`
+	APIPort         int               `json:"apiPort"`
+	APIUser         string            `json:"apiUser"`
 	PluginOverrides map[string]string `json:"pluginOverrides"`
 }
 
@@ -277,6 +279,13 @@ func (r *SQLiteNodeResolver) ResolveNode(nodeID string) (HostFacts, bool, error)
 	}
 	if parsed.Port > 0 {
 		overrides["port"] = fmt.Sprintf("%d", parsed.Port)
+	}
+	// Surface Proxmox/API connection hints (used by the vm/proxmox plugin).
+	if parsed.APIPort > 0 {
+		overrides["api_port"] = fmt.Sprintf("%d", parsed.APIPort)
+	}
+	if parsed.APIUser != "" {
+		overrides["api_user"] = parsed.APIUser
 	}
 
 	facts := HostFacts{
