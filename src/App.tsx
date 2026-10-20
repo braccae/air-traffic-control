@@ -1349,6 +1349,8 @@ export default function App() {
               }}
               onOpenPlaybookEditor={playbookName => handleOpenPlaybookEditor(playbookName)}
               onOpenGroupVars={() => setGroupVarsOpen(true)}
+              onOpenVaultEditor={() => setDatacenterSection('vars_vault')}
+              onSelectSection={setDatacenterSection}
               onToggleTasksDrawer={() => {
                 const el = document.getElementById('global-tasks-drawer');
                 el?.scrollIntoView({ behavior: 'smooth' });

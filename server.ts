@@ -76,20 +76,16 @@ import {
   ensureAnsibleVenv,
   REQUIRED_VENV_PACKAGES,
 } from './src/utils/ansibleVenvManager.ts';
-import { registerVaultRoutes } from './src/utils/vaultManager.ts';
+import { materializeVaultVarsFile, registerVaultRoutes } from "./src/utils/vaultManager.ts";
+import { registerRcloneRoutes } from "./src/utils/rcloneManager.ts";
+import { registerVaultRoutes } from "./src/utils/vaultManager.ts";
 import {
   installConsoleCapture,
   listClusterLogs,
   onClusterLog,
   recordClusterLog,
   type ClusterLogKind,
-} from './src/utils/clusterLogStore.ts';
-import {
-  beginConnection,
-  getConnectionSnapshot,
-  onConnectionChange,
-  type ConnectionSnapshot,
-} from './src/utils/connectionRegistry.ts';
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1851,7 +1847,41 @@ const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
 registerPlaybookRoutes(app, playbookDir, {
   inventoryScriptPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
 });
-registerVaultRoutes(app);
+registerVaultRoutes(app, {
+  // Decryption audit rows persist in data/hosts-cache.sqlite (vault_audit_log).
+  auditStore: hostCache,
+  // Named vault variables persist as AES256 ciphertext in vault_variables.
+  variableStore: hostCache,
+  action: 'POST /api/vault/decrypt',
+});
+
+// ==========================================
+// Category F: rclone remote integration
+// ==========================================
+
+registerRcloneRoutes(app, {
+  hostCache,
+  broadcast,
+  getNode: (id: string) => findNode(id) || hostCache.getHostById(id),
+  // The Go daemon's mount/rclone plugin is the canonical task compiler.
+  compileInstall: async (nodeId, options) => {
+    const result = await proxyToGoDaemon(
+      `/api/nodes/${encodeURIComponent(nodeId)}/plugins/mount/rclone/actions/install_remote`,
+      'POST',
+      { options },
+      15000
+    );
+    if (!result.ok || !result.data) {
+      throw new Error(result.error || 'mount/rclone plugin unavailable on the air-traffic-control-daemon');
+    }
+    return result.data;
+  },
+  stageTask: (task: any) => {
+    const queued = enqueueTask(task);
+    broadcast({ type: 'queue_updated', queue: getQueue() });
+    return queued;
+  },
+});
 
 app.get('/api/ansible/config', async (_req, res) => {
   try {
@@ -2057,6 +2087,12 @@ app.post('/api/playbook/run', (req, res) => {
     args.push('--extra-vars', typeof extraVars === 'string' ? extraVars : JSON.stringify(extraVars));
   }
 
+  // Vault store -> ephemeral owner-only vars file (ansible-vault ciphertext).
+  const vaultVars = materializeVaultVarsFile(hostCache);
+  if (vaultVars) {
+    args.push('--extra-vars', `@${vaultVars.filePath}`);
+  }
+
   const proc = spawn('ansible-playbook', args, {
     cwd: __dirname,
     env: { ...process.env, ANSIBLE_FORCE_COLOR: '1' },
@@ -2066,6 +2102,7 @@ app.post('/api/playbook/run', (req, res) => {
 
   proc.on('error', (err: any) => {
     activePlaybookProcs.delete(taskId);
+    vaultVars?.cleanup();
     newTask.status = 'FAILED';
     newTask.progress = 100;
     newTask.progressEta = `Spawn error: ${err?.code || err?.message || 'Failed to spawn runner'}`;
@@ -2115,6 +2152,7 @@ app.post('/api/playbook/run', (req, res) => {
 
   proc.on('close', code => {
     activePlaybookProcs.delete(taskId);
+    vaultVars?.cleanup();
     if (newTask.status === 'FAILED') {
       return;
     }
@@ -2210,10 +2248,21 @@ app.post('/api/queue/execute', async (req, res) => {
 
   broadcast({ type: 'queue_execution_started', taskId, queue: getQueue() });
 
-  const { result, remainingCount, haltedOnError } = await executeNextQueueTask(inv, {
-    cwd: __dirname,
-    taskId,
-  });
+  // Expose the SQLite vault store to the playbook as an owner-only vars file;
+  // it contains ansible-vault ciphertext only and is removed when the run ends.
+  const vaultVars = materializeVaultVarsFile(hostCache);
+
+  let queueOutcome: Awaited<ReturnType<typeof executeNextQueueTask>>;
+  try {
+    queueOutcome = await executeNextQueueTask(inv, {
+      cwd: __dirname,
+      taskId,
+      vaultVarsFile: vaultVars?.filePath,
+    });
+  } finally {
+    vaultVars?.cleanup();
+  }
+  const { result, remainingCount, haltedOnError } = queueOutcome;
 
   broadcast({
     type: 'queue_execution_finished',

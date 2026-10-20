@@ -4,6 +4,7 @@ import type { ManagedWindow } from '../utils/windowManager.ts';
 import { getConsoleWindowPillClasses, formatTaskQueueTabLabel, type ConsoleDrawerTab } from '../utils/navigationViewModel.ts';
 import { TaskQueueTab } from './TaskQueueTab.tsx';
 import { ClusterSyslogTab } from './ClusterSyslogTab.tsx';
+import { VaultAuditPanel } from './VaultAuditPanel.tsx';
 
 interface GlobalTasksExecutionLogProps {
   tasks: GlobalTaskItem[];
@@ -240,10 +241,19 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
     'ping.leo-banjo.ts.net          : ok=12   changed=1    unreachable=0    failed=0',
   ];
 
+<<<<<<< HEAD
   const vaultLogs = [
     '2026-10-18 02:10:50 [AUDIT] root@pam authenticated with GSSAPI ticket',
     '2026-10-18 02:10:50 [VAULT] Decrypted group_vars/all.yml using AES-256 cipher (SQLite cache sync)',
     '2026-10-18 02:05:12 [AUDIT] Token generated for cockpit-bridge session (ttl: 3600s)',
+=======
+  const syslogLogs = [
+    'Oct 18 02:15:44 likes-it-cold systemd[1]: Started Cockpit Web Service Session ws-tunnel.',
+    'Oct 18 02:15:40 likes-it-cold podman[4182]: container c9603dec9010 (uosserver) health check: PASSED',
+    'Oct 18 02:15:35 likes-it-cold restic[19482]: snapshot f7a91b2e saved to s3://restic-homelab-vault/leo-banjo',
+    'Oct 18 02:15:30 ping systemd[1]: uosserver.service: Active rootless pod (UID 1001)',
+    'Oct 18 02:15:22 dev-pc tailscaled[1104]: mesh: peer likes-it-cold latency 1.8ms (direct WireGuard)',
+>>>>>>> wt/t_f78d6662
   ];
 
   return (
@@ -539,18 +549,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
 
           {activeTab === 'syslog' && <ClusterSyslogTab nodes={nodes} />}
 
-          {activeTab === 'vault' && (
-            <div className="p-3 font-mono text-xs space-y-1 text-[#c3c6d2] bg-[#0a0d1f]">
-              {vaultLogs.map((line, idx) => (
-                <div key={idx} className="hover:bg-[#171a2d] px-1 rounded flex items-center gap-2">
-                  <span className="material-symbols-outlined text-[14px] text-[#d9b9ff]">
-                    verified
-                  </span>
-                  <span>{line}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          {activeTab === 'vault' && <VaultAuditPanel />}
         </div>
       )}
     </section>
