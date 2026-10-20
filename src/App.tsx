@@ -44,7 +44,7 @@ import {
   getSubSidebarWrapperClasses,
   getWorkspaceWrapperClasses,
   type SidebarViewMode,
-  type DatacenterSection,
+  type DatacenterSelection,
   type ConsoleDrawerTab,
 } from './utils/navigationViewModel.ts';
 import {
@@ -427,7 +427,7 @@ export default function App() {
   const [activeOpTab, setActiveOpTab] = useState('overview');
   const [activeCockpitItem, setActiveCockpitItem] = useState('overview');
   const [selectedViewMode, setSelectedViewMode] = useState<SidebarViewMode>('nodes');
-  const [datacenterSection, setDatacenterSection] = useState<DatacenterSection>('overview');
+  const [datacenterSection, setDatacenterSection] = useState<DatacenterSelection>('overview');
 
   const [telemetry, setTelemetry] = useState<TelemetryData>(initialTelemetry);
   const [tasks, setTasks] = useState<GlobalTaskItem[]>(initialTasks);

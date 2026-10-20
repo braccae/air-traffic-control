@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import type { NodeItem, GlobalTaskItem } from '../types/index.ts';
+import type { NodeItem, GlobalTaskItem, GlobalSettingsPage } from '../types/index.ts';
 import {
   groupNodesByDynamicCluster,
   resolveNodeIcon,
   formatNodeTypeBadge,
   formatNodeIpBadge,
   calculateClusterHealthScore,
-  type DatacenterSection,
+  type DatacenterSelection,
 } from '../utils/navigationViewModel.ts';
+import { GlobalSettingsPanel } from './GlobalSettingsPanel.tsx';
+import { fetchGlobalSettingsPages, settingsSectionId } from '../utils/globalSettingsManager.ts';
 import {
   loadQuickCommands,
   addQuickCommand,
@@ -24,7 +26,7 @@ export interface DatacenterGlobalViewProps {
   datacenterName?: string;
   nodes: NodeItem[];
   tasks: GlobalTaskItem[];
-  activeSection?: DatacenterSection;
+  activeSection?: DatacenterSelection;
   onSelectNode: (node: NodeItem) => void;
   onOpenPlaybookModal: (playbookName?: string) => void;
   onOpenPlaybookEditor: (playbookName?: string) => void;
@@ -95,6 +97,22 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
   const [playbooks, setPlaybooks] = useState<PlaybookInfo[]>(DEFAULT_PLAYBOOKS);
   const [loadingPlaybooks, setLoadingPlaybooks] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
+
+  // Module-contributed global settings pages (rendered as their own sections).
+  const [settingsPages, setSettingsPages] = useState<GlobalSettingsPage[]>([]);
+  useEffect(() => {
+    let active = true;
+    fetchGlobalSettingsPages()
+      .then(pages => {
+        if (active) setSettingsPages(pages);
+      })
+      .catch(() => {
+        if (active) setSettingsPages([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Quick Commands Settings State
   const [quickCommands, setQuickCommands] = useState<QuickCommandItem[]>(() => loadQuickCommands());
@@ -1426,6 +1444,23 @@ export const DatacenterGlobalView: React.FC<DatacenterGlobalViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Module-contributed Global Settings Pages */}
+      {settingsPages.map(page => (
+        <div
+          key={page.id}
+          id={`datacenter-${settingsSectionId(page.id)}`}
+          data-testid={`datacenter-settings-${page.id}`}
+          className="rounded-lg bg-[#121528] border border-[#26293c] p-4 shadow-md"
+        >
+          <GlobalSettingsPanel
+            page={page}
+            onSaved={updated =>
+              setSettingsPages(prev => prev.map(p => (p.id === updated.id ? updated : p)))
+            }
+          />
+        </div>
+      ))}
     </div>
   );
 };

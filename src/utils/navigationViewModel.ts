@@ -279,8 +279,26 @@ export type SidebarViewMode = 'nodes' | 'datacenter';
 
 export type DatacenterSection = 'overview' | 'playbooks' | 'vars_vault' | 'tasks' | 'storage';
 
+/**
+ * Section id for a module-contributed global settings page, e.g. "settings-backup-restic"
+ * (see settingsSectionId in globalSettingsManager.ts).
+ */
+export type DatacenterSettingsSection = `settings-${string}`;
+
+/** Any selectable Datacenter section: a built-in section or a module settings page. */
+export type DatacenterSelection = DatacenterSection | DatacenterSettingsSection;
+
 export interface DatacenterNavSection {
   id: DatacenterSection;
+  title: string;
+  icon: string;
+  description: string;
+  badge?: string;
+}
+
+/** A navigation entry for a module-contributed global settings page. */
+export interface DatacenterSettingsNavSection {
+  id: DatacenterSettingsSection;
   title: string;
   icon: string;
   description: string;

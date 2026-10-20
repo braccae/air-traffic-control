@@ -261,6 +261,41 @@ export interface AnsibleTaskStep {
   parameters: Record<string, any>;
 }
 
+/**
+ * A global ("datacenter-wide") settings page contributed by an addon module.
+ * Mirrors backend-go/pkg/plugin.SettingsPage plus the current persisted values.
+ */
+export type GlobalSettingsFieldType = 'string' | 'text' | 'int' | 'bool' | 'select' | 'secret';
+
+export interface GlobalSettingsFieldOption {
+  value: string;
+  label: string;
+}
+
+export interface GlobalSettingsField {
+  name: string;
+  label: string;
+  type: GlobalSettingsFieldType;
+  description?: string;
+  placeholder?: string;
+  default?: unknown;
+  required?: boolean;
+  secret?: boolean;
+  options?: GlobalSettingsFieldOption[];
+  min?: number;
+  max?: number;
+}
+
+export interface GlobalSettingsPage {
+  id: string;
+  title: string;
+  icon: string;
+  description: string;
+  order: number;
+  fields: GlobalSettingsField[];
+  values: Record<string, unknown>;
+}
+
 export interface QueuedAnsibleTask {
   id: string;
   title: string;
