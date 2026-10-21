@@ -26,6 +26,8 @@ import { RcloneRemotesView } from '../../components/RcloneRemotesView.tsx';
 import { SystemHealthTelemetry } from '../../components/SystemHealthTelemetry.tsx';
 import { SystemServicesView } from '../../components/SystemServicesView.tsx';
 import { PackageUpdatesView } from '../../components/PackageUpdatesView.tsx';
+import { NoSQLView } from '../../components/NoSQLView.tsx';
+import { SQLManagementView } from '../../components/SQLManagementView.tsx';
 
 export interface PluginViewProps {
   node: NodeItem;
@@ -387,6 +389,14 @@ const PackageUpdatesViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
   <PackageUpdatesView node={node} />
 );
 
+const NoSQLViewAdapter: React.FC<PluginViewProps> = ({ node, pluginId }) => (
+  <NoSQLView node={node} pluginId={pluginId} />
+);
+
+const SQLManagementViewAdapter: React.FC<PluginViewProps> = ({ node, pluginId }) => (
+  <SQLManagementView node={node} pluginId={pluginId} />
+);
+
 /**
  * Registry mapping plugin ID (`<kind>/<name>`) or kind to React view components.
  */
@@ -455,6 +465,11 @@ export const PLUGIN_VIEW_REGISTRY: Record<string, PluginViewComponent> = {
   // Telemetry
   'telemetry/glances': SystemHealthTelemetryAdapter,
   'telemetry': SystemHealthTelemetryAdapter,
+
+  // Databases & NoSQL
+  'database/sql': SQLManagementViewAdapter,
+  'database/nosql': NoSQLViewAdapter,
+  'database': SQLManagementViewAdapter,
 };
 
 /**
@@ -488,4 +503,6 @@ export {
   SystemHealthTelemetryAdapter as SystemHealthTelemetry,
   SystemServicesViewAdapter as SystemServicesView,
   PackageUpdatesViewAdapter as PackageUpdatesView,
+  NoSQLViewAdapter as NoSQLView,
+  SQLManagementViewAdapter as SQLManagementView,
 };

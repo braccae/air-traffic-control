@@ -17,9 +17,10 @@ import (
 	"air-traffic-control/backend/pkg/types"
 )
 
-// podmanProbeScript is the exact single-shot probe script
-// probeNodePodmanAndIdentities runs in src/utils/liveCluster.ts, joined the same
-// way ("; ").
+// podmanProbeScript probes both rootful (/run/podman/podman.sock) and rootless
+// (/run/user/<uid>/podman/podman.sock) Podman sockets directly using the
+// AGENTS.md §3 privilege escalation hierarchy (run0 -> sudo -n -> doas -n -> none),
+// falling back to native podman CLI if a socket is unavailable.
 const podmanProbeScript = "ps -eo uid,user:32,args --no-headers" + "; " +
 	"echo \"===PASSWD===\"" + "; " +
 	"cat /etc/passwd" + "; " +
@@ -28,20 +29,20 @@ const podmanProbeScript = "ps -eo uid,user:32,args --no-headers" + "; " +
 	"echo \"===LINGER===\"" + "; " +
 	"ls -1 /var/lib/systemd/linger 2>/dev/null || true" + "; " +
 	"echo \"===RUNUSER===\"" + "; " +
-	"ls -1d /run/user/*/libpod /run/user/*/podman /run/user/*/containers 2>/dev/null || true" + "; " +
+	"(run0 --background=no sh -c 'ls -1d /run/user/*/podman/podman.sock /run/user/*/libpod /run/user/*/podman /run/user/*/containers 2>/dev/null' 2>/dev/null || sudo -n sh -c 'ls -1d /run/user/*/podman/podman.sock /run/user/*/libpod /run/user/*/podman /run/user/*/containers 2>/dev/null' 2>/dev/null || doas -n sh -c 'ls -1d /run/user/*/podman/podman.sock /run/user/*/libpod /run/user/*/podman /run/user/*/containers 2>/dev/null' 2>/dev/null || ls -1d /run/user/*/podman/podman.sock /run/user/*/libpod /run/user/*/podman /run/user/*/containers 2>/dev/null) || true" + "; " +
 	"echo \"===ROOTPODMAN===\"" + "; " +
-	"(run0 --background=no podman ps --all --format json 2>/dev/null || sudo -n podman ps --all --format json 2>/dev/null || podman ps --all --format json 2>/dev/null) || true" + "; " +
+	"(run0 --background=no curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || sudo -n curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || doas -n curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || run0 --background=no podman ps --all --format json 2>/dev/null || sudo -n podman ps --all --format json 2>/dev/null || doas -n podman ps --all --format json 2>/dev/null || podman ps --all --format json 2>/dev/null) || true" + "; " +
 	"echo \"===ROOTPODS===\"" + "; " +
-	"(run0 --background=no podman pod ps --format json 2>/dev/null || sudo -n podman pod ps --format json 2>/dev/null || podman pod ps --format json 2>/dev/null) || true" + "; " +
+	"(run0 --background=no curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || sudo -n curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || doas -n curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || run0 --background=no podman pod ps --format json 2>/dev/null || sudo -n podman pod ps --format json 2>/dev/null || doas -n podman pod ps --format json 2>/dev/null || podman pod ps --format json 2>/dev/null) || true" + "; " +
 	"echo \"===ROOTSTATS===\"" + "; " +
-	"(run0 --background=no podman stats --no-stream --format json 2>/dev/null || sudo -n podman stats --no-stream --format json 2>/dev/null || podman stats --no-stream --format json 2>/dev/null) || true" + "; " +
+	"(run0 --background=no curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || sudo -n curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || doas -n curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || curl -sf --unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || run0 --background=no podman stats --no-stream --format json 2>/dev/null || sudo -n podman stats --no-stream --format json 2>/dev/null || doas -n podman stats --no-stream --format json 2>/dev/null || podman stats --no-stream --format json 2>/dev/null) || true" + "; " +
 	"echo \"===USERPROBES===\"" + "; " +
-	"USERS=$( ( [ -d /run/user ] && ls -1 /run/user 2>/dev/null | grep -E \"^[0-9]+$\" | while read u; do id -nu \"$u\" 2>/dev/null; done ; ls -1 /var/lib/systemd/linger 2>/dev/null ; awk -F: \"$1 != \\\"root\\\" && $2 != \\\"\\\" {print $1}\" /etc/subuid 2>/dev/null ) | sort -u )" + "; " +
-	"for u in $USERS; do uid=$(id -u \"$u\" 2>/dev/null || true); [ -n \"$uid\" ] && [ \"$uid\" -gt 0 ] 2>/dev/null || continue; echo \"---USER_PS:$u:$uid---\"; (run0 --background=no --user \"$u\" podman ps --all --format json 2>/dev/null || sudo -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman ps --all --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman ps --all --format json 2>/dev/null) || true; echo \"---USER_PODS:$u:$uid---\"; (run0 --background=no --user \"$u\" podman pod ps --format json 2>/dev/null || sudo -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman pod ps --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman pod ps --format json 2>/dev/null) || true; echo \"---USER_STATS:$u:$uid---\"; (run0 --background=no --user \"$u\" podman stats --no-stream --format json 2>/dev/null || sudo -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman stats --no-stream --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman stats --no-stream --format json 2>/dev/null) || true; done" + "; " +
+	"USERS=$( ( [ -d /run/user ] && ls -1 /run/user 2>/dev/null | grep -E \"^[0-9]+$\" | while read u; do id -nu \"$u\" 2>/dev/null; done ; ls -1 /var/lib/systemd/linger 2>/dev/null ) | sort -u )" + "; " +
+	"for u in $USERS; do uid=$(id -u \"$u\" 2>/dev/null || true); [ -n \"$uid\" ] && [ \"$uid\" -gt 0 ] 2>/dev/null || continue; sock=\"/run/user/$uid/podman/podman.sock\"; echo \"---USER_PS:$u:$uid---\"; (run0 --background=no curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || sudo -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || doas -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || run0 --background=no --user \"$u\" podman ps --all --format json 2>/dev/null || sudo -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman ps --all --format json 2>/dev/null || doas -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman ps --all --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman ps --all --format json 2>/dev/null) || true; echo \"---USER_PODS:$u:$uid---\"; (run0 --background=no curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || sudo -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || doas -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || run0 --background=no --user \"$u\" podman pod ps --format json 2>/dev/null || sudo -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman pod ps --format json 2>/dev/null || doas -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman pod ps --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman pod ps --format json 2>/dev/null) || true; echo \"---USER_STATS:$u:$uid---\"; (run0 --background=no curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || sudo -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || doas -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || run0 --background=no --user \"$u\" podman stats --no-stream --format json 2>/dev/null || sudo -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman stats --no-stream --format json 2>/dev/null || doas -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman stats --no-stream --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman stats --no-stream --format json 2>/dev/null) || true; done" + "; " +
 	"echo \"===DOCKER_CLI===\"" + "; " +
 	"which docker 2>/dev/null || echo \"NO_DOCKER\"" + "; " +
 	"echo \"===DOCKER===\"" + "; " +
-	"(docker ps --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}\" 2>/dev/null || sudo -n docker ps --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}\" 2>/dev/null) || echo \"NO_DOCKER\""
+	"(docker ps --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}\" 2>/dev/null || run0 --background=no docker ps --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}\" 2>/dev/null || sudo -n docker ps --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}\" 2>/dev/null || doas -n docker ps --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}\" 2>/dev/null) || echo \"NO_DOCKER\""
 
 // containerItem mirrors ContainerItem in src/types/index.ts (wire keys and
 // types). podId/podName are omitted when empty, like `undefined` in Express.
@@ -269,7 +270,7 @@ func (a *API) probeContainers(ctx context.Context, rec hostcache.NodeRecord) (*c
 		return nil, err
 	}
 
-	out, scriptErr := runNodeCommandTimeout(probeCtx, runner, podmanProbeScript, 8*time.Second)
+	out, scriptErr := runNodeCommandTimeout(probeCtx, runner, podmanProbeScript, 15*time.Second)
 	if scriptErr != nil && !strings.Contains(out, "===PASSWD===") {
 		return nil, fmt.Errorf("podman probe failed for %s: %w", rec.Name, scriptErr)
 	}
@@ -325,11 +326,26 @@ type statEntry struct {
 	Memory string
 }
 
-// parseStatsJSON mirrors the parseStatsJson closure in liveCluster.ts.
+// parseStatsJSON mirrors the parseStatsJson closure in liveCluster.ts and also
+// supports the Libpod socket API envelope {"Error":null,"Stats":[...]}.
 func parseStatsJSON(raw string) map[string]statEntry {
 	stats := map[string]statEntry{}
 	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" || !strings.HasPrefix(trimmed, "[") {
+	if trimmed == "" {
+		return stats
+	}
+
+	if strings.HasPrefix(trimmed, "{") {
+		if parsedSocket, err := pkgpodman.ParseStatsJSON(trimmed); err == nil && len(parsedSocket) > 0 {
+			for k, v := range parsedSocket {
+				stats[k] = statEntry{CPU: v.CPUPerc, Memory: v.MemUsage}
+			}
+			return stats
+		}
+		return stats
+	}
+
+	if !strings.HasPrefix(trimmed, "[") {
 		return stats
 	}
 
@@ -451,6 +467,8 @@ func parseRootContainers(raw string, stats map[string]statEntry) []containerItem
 		status := rc.Status
 		if status == "" {
 			status = rc.State
+		} else if rc.State != "" && !strings.Contains(strings.ToLower(status), strings.ToLower(rc.State)) && !strings.HasPrefix(strings.ToLower(status), "up ") && !strings.HasPrefix(strings.ToLower(status), "exited") {
+			status = fmt.Sprintf("%s (%s)", rc.State, status)
 		}
 		if status == "" {
 			status = "Running"

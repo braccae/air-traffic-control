@@ -1,6 +1,7 @@
 package ansibleapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -57,6 +58,7 @@ func NewAPI(opts APIOptions) (*API, error) {
 	}
 
 	runner := NewPlaybookRunner(repoRoot, opts.Store, opts.Broadcast)
+	runner.playbooksDir = pbDir
 
 	return &API{
 		store:          opts.Store,
@@ -67,6 +69,22 @@ func NewAPI(opts APIOptions) (*API, error) {
 		playbooksDir:   pbDir,
 		broadcast:      opts.Broadcast,
 	}, nil
+}
+
+// RunPlaybook satisfies cronapi.PlaybookRunner so scheduled playbooks run
+// through the same detached background runner and stream to the UI.
+func (a *API) RunPlaybook(ctx context.Context, playbook, target string, extraVars map[string]any) (string, error) {
+	var ev any
+	if len(extraVars) > 0 {
+		ev = extraVars
+	}
+	taskID, _, err := a.playbookRunner.Run(context.WithoutCancel(ctx), RunRequest{
+		Playbook:  playbook,
+		Target:    target,
+		ExtraVars: ev,
+		Source:    "cron",
+	})
+	return taskID, err
 }
 
 // Register mounts all Ansible API endpoints on mux.
@@ -410,6 +428,11 @@ func (a *API) handlePlaybooksSubtree(w http.ResponseWriter, r *http.Request) {
 		a.handlePlaybookParse(w, r)
 		return
 	}
+	if strings.HasSuffix(trimmed, "/queue") && r.Method == http.MethodPost {
+		name := strings.TrimSuffix(trimmed, "/queue")
+		a.handlePlaybookQueue(w, r, name)
+		return
+	}
 	a.handlePlaybookItem(w, r)
 }
 
@@ -605,6 +628,123 @@ func (a *API) handlePlaybookSyntaxCheck(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// POST /api/playbooks/:name/queue
+func (a *API) handlePlaybookQueue(w http.ResponseWriter, r *http.Request, name string) {
+	val := ValidatePlaybookName(name)
+	if !val.Valid {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": val.Error})
+		return
+	}
+
+	playbookPath := filepath.Join(a.playbooksDir, val.Name)
+	if _, err := os.Stat(playbookPath); os.IsNotExist(err) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": fmt.Sprintf("Playbook %s not found", val.Name)})
+		return
+	}
+
+	if a.queueStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"success": false, "error": "Queue store not configured"})
+		return
+	}
+
+	var req struct {
+		Target    *string `json:"target"`
+		CheckMode bool    `json:"checkMode"`
+		Tags      string  `json:"tags"`
+		ExtraVars any     `json:"extraVars"`
+		Execute   bool    `json:"execute"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	target := "all"
+	if req.Target != nil {
+		target = strings.TrimSpace(*req.Target)
+		if target == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": `target must be a non-empty inventory pattern (use "all")`})
+			return
+		}
+	}
+
+	pbRun := &ansqueue.PlaybookRun{
+		Playbook:  val.Name,
+		Target:    target,
+		CheckMode: req.CheckMode,
+		Tags:      strings.TrimSpace(req.Tags),
+		ExtraVars: req.ExtraVars,
+	}
+
+	become := false
+	qTask := ansqueue.Task{
+		ID:              fmt.Sprintf("queue-playbook-%d", time.Now().UnixMilli()),
+		Title:           fmt.Sprintf("Run playbook %s (%s)", val.Name, target),
+		TargetNodeID:    fmt.Sprintf("playbook:%s", val.Name),
+		TargetNodeName:  target,
+		TargetHostRoute: target,
+		Category:        "custom",
+		PrimaryModule:   "ansible-playbook",
+		Steps:           []ansqueue.Step{},
+		PlaybookRun:     pbRun,
+		Become:          &become,
+		Status:          ansqueue.StatusStaged,
+		CreatedAt:       time.Now().UnixMilli(),
+	}
+
+	enqueued, err := a.queueStore.Enqueue(qTask)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+
+	if a.broadcast != nil {
+		snap := a.queueStore.Snapshot()
+		a.broadcast(map[string]any{
+			"type":  "queue_updated",
+			"queue": map[string]any{"tasks": snap.Tasks, "isRunning": snap.IsRunning},
+		})
+	}
+
+	if !req.Execute {
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "task": enqueued})
+		return
+	}
+
+	inventoryPath := filepath.Join(a.repoRoot, "inventory", "tailscale_inventory.py")
+	if _, err := os.Stat(inventoryPath); os.IsNotExist(err) {
+		inventoryPath = ""
+	}
+	outcome, err := a.queueStore.ExecuteNextTask(context.WithoutCancel(r.Context()), ansqueue.Options{
+		WorkDir:       a.repoRoot,
+		TaskID:        enqueued.ID,
+		InventoryPath: inventoryPath,
+		Invalidator:   ansqueue.NewCacheInvalidator(a.store),
+		TaskStore:     a.store,
+		Broadcast:     a.broadcast,
+	})
+	if a.broadcast != nil {
+		snap := a.queueStore.Snapshot()
+		a.broadcast(map[string]any{
+			"type":           "queue_execution_finished",
+			"taskId":         enqueued.ID,
+			"result":         outcome.Result,
+			"remainingCount": outcome.RemainingCount,
+			"haltedOnError":  outcome.HaltedOnError,
+			"queue":          map[string]any{"tasks": snap.Tasks, "isRunning": snap.IsRunning},
+		})
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	success := outcome.Result != nil && outcome.Result.Success
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":        success,
+		"task":           enqueued,
+		"result":         outcome.Result,
+		"remainingCount": outcome.RemainingCount,
+		"haltedOnError":  outcome.HaltedOnError,
+	})
+}
+
 // POST /api/playbook/run
 func (a *API) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -630,11 +770,16 @@ func (a *API) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 
 	// If mode == 'queue', stage into ansqueue
 	if req.Mode == "queue" && a.queueStore != nil {
+		tags := strings.TrimSpace(req.Tags)
+		become := false
 		qTask := ansqueue.Task{
 			ID:              fmt.Sprintf("task-queue-%d", time.Now().UnixMilli()),
 			TargetNodeID:    req.Target,
+			TargetNodeName:  req.Target,
 			TargetHostRoute: req.Target,
 			Title:           fmt.Sprintf("Run playbook %s", req.Playbook),
+			Category:        "custom",
+			PrimaryModule:   "ansible-playbook",
 			Status:          ansqueue.StatusStaged,
 			Steps: []ansqueue.Step{
 				{
@@ -645,6 +790,14 @@ func (a *API) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 					},
 				},
 			},
+			PlaybookRun: &ansqueue.PlaybookRun{
+				Playbook:  req.Playbook,
+				Target:    req.Target,
+				CheckMode: req.CheckMode,
+				Tags:      tags,
+				ExtraVars: req.ExtraVars,
+			},
+			Become:    &become,
 			CreatedAt: time.Now().UnixMilli(),
 		}
 		enqueued, err := a.queueStore.Enqueue(qTask)
@@ -663,7 +816,7 @@ func (a *API) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	taskId, task, err := a.playbookRunner.Run(r.Context(), RunRequest{
+	taskId, task, err := a.playbookRunner.Run(context.WithoutCancel(r.Context()), RunRequest{
 		Playbook:  req.Playbook,
 		Target:    req.Target,
 		CheckMode: req.CheckMode,

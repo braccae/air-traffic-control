@@ -45,6 +45,7 @@ func NewAPI(opts APIOptions) (*API, error) {
 func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/queue", a.handleQueue)
 	mux.HandleFunc("/api/queue/task", a.handleTask)
+	mux.HandleFunc("/api/queue/tasks", a.handleTask)
 	mux.HandleFunc("/api/queue/task/", a.handleTaskByID)
 	mux.HandleFunc("/api/queue/execute", a.handleExecute)
 }
@@ -80,16 +81,82 @@ func (a *API) handleTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var task Task
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&task); err != nil {
+	rawBytes, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
 			"error":   "Invalid task payload: title, targetNodeId, targetHostRoute, and non-empty steps required",
 		})
 		return
 	}
-	if task.Title == "" || task.TargetNodeID == "" || task.TargetHostRoute == "" || len(task.Steps) == 0 {
+
+	var task Task
+	if err := json.Unmarshal(rawBytes, &task); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "Invalid task payload: title, targetNodeId, targetHostRoute, and non-empty steps required",
+		})
+		return
+	}
+
+	// Support wrapped plugin TaskSpec payloads (`{"nodeId": "...", "task": {"name": "...", "steps": [...]}}`).
+	if task.Title == "" && task.TargetNodeID == "" {
+		var wrapped struct {
+			NodeID string `json:"nodeId"`
+			Task   struct {
+				ID            string            `json:"id"`
+				Name          string            `json:"name"`
+				Title         string            `json:"title"`
+				Category      string            `json:"category"`
+				PrimaryModule string            `json:"primaryModule"`
+				Become        *bool             `json:"become"`
+				SecretsMasked map[string]string `json:"secretsMasked"`
+				Steps         []struct {
+					Name       string         `json:"name"`
+					Module     string         `json:"module"`
+					Params     map[string]any `json:"params"`
+					Parameters map[string]any `json:"parameters"`
+				} `json:"steps"`
+			} `json:"task"`
+		}
+		if err := json.Unmarshal(rawBytes, &wrapped); err == nil && wrapped.NodeID != "" && (wrapped.Task.Name != "" || wrapped.Task.Title != "") {
+			title := firstNonEmpty(wrapped.Task.Title, wrapped.Task.Name)
+			steps := make([]Step, len(wrapped.Task.Steps))
+			for i, s := range wrapped.Task.Steps {
+				params := s.Parameters
+				if len(params) == 0 {
+					params = s.Params
+				}
+				if params == nil {
+					params = map[string]any{}
+				}
+				steps[i] = Step{
+					Name:       s.Name,
+					Module:     s.Module,
+					Parameters: params,
+				}
+			}
+			primaryMod := wrapped.Task.PrimaryModule
+			if primaryMod == "" && len(steps) > 0 {
+				primaryMod = steps[0].Module
+			}
+			task = Task{
+				ID:              wrapped.Task.ID,
+				Title:           title,
+				TargetNodeID:    wrapped.NodeID,
+				TargetNodeName:  wrapped.NodeID,
+				TargetHostRoute: wrapped.NodeID,
+				Category:        firstNonEmpty(wrapped.Task.Category, "database"),
+				PrimaryModule:   firstNonEmpty(primaryMod, "ansible.builtin.command"),
+				Steps:           steps,
+				SecretsMasked:   wrapped.Task.SecretsMasked,
+				Become:          wrapped.Task.Become,
+				Status:          StatusStaged,
+			}
+		}
+	}
+
+	if task.Title == "" || task.TargetNodeID == "" || task.TargetHostRoute == "" || (len(task.Steps) == 0 && task.PlaybookRun == nil) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
 			"error":   "Invalid task payload: title, targetNodeId, targetHostRoute, and non-empty steps required",

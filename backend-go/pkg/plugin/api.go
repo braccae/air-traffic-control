@@ -330,7 +330,7 @@ func TTLForKind(kind Kind) time.Duration {
 		return 30 * time.Second
 	case KindFirewall:
 		return 45 * time.Second
-	case KindStorage, KindShare, KindDisk, KindVM, KindMount, KindBackup:
+	case KindStorage, KindShare, KindDisk, KindVM, KindMount, KindBackup, KindDatabase:
 		return 60 * time.Second
 	default:
 		return 60 * time.Second

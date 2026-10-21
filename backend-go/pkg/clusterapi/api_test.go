@@ -187,6 +187,27 @@ func TestTasksAndResticSnapshot(t *testing.T) {
 		t.Fatalf("unexpected tasks: %+v", tasks)
 	}
 
+	// GET /api/tasks/:id
+	reqTask := httptest.NewRequest(http.MethodGet, "/api/tasks/task-1", nil)
+	recTask := httptest.NewRecorder()
+	mux.ServeHTTP(recTask, reqTask)
+	if recTask.Code != http.StatusOK {
+		t.Fatalf("expected 200 for task-1, got %d", recTask.Code)
+	}
+	var singleTask hostcache.Task
+	_ = json.Unmarshal(recTask.Body.Bytes(), &singleTask)
+	if singleTask.ID != "task-1" || singleTask.NodeTarget != "node-1" {
+		t.Fatalf("unexpected single task: %+v", singleTask)
+	}
+
+	// GET /api/tasks/nonexistent -> 404
+	req404 := httptest.NewRequest(http.MethodGet, "/api/tasks/nonexistent", nil)
+	rec404 := httptest.NewRecorder()
+	mux.ServeHTTP(rec404, req404)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for nonexistent task, got %d", rec404.Code)
+	}
+
 	// POST /api/restic/snapshot
 	req = httptest.NewRequest(http.MethodPost, "/api/restic/snapshot", strings.NewReader(`{"host":"likes-it-cold"}`))
 	req.Header.Set("Content-Type", "application/json")

@@ -367,6 +367,61 @@ func TestPlaybookRunnerAndQueueMode(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("expected 404 for cancelling inactive task, got %d: %v", status, res)
 	}
+
+	// Test live stdout streaming via mock ansible-playbook binary
+	binDir := filepath.Join(env.tempDir, "data", "ansible-venv", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll binDir: %v", err)
+	}
+	mockBin := filepath.Join(binDir, "ansible-playbook")
+	script := "#!/bin/sh\necho \"PLAY [Test Live Play] ***\"\necho \"TASK [Gathering Facts] ***\"\necho \"ok: [srv-1]\"\necho \"PLAY RECAP ***\"\nexit 0\n"
+	if err := os.WriteFile(mockBin, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile mockBin: %v", err)
+	}
+
+	liveRunPayload := map[string]any{
+		"playbook": "test-run.yml",
+		"target":   "srv-1",
+	}
+	status, res = doJSON(t, env.server, http.MethodPost, "/api/playbook/run", liveRunPayload)
+	if status != http.StatusOK || res["success"] != true {
+		t.Fatalf("expected 200 for live run, got %d: %v", status, res)
+	}
+	taskId, _ := res["taskId"].(string)
+	if taskId == "" {
+		t.Fatalf("expected taskId in response: %v", res)
+	}
+
+	// Wait for background goroutine to finish streaming and persisting logs
+	deadline := time.Now().Add(3 * time.Second)
+	var savedTask *hostcache.Task
+	for time.Now().Before(deadline) {
+		tk, _ := env.store.GetTask(taskId)
+		if tk != nil && tk.Status == "OK" {
+			savedTask = tk
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if savedTask == nil || savedTask.Status != "OK" {
+		t.Fatalf("expected task %s to finish with OK status, got %+v", taskId, savedTask)
+	}
+
+	var savedLogs []string
+	_ = json.Unmarshal(savedTask.Logs, &savedLogs)
+	if len(savedLogs) < 4 {
+		t.Fatalf("expected incremental logs persisted in SQLite, got %v", savedLogs)
+	}
+
+	var taskOutputCount int
+	for _, ev := range *env.events {
+		if ev["type"] == "task_output" && ev["taskId"] == taskId {
+			taskOutputCount++
+		}
+	}
+	if taskOutputCount < 3 {
+		t.Fatalf("expected at least 3 live task_output broadcast events, got %d", taskOutputCount)
+	}
 }
 
 func TestGroupVarsStore(t *testing.T) {
@@ -417,5 +472,42 @@ func TestGroupVarsStore(t *testing.T) {
 	status, _ = doJSON(t, env.server, http.MethodDelete, "/api/group-vars?file=group_vars/missing.yml", nil)
 	if status != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing group var delete, got %d", status)
+	}
+}
+
+func TestPlaybookQueueEndpoint(t *testing.T) {
+	env := setupAnsibleTestEnv(t)
+
+	// Create a playbook first
+	createPayload := map[string]any{
+		"name":    "queue-me.yml",
+		"content": "---\n- hosts: all\n  tasks: []\n",
+	}
+	status, res := doJSON(t, env.server, http.MethodPost, "/api/playbooks", createPayload)
+	if status != http.StatusCreated && status != http.StatusOK {
+		t.Fatalf("failed to create playbook: %d %v", status, res)
+	}
+
+	// Stage playbook via POST /api/playbooks/queue-me.yml/queue
+	queuePayload := map[string]any{
+		"target":    "tag_host",
+		"checkMode": true,
+		"tags":      "deploy",
+		"execute":   false,
+	}
+	status, res = doJSON(t, env.server, http.MethodPost, "/api/playbooks/queue-me.yml/queue", queuePayload)
+	if status != http.StatusOK || res["success"] != true {
+		t.Fatalf("expected 200 for POST /api/playbooks/queue-me.yml/queue, got %d: %v", status, res)
+	}
+
+	snap := env.queueStore.Snapshot()
+	if len(snap.Tasks) != 1 {
+		t.Fatalf("expected 1 queued playbook task, got %d", len(snap.Tasks))
+	}
+	if snap.Tasks[0].PlaybookRun == nil || snap.Tasks[0].PlaybookRun.Playbook != "queue-me.yml" {
+		t.Errorf("expected PlaybookRun for queue-me.yml, got %+v", snap.Tasks[0].PlaybookRun)
+	}
+	if snap.Tasks[0].PlaybookRun.Target != "tag_host" || !snap.Tasks[0].PlaybookRun.CheckMode {
+		t.Errorf("unexpected PlaybookRun fields: %+v", snap.Tasks[0].PlaybookRun)
 	}
 }

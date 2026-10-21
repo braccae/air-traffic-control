@@ -24,6 +24,7 @@ const (
 	KindDisk       Kind = "disk"
 	KindVM         Kind = "vm"
 	KindSystem     Kind = "system"
+	KindDatabase   Kind = "database"
 )
 
 // Meta provides display and identification metadata for a plugin

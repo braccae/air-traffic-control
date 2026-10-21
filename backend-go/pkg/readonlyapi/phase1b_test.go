@@ -79,6 +79,13 @@ func TestParseStatsJSON(t *testing.T) {
 	if got := parseStatsJSON("not json"); len(got) != 0 {
 		t.Fatalf("non-JSON stats must yield no entries, got %v", got)
 	}
+
+	// Shape emitted by Libpod socket API (/v4.0.0/libpod/containers/stats?stream=false).
+	sockRaw := `{"Error":null,"Stats":[{"ContainerID":"e377a55482d2c038","Name":"systemd-caddy","CPU":0.18,"MemUsage":182583296,"MemPerc":0.56}]}`
+	sockStats := parseStatsJSON(sockRaw)
+	if s, ok := sockStats["e377a55482d2"]; !ok || s.CPU != "0.18%" || s.Memory != "182.6MB" {
+		t.Fatalf("unexpected socket stats parse result: %+v", sockStats)
+	}
 }
 
 func TestParseRootContainersAndPods(t *testing.T) {

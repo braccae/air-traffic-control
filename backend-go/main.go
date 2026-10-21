@@ -189,6 +189,8 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 			RunOptions: ansqueue.Options{
 				WorkDir:     ansqueue.ResolveWorkDir(),
 				Invalidator: ansqueue.NewCacheInvalidator(store),
+				TaskStore:   store,
+				Broadcast:   queueBroadcast,
 			},
 			Broadcast: queueBroadcast,
 		}); err != nil {
@@ -198,7 +200,8 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 		}
 
 		// Mount ported Ansible API routes (config, environment, inventory, modules, playbooks, group-vars)
-		if ansAPI, err := ansibleapi.NewAPI(ansibleapi.APIOptions{
+		var ansAPI *ansibleapi.API
+		if aAPI, err := ansibleapi.NewAPI(ansibleapi.APIOptions{
 			Store:      store,
 			QueueStore: qStore,
 			RepoRoot:   ansqueue.ResolveWorkDir(),
@@ -206,6 +209,7 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 		}); err != nil {
 			log.Printf("ansible API disabled: %v", err)
 		} else {
+			ansAPI = aAPI
 			ansAPI.Register(mux)
 		}
 
@@ -235,6 +239,7 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 		cronScheduler := cronapi.NewScheduler(cronapi.SchedulerOptions{
 			Store:      store,
 			QueueStore: qStore,
+			Runner:     ansAPI,
 			RepoRoot:   ansqueue.ResolveWorkDir(),
 			Broadcast:  queueBroadcast,
 		})

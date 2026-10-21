@@ -1399,15 +1399,28 @@ func (a *API) handleReboot(w http.ResponseWriter, r *http.Request, nodeID string
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, runErr := a.runCommand(ctx, targetNode, "sleep 1 && sudo systemctl reboot &", 3*time.Second)
+		out, runErr := a.runCommand(ctx, targetNode, "sleep 1 && sudo systemctl reboot &", 3*time.Second)
 
 		taskUpdate := rebootTask
 		taskUpdate.Progress = 100
-		taskUpdate.Status = "OK"
 		if runErr == nil {
+			taskUpdate.Status = "OK"
 			taskUpdate.ProgressEta = "Reboot signal delivered"
+			taskUpdate.Logs = json.RawMessage(fmt.Sprintf("[%q,%q]",
+				fmt.Sprintf("[reboot] Initiating graceful reboot sequence on %s", nodeName),
+				"[reboot] Reboot signal delivered",
+			))
 		} else {
-			taskUpdate.ProgressEta = "Reboot dispatched"
+			errMsg := strings.TrimSpace(out)
+			if errMsg == "" {
+				errMsg = runErr.Error()
+			}
+			taskUpdate.Status = "FAILED"
+			taskUpdate.ProgressEta = fmt.Sprintf("Failed: %s", errMsg)
+			taskUpdate.Logs = json.RawMessage(fmt.Sprintf("[%q,%q]",
+				fmt.Sprintf("[reboot] Initiating graceful reboot sequence on %s", nodeName),
+				fmt.Sprintf("[error] Reboot failed: %s", errMsg),
+			))
 		}
 		_ = a.store.SaveTask(taskUpdate)
 		a.emit(map[string]any{"type": "task_updated", "task": taskUpdate})
@@ -1474,16 +1487,57 @@ func (a *API) HandlePodmanAction(w http.ResponseWriter, r *http.Request) {
 	)
 
 	var cmd string
+	sockAction := fmt.Sprintf("http://d/v4.0.0/libpod/containers/%s/%s", body.Container, body.Action)
 	if body.User != "" && body.User != "root" {
 		effectiveUID := 1000
 		if body.UID != nil {
 			effectiveUID = *body.UID
 		}
-		cmd = fmt.Sprintf("run0 --background=no --user %s podman %s %s 2>&1 || sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman %s %s 2>&1 || podman %s %s 2>&1",
-			body.User, body.Action, body.Container, body.User, effectiveUID, body.Action, body.Container, body.Action, body.Container)
+		uSock := fmt.Sprintf("/run/user/%d/podman/podman.sock", effectiveUID)
+		cmd = fmt.Sprintf(
+			"run0 --background=no curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+				"run0 --background=no --user %s curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+				"sudo -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+				"doas -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+				"curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+				"run0 --background=no --user %s podman %s %s 2>&1 || "+
+				"sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman %s %s 2>&1 || "+
+				"doas -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman %s %s 2>&1 || "+
+				"podman %s %s 2>&1",
+			uSock, sockAction,
+			body.User, uSock, sockAction,
+			uSock, sockAction,
+			uSock, sockAction,
+			uSock, sockAction,
+			body.User, body.Action, body.Container,
+			body.User, effectiveUID, body.Action, body.Container,
+			body.User, effectiveUID, body.Action, body.Container,
+			body.Action, body.Container,
+		)
 	} else {
-		cmd = fmt.Sprintf("run0 --background=no podman %s %s 2>&1 || sudo -n podman %s %s 2>&1 || sudo -n docker %s %s 2>&1 || podman %s %s 2>&1",
-			body.Action, body.Container, body.Action, body.Container, body.Action, body.Container, body.Action, body.Container)
+		rootSock := "/run/podman/podman.sock"
+		cmd = fmt.Sprintf(
+			"run0 --background=no curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+				"sudo -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+				"doas -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+				"curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+				"run0 --background=no podman %s %s 2>&1 || "+
+				"sudo -n podman %s %s 2>&1 || "+
+				"doas -n podman %s %s 2>&1 || "+
+				"sudo -n docker %s %s 2>&1 || "+
+				"doas -n docker %s %s 2>&1 || "+
+				"podman %s %s 2>&1",
+			rootSock, sockAction,
+			rootSock, sockAction,
+			rootSock, sockAction,
+			rootSock, sockAction,
+			body.Action, body.Container,
+			body.Action, body.Container,
+			body.Action, body.Container,
+			body.Action, body.Container,
+			body.Action, body.Container,
+			body.Action, body.Container,
+		)
 	}
 
 	out, runErr := a.runCommand(r.Context(), targetNode, cmd, 8*time.Second)
@@ -1719,7 +1773,12 @@ func (a *API) handlePackagesApply(w http.ResponseWriter, r *http.Request, nodeID
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "Host not found"})
 		return
 	}
+	targetID, _ := targetNode.GetString("id")
 	nodeName, _ := targetNode.GetString("name")
+	sshUser, _ := targetNode.GetString("sshUser")
+	if sshUser == "" {
+		sshUser = "core"
+	}
 
 	var req struct {
 		Manager  string   `json:"manager"`
@@ -1727,34 +1786,92 @@ func (a *API) handlePackagesApply(w http.ResponseWriter, r *http.Request, nodeID
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	mgr := req.Manager
+	mgr := strings.TrimSpace(req.Manager)
 	if mgr == "" {
-		mgr = "dnf"
+		out, _ := a.runCommand(r.Context(), targetNode, "which bootc 2>/dev/null || which rpm-ostree 2>/dev/null || which dnf 2>/dev/null || which apt-get 2>/dev/null || which apk 2>/dev/null || echo 'dnf'", 8*time.Second)
+		trimmed := strings.TrimSpace(out)
+		switch {
+		case strings.Contains(trimmed, "bootc"):
+			mgr = "bootc"
+		case strings.Contains(trimmed, "rpm-ostree"):
+			mgr = "rpm-ostree"
+		case strings.Contains(trimmed, "apt-get"):
+			mgr = "apt"
+		case strings.Contains(trimmed, "apk"):
+			mgr = "apk"
+		default:
+			mgr = "dnf"
+		}
+	}
+
+	var applyCmd string
+	switch mgr {
+	case "bootc":
+		applyCmd = "sudo bootc upgrade"
+	case "rpm-ostree":
+		applyCmd = "sudo rpm-ostree upgrade"
+	case "apt":
+		applyCmd = "sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
+	case "apk":
+		applyCmd = "sudo apk upgrade"
+	default:
+		applyCmd = "sudo dnf upgrade -y"
 	}
 
 	taskID := fmt.Sprintf("task-pkg-%d", time.Now().UnixMilli())
+	initLog := fmt.Sprintf("[packageManager] Starting updates via %s on %s: %s", mgr, nodeName, applyCmd)
 	pkgTask := hostcache.Task{
 		ID:          taskID,
 		StartTime:   time.Now().Format("2006-01-02 15:04:05"),
 		NodeTarget:  nodeName,
-		User:        "core@packages",
+		User:        fmt.Sprintf("%s@ssh-agent", sshUser),
 		Description: fmt.Sprintf("apply package updates on %s (%s)", nodeName, mgr),
 		Progress:    20,
-		ProgressEta: "Applying package updates...",
+		ProgressEta: fmt.Sprintf("Executing %s...", applyCmd),
 		Status:      "RUNNING",
-		Category:    "maintenance",
+		Category:    "active",
+		Logs:        json.RawMessage(fmt.Sprintf("[%q]", initLog)),
 	}
 
 	if a.store != nil {
 		_ = a.store.SaveTask(pkgTask)
+		if targetID != "" {
+			_ = a.store.InvalidateHostSections(targetID)
+		}
 	}
 	a.emit(map[string]any{"type": "task_started", "task": pkgTask})
 
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		out, runErr := a.runCommand(ctx, targetNode, applyCmd, 5*time.Minute)
+
 		pkgTask.Progress = 100
-		pkgTask.ProgressEta = "Updates complete"
-		pkgTask.Status = "OK"
+		logLines := []string{initLog}
+		if trimmedOut := strings.TrimSpace(out); trimmedOut != "" {
+			for _, line := range strings.Split(trimmedOut, "\n") {
+				if strings.TrimSpace(line) != "" {
+					logLines = append(logLines, line)
+				}
+			}
+		}
+
+		if runErr != nil {
+			errMsg := strings.TrimSpace(out)
+			if errMsg == "" {
+				errMsg = runErr.Error()
+			}
+			pkgTask.Status = "FAILED"
+			pkgTask.ProgressEta = fmt.Sprintf("Failed: %s", errMsg)
+			logLines = append(logLines, fmt.Sprintf("[error] Package upgrade failed: %s", errMsg))
+		} else {
+			pkgTask.Status = "OK"
+			pkgTask.ProgressEta = "Updates complete"
+			logLines = append(logLines, "[packageManager] Package upgrade finished successfully.")
+		}
+		if b, err := json.Marshal(logLines); err == nil {
+			pkgTask.Logs = json.RawMessage(b)
+		}
 		if a.store != nil {
 			_ = a.store.SaveTask(pkgTask)
 		}
@@ -1763,7 +1880,9 @@ func (a *API) handlePackagesApply(w http.ResponseWriter, r *http.Request, nodeID
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
+		"taskId":  taskID,
 		"task":    pkgTask,
+		"message": fmt.Sprintf("Applying updates on %s via %s", nodeName, mgr),
 	})
 }
 

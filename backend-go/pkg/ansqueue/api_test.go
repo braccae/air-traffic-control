@@ -2,11 +2,16 @@ package ansqueue
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"air-traffic-control/backend/pkg/hostcache"
 )
 
 func newTestAPI(t *testing.T, exec ExecFunc) (*API, *Store, *httptest.Server) {
@@ -301,5 +306,105 @@ func TestAPIExecutionBroadcasts(t *testing.T) {
 func TestAPINewAPIRequiresStore(t *testing.T) {
 	if _, err := NewAPI(APIOptions{}); err == nil {
 		t.Fatal("expected an error for a nil store")
+	}
+}
+
+func TestAPIWrappedPluginTaskPayloadAndTasksAlias(t *testing.T) {
+	_, store, srv := newTestAPI(t, successExec())
+
+	wrappedPayload := map[string]any{
+		"nodeId": "likes-it-cold",
+		"task": map[string]any{
+			"name":     "Create SQL User app_user",
+			"category": "database",
+			"steps": []map[string]any{
+				{
+					"name":   "Ensure database user",
+					"module": "community.postgresql.postgresql_user",
+					"params": map[string]any{"name": "app_user"},
+				},
+			},
+		},
+	}
+	rawBody, _ := json.Marshal(wrappedPayload)
+	resp, body := doRequest(t, srv, http.MethodPost, "/api/queue/tasks", string(rawBody))
+	if resp.StatusCode != http.StatusOK || body["success"] != true {
+		t.Fatalf("POST /api/queue/tasks failed: status=%d body=%v", resp.StatusCode, body)
+	}
+
+	snap := store.Snapshot()
+	if len(snap.Tasks) != 1 {
+		t.Fatalf("expected 1 queued task, got %d", len(snap.Tasks))
+	}
+	if snap.Tasks[0].Title != "Create SQL User app_user" {
+		t.Errorf("expected title 'Create SQL User app_user', got %q", snap.Tasks[0].Title)
+	}
+	if snap.Tasks[0].TargetNodeID != "likes-it-cold" {
+		t.Errorf("expected targetNodeId 'likes-it-cold', got %q", snap.Tasks[0].TargetNodeID)
+	}
+}
+
+func TestExecutePlaybookRunTaskAndRecordBackgroundTask(t *testing.T) {
+	hostStore, err := hostcache.Open(filepath.Join(t.TempDir(), "hosts.sqlite"))
+	if err != nil {
+		t.Fatalf("hostcache.Open: %v", err)
+	}
+	defer func() { _ = hostStore.Close() }()
+
+	qStore := New(hostStore.SQLDB())
+	work := t.TempDir()
+	pbDir := filepath.Join(work, "ansible", "playbooks")
+	if err := os.MkdirAll(pbDir, 0o755); err != nil {
+		t.Fatalf("mkdir playbooks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pbDir, "site.yml"), []byte("---\n- hosts: all\n  tasks: []\n"), 0o644); err != nil {
+		t.Fatalf("write site.yml: %v", err)
+	}
+
+	var seenArgs []string
+	_, err = qStore.Enqueue(Task{
+		ID:              "queue-pb-1",
+		Title:           "Run playbook site.yml (tag_host)",
+		TargetNodeID:    "playbook:site.yml",
+		TargetNodeName:  "tag_host",
+		TargetHostRoute: "tag_host",
+		Category:        "custom",
+		PrimaryModule:   "ansible-playbook",
+		PlaybookRun: &PlaybookRun{
+			Playbook:  "site.yml",
+			Target:    "tag_host",
+			CheckMode: true,
+			Tags:      "setup",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Enqueue PlaybookRun: %v", err)
+	}
+
+	outcome, err := qStore.ExecuteNextTask(context.Background(), Options{
+		WorkDir:   work,
+		TaskStore: hostStore,
+		Exec: func(ctx context.Context, name string, args []string, opts ExecOptions) (ExecResult, error) {
+			seenArgs = append([]string(nil), args...)
+			return successExec()(ctx, name, args, opts)
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteNextTask: %v", err)
+	}
+	if outcome.Result == nil || !outcome.Result.Success {
+		t.Fatalf("expected successful PlaybookRun execution, got %+v", outcome)
+	}
+	joinedArgs := strings.Join(seenArgs, " ")
+	if !strings.Contains(joinedArgs, "--check") || !strings.Contains(joinedArgs, "--tags setup") || !strings.Contains(joinedArgs, "site.yml") {
+		t.Errorf("expected ansible-playbook args to include --check, --tags setup, and site.yml; got %v", seenArgs)
+	}
+
+	bgTask, err := hostStore.GetTask("queue-pb-1")
+	if err != nil || bgTask == nil {
+		t.Fatalf("expected background task recorded in hostcache.tasks: task=%v err=%v", bgTask, err)
+	}
+	if bgTask.Status != "OK" {
+		t.Errorf("expected background task status OK, got %q", bgTask.Status)
 	}
 }

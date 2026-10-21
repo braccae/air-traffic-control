@@ -47,6 +47,15 @@ type Step struct {
 	Parameters map[string]any `json:"parameters"`
 }
 
+// PlaybookRun describes an existing playbook file to run on the queue.
+type PlaybookRun struct {
+	Playbook  string `json:"playbook"`
+	Target    string `json:"target"`
+	CheckMode bool   `json:"checkMode,omitempty"`
+	Tags      string `json:"tags,omitempty"`
+	ExtraVars any    `json:"extraVars,omitempty"`
+}
+
 // Task mirrors the TS QueuedAnsibleTask interface. The JSON tags are the exact
 // camelCase keys of src/types/index.ts so `task_json` stays cross-readable.
 type Task struct {
@@ -61,6 +70,7 @@ type Task struct {
 	Category        string            `json:"category"`
 	PrimaryModule   string            `json:"primaryModule"`
 	Steps           []Step            `json:"steps"`
+	PlaybookRun     *PlaybookRun      `json:"playbookRun,omitempty"`
 	SecretsMasked   map[string]string `json:"secretsMasked,omitempty"`
 	// Become is a pointer so "absent" (an API payload that never set it) is
 	// distinguishable from an explicit false: enqueueTask defaults it to true,

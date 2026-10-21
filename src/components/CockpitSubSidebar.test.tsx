@@ -76,6 +76,7 @@ test('CockpitSubSidebar does NOT render undetected plugins or default to zfs whe
   assert.strictEqual(html.includes('NFS & SMB Shares'), false, 'Undetected Shares must NOT render');
   assert.strictEqual(html.includes('Podman & Pods'), false, 'Undetected Podman must NOT render');
   assert.strictEqual(html.includes('Restic Snapshots'), false, 'Undetected Restic must NOT render');
+  assert.strictEqual(html.includes('SQL Databases'), false, 'Undetected SQL Databases must NOT render');
 });
 
 test('CockpitSubSidebar renders detected plugins grouped dynamically by section/kind', () => {
@@ -211,4 +212,32 @@ test('CockpitSubSidebar renders safely without throwing when node.specs is undef
     );
     assert.ok(html.includes('Standard Server Platform') && html.includes('UEFI'));
   });
+});
+
+test('CockpitSubSidebar renders database plugin section and NoSQL Databases tab when detected', () => {
+  const mockPlugins = [
+    {
+      id: 'database/nosql',
+      kind: 'database',
+      name: 'nosql',
+      label: 'NoSQL Databases',
+      icon: 'database',
+      section: 'database',
+      order: 10,
+      detection: { detected: true, status: 'ONLINE (mongodb, redis)' },
+    },
+  ];
+
+  const html = renderToString(
+    React.createElement(CockpitSubSidebar, {
+      node: mockNode,
+      activeItem: 'database/nosql',
+      plugins: mockPlugins,
+      onSelectItem: () => {},
+    })
+  );
+
+  assert.ok(html.includes('DATABASES &amp; NOSQL'), 'Must display DATABASES & NOSQL section');
+  assert.ok(html.includes('NoSQL Databases'), 'Must render NoSQL Databases tab');
+  assert.ok(html.includes('database'), 'Must render database icon');
 });

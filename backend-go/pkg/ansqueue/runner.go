@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"air-traffic-control/backend/pkg/hostcache"
 )
 
 // ExecOptions is the process shape handed to an ExecFunc seam.
@@ -34,6 +36,11 @@ type ExecResult struct {
 // parsing, change detection and checkpoint-halt logic without a live host.
 type ExecFunc func(ctx context.Context, name string, args []string, opts ExecOptions) (ExecResult, error)
 
+// TaskRecorder persists background tasks into the shared tasks table (`GET /api/tasks`).
+type TaskRecorder interface {
+	SaveTask(t hostcache.Task) error
+}
+
 // Options configures one playbook run or one ExecuteNextTask call.
 type Options struct {
 	// AnsibleBinary is the ansible-playbook executable (default: PATH lookup).
@@ -52,6 +59,10 @@ type Options struct {
 	Exec ExecFunc
 	// Invalidator is called after a successful run (nil-safe).
 	Invalidator Invalidator
+	// TaskStore optionally records queue executions in the background tasks table (`tasks`).
+	TaskStore TaskRecorder
+	// Broadcast optionally emits real-time task lifecycle events (`task_started`, `task_updated`).
+	Broadcast func(event map[string]any)
 	// Timeout bounds one playbook run (default 10m).
 	Timeout time.Duration
 }
@@ -81,14 +92,34 @@ func ResolveWorkDir() string {
 	return wd
 }
 
-var safeIDPattern = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+var (
+	safeIDPattern       = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+	safePlaybookPattern = regexp.MustCompile(`^[a-zA-Z0-9_\-\.]+$`)
+)
 
 // safeID normalises a task id for use in an ephemeral filename.
 func safeID(id string) string { return safeIDPattern.ReplaceAllString(id, "_") }
 
-// ExecuteTaskOneByOne compiles the task to an ephemeral playbook, runs it with
-// ANSIBLE_STDOUT_CALLBACK=json, parses the callback JSON and derives
-// changed/failed/error exactly like executeQueueTaskOneByOne.
+func validateQueuePlaybookName(name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "", errors.New("Playbook name must be a non-empty string")
+	}
+	if filepath.Base(trimmed) != trimmed || strings.Contains(trimmed, "..") || strings.Contains(trimmed, "/") || strings.Contains(trimmed, "\\") {
+		return "", errors.New("Directory traversal and path separators are not permitted in playbook name")
+	}
+	if !strings.HasSuffix(trimmed, ".yml") && !strings.HasSuffix(trimmed, ".yaml") {
+		return "", errors.New("Playbook filename must have a .yml or .yaml extension")
+	}
+	if !safePlaybookPattern.MatchString(trimmed) {
+		return "", errors.New("Playbook filename contains invalid characters")
+	}
+	return trimmed, nil
+}
+
+// ExecuteTaskOneByOne compiles the task to an ephemeral playbook (or runs the
+// specified PlaybookRun file), runs it with ANSIBLE_STDOUT_CALLBACK=json,
+// parses the callback JSON and derives changed/failed/error.
 func ExecuteTaskOneByOne(ctx context.Context, task Task, opts Options) (ExecutionResult, error) {
 	startTime := time.Now()
 
@@ -102,11 +133,55 @@ func ExecuteTaskOneByOne(ctx context.Context, task Task, opts Options) (Executio
 	}
 
 	id := safeID(task.ID)
-	ephemeralFile := filepath.Join(playbooksDir, ".queue-"+id+".yml")
-	if err := os.WriteFile(ephemeralFile, []byte(CompileOnTheFlyPlaybook(task)), 0o600); err != nil {
-		return ExecutionResult{}, fmt.Errorf("ansqueue: write playbook %s: %w", ephemeralFile, err)
+	var ephemeralFile string
+	var runPlaybookPath string
+
+	if task.PlaybookRun != nil {
+		validName, err := validateQueuePlaybookName(task.PlaybookRun.Playbook)
+		if err != nil {
+			return ExecutionResult{
+				Success:    false,
+				TaskID:     task.ID,
+				Changed:    false,
+				Failed:     true,
+				JSONOutput: nil,
+				Error:      err.Error(),
+				DurationMs: time.Since(startTime).Milliseconds(),
+			}, nil
+		}
+		absDir, _ := filepath.Abs(playbooksDir)
+		candidate := filepath.Join(absDir, validName)
+		if !strings.HasPrefix(candidate, absDir+string(filepath.Separator)) {
+			return ExecutionResult{
+				Success:    false,
+				TaskID:     task.ID,
+				Changed:    false,
+				Failed:     true,
+				JSONOutput: nil,
+				Error:      "Path traversal detected in playbook name",
+				DurationMs: time.Since(startTime).Milliseconds(),
+			}, nil
+		}
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return ExecutionResult{
+				Success:    false,
+				TaskID:     task.ID,
+				Changed:    false,
+				Failed:     true,
+				JSONOutput: nil,
+				Error:      fmt.Sprintf("Playbook %s not found in %s", validName, playbooksDir),
+				DurationMs: time.Since(startTime).Milliseconds(),
+			}, nil
+		}
+		runPlaybookPath = candidate
+	} else {
+		ephemeralFile = filepath.Join(playbooksDir, ".queue-"+id+".yml")
+		if err := os.WriteFile(ephemeralFile, []byte(CompileOnTheFlyPlaybook(task)), 0o600); err != nil {
+			return ExecutionResult{}, fmt.Errorf("ansqueue: write playbook %s: %w", ephemeralFile, err)
+		}
+		defer os.Remove(ephemeralFile)
+		runPlaybookPath = ephemeralFile
 	}
-	defer os.Remove(ephemeralFile)
 
 	ephemeralInventory := ""
 	defer func() {
@@ -142,12 +217,35 @@ func ExecuteTaskOneByOne(ctx context.Context, task Task, opts Options) (Executio
 	}
 
 	args := []string{"-i", inventoryPath}
-	if !strings.HasSuffix(inventoryPath, ",") {
+	if task.PlaybookRun != nil {
+		runTarget := strings.TrimSpace(task.PlaybookRun.Target)
+		if runTarget != "" && runTarget != "all" && !strings.HasSuffix(inventoryPath, ",") {
+			args = append(args, "--limit", runTarget)
+		}
+		if task.PlaybookRun.CheckMode {
+			args = append(args, "--check")
+		}
+		if strings.TrimSpace(task.PlaybookRun.Tags) != "" {
+			args = append(args, "--tags", strings.TrimSpace(task.PlaybookRun.Tags))
+		}
+		if task.PlaybookRun.ExtraVars != nil {
+			switch v := task.PlaybookRun.ExtraVars.(type) {
+			case string:
+				if strings.TrimSpace(v) != "" {
+					args = append(args, "--extra-vars", v)
+				}
+			default:
+				if b, err := json.Marshal(v); err == nil {
+					args = append(args, "--extra-vars", string(b))
+				}
+			}
+		}
+	} else if !strings.HasSuffix(inventoryPath, ",") {
 		if limit := firstNonEmpty(task.TargetNodeName, task.TargetNodeID); limit != "" {
 			args = append(args, "--limit", limit)
 		}
 	}
-	args = append(args, ephemeralFile)
+	args = append(args, runPlaybookPath)
 	if opts.VaultVarsFile != "" {
 		args = append(args, "--extra-vars", "@"+opts.VaultVarsFile)
 	}
@@ -523,6 +621,26 @@ func (s *Store) ExecuteNextTask(ctx context.Context, opts Options) (Outcome, err
 	}
 
 	var outcome Outcome
+	bgTask := hostcache.Task{
+		ID:          task.ID,
+		StartTime:   time.Now().Format("2006-01-02 15:04:05"),
+		NodeTarget:  firstNonEmpty(task.TargetNodeName, task.TargetNodeID, task.TargetHostRoute, "all"),
+		User:        firstNonEmpty(task.TargetSSHUser, "core") + "@ansible",
+		Description: task.Title,
+		Progress:    20,
+		ProgressEta: fmt.Sprintf("Executing %s...", firstNonEmpty(task.PrimaryModule, "ansible-playbook")),
+		Status:      "RUNNING",
+		Category:    "ansible",
+		Logs:        json.RawMessage(fmt.Sprintf("[%q]", fmt.Sprintf("[queue] Starting %s on %s", task.Title, firstNonEmpty(task.TargetNodeName, task.TargetHostRoute)))),
+		UpdatedAt:   time.Now().UnixMilli(),
+	}
+	if opts.TaskStore != nil {
+		_ = opts.TaskStore.SaveTask(bgTask)
+	}
+	if opts.Broadcast != nil {
+		opts.Broadcast(map[string]any{"type": "task_started", "task": bgTask})
+	}
+
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -535,6 +653,16 @@ func (s *Store) ExecuteNextTask(ctx context.Context, opts Options) (Outcome, err
 					Error:   msg,
 				}
 				s.finishRun(task.ID, StatusFailed, &msg)
+				bgTask.Progress = 100
+				bgTask.Status = "FAILED"
+				bgTask.ProgressEta = fmt.Sprintf("Failed: %s", msg)
+				bgTask.Logs = json.RawMessage(fmt.Sprintf("[%q,%q]", fmt.Sprintf("[queue] Starting %s", task.Title), fmt.Sprintf("[error] %s", msg)))
+				if opts.TaskStore != nil {
+					_ = opts.TaskStore.SaveTask(bgTask)
+				}
+				if opts.Broadcast != nil {
+					opts.Broadcast(map[string]any{"type": "task_updated", "task": bgTask})
+				}
 				outcome = Outcome{Result: &res, HaltedOnError: true}
 			}
 		}()
@@ -558,6 +686,29 @@ func (s *Store) ExecuteNextTask(ctx context.Context, opts Options) (Outcome, err
 				// task that really succeeded on the host.
 				_ = opts.Invalidator.InvalidateForTask(task)
 			}
+			bgTask.Progress = 100
+			bgTask.Status = "OK"
+			if result.Changed {
+				bgTask.ProgressEta = "Completed (changed)"
+			} else {
+				bgTask.ProgressEta = "Completed (ok)"
+			}
+			logLines := []string{fmt.Sprintf("[queue] Starting %s on %s", task.Title, bgTask.NodeTarget)}
+			if result.JSONOutput != nil {
+				if b, err := json.Marshal(result.JSONOutput); err == nil {
+					logLines = append(logLines, RedactSecrets(string(b)))
+				}
+			}
+			logLines = append(logLines, fmt.Sprintf("[queue] Completed in %dms", result.DurationMs))
+			if b, err := json.Marshal(logLines); err == nil {
+				bgTask.Logs = json.RawMessage(b)
+			}
+			if opts.TaskStore != nil {
+				_ = opts.TaskStore.SaveTask(bgTask)
+			}
+			if opts.Broadcast != nil {
+				opts.Broadcast(map[string]any{"type": "task_updated", "task": bgTask})
+			}
 			outcome = Outcome{Result: &result, HaltedOnError: false}
 			return
 		}
@@ -568,6 +719,22 @@ func (s *Store) ExecuteNextTask(ctx context.Context, opts Options) (Outcome, err
 		}
 		result.Error = msg
 		s.finishRun(task.ID, StatusFailed, &msg)
+		bgTask.Progress = 100
+		bgTask.Status = "FAILED"
+		bgTask.ProgressEta = fmt.Sprintf("Failed: %s", msg)
+		logLines := []string{
+			fmt.Sprintf("[queue] Starting %s on %s", task.Title, bgTask.NodeTarget),
+			fmt.Sprintf("[error] %s", msg),
+		}
+		if b, err := json.Marshal(logLines); err == nil {
+			bgTask.Logs = json.RawMessage(b)
+		}
+		if opts.TaskStore != nil {
+			_ = opts.TaskStore.SaveTask(bgTask)
+		}
+		if opts.Broadcast != nil {
+			opts.Broadcast(map[string]any{"type": "task_updated", "task": bgTask})
+		}
 		outcome = Outcome{Result: &result, HaltedOnError: true}
 	}()
 

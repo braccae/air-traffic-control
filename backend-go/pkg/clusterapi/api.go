@@ -279,6 +279,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/cluster-log", a.handleClusterLog)
 	mux.HandleFunc("/api/connections", a.handleConnections)
 	mux.HandleFunc("/api/tasks", a.handleTasks)
+	mux.HandleFunc("/api/tasks/", a.handleTaskByID)
 	mux.HandleFunc("/api/inventory/chunks", a.handleChunks)
 	mux.HandleFunc("/api/inventory/chunks/", a.handleChunkDelete)
 	mux.HandleFunc("/api/inventory/folders", a.handleFolders)
@@ -340,6 +341,32 @@ func (a *API) handleTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, tasks)
+}
+
+func (a *API) handleTaskByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+		return
+	}
+	if a.store == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "Task not found"})
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "Task ID required"})
+		return
+	}
+	task, err := a.store.GetTask(id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	if task == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "Task not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
 }
 
 func (a *API) handleChunks(w http.ResponseWriter, r *http.Request) {
@@ -602,14 +629,27 @@ func (a *API) handleResticSnapshot(w http.ResponseWriter, r *http.Request) {
 		cmd := exec.CommandContext(ctx, "restic", "version")
 		out, err := cmd.CombinedOutput()
 		outStr := strings.TrimSpace(string(out))
-		if err != nil {
-			outStr = "restic 0.17.0 compiled with go1.22"
-		}
 
 		task.Progress = 100
-		task.ProgressEta = "Snapshot verified"
-		task.Status = "OK"
-		task.Logs = json.RawMessage(fmt.Sprintf("[%q]", fmt.Sprintf("[restic] Verified repository: %s", outStr)))
+		if err != nil {
+			errDetail := outStr
+			if errDetail == "" {
+				errDetail = err.Error()
+			}
+			task.Status = "FAILED"
+			task.ProgressEta = fmt.Sprintf("Failed: %s", errDetail)
+			task.Logs = json.RawMessage(fmt.Sprintf("[%q,%q]",
+				fmt.Sprintf("[restic] Connecting to backup repository for %s", targetHost),
+				fmt.Sprintf("[error] restic check failed: %s", errDetail),
+			))
+		} else {
+			task.ProgressEta = "Snapshot verified"
+			task.Status = "OK"
+			task.Logs = json.RawMessage(fmt.Sprintf("[%q,%q]",
+				fmt.Sprintf("[restic] Connecting to backup repository for %s", targetHost),
+				fmt.Sprintf("[restic] Verified repository: %s", outStr),
+			))
+		}
 		if a.store != nil {
 			_ = a.store.SaveTask(task)
 		}

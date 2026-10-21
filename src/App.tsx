@@ -994,14 +994,33 @@ export default function App() {
                 sparkline: msg.telemetry.sparkline ?? prev.sparkline,
               }));
             } else if (msg.type === 'task_started') {
-              setTasks(prev => [msg.task, ...prev]);
+              setTasks(prev => [msg.task, ...prev.filter(t => t.id !== msg.task.id)]);
               addToast({ type: 'info', title: 'Task Started', message: msg.task.description });
-            } else if (msg.type === 'task_updated') {
-              setTasks(prev => prev.map(t => (t.id === msg.task.id ? msg.task : t)));
+            } else if (msg.type === 'task_updated' && msg.task) {
+              setTasks(prev => {
+                const exists = prev.some(t => t.id === msg.task.id);
+                return exists
+                  ? prev.map(t => (t.id === msg.task.id ? msg.task : t))
+                  : [msg.task, ...prev];
+              });
               if (msg.task.status === 'OK') {
                 addToast({ type: 'success', title: 'Task Completed', message: msg.task.description });
               } else if (msg.task.status === 'FAILED') {
                 addToast({ type: 'error', title: 'Task Failed', message: msg.task.description });
+              }
+            } else if (msg.type === 'task_output' && msg.taskId && typeof msg.line === 'string') {
+              setTasks(prev =>
+                prev.map(t =>
+                  t.id === msg.taskId
+                    ? { ...t, logs: [...(Array.isArray(t.logs) ? t.logs : []), msg.line] }
+                    : t
+                )
+              );
+            } else if ((msg.type === 'init' || msg.type === 'initial_state') && Array.isArray(msg.tasks)) {
+              setTasks(msg.tasks);
+              if (msg.queue) {
+                if (Array.isArray(msg.queue.tasks)) setQueue(msg.queue.tasks);
+                setIsQueueRunning(Boolean(msg.queue.isRunning));
               }
             } else if (msg.type === 'node_added') {
               setNodesList(prev =>

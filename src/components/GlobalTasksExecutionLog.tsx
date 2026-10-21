@@ -5,6 +5,7 @@ import { getConsoleWindowPillClasses, formatTaskQueueTabLabel, type ConsoleDrawe
 import { TaskQueueTab } from './TaskQueueTab.tsx';
 import { ClusterSyslogTab } from './ClusterSyslogTab.tsx';
 import { VaultAuditPanel } from './VaultAuditPanel.tsx';
+import { TaskStdoutModal } from './modals/TaskStdoutModal.tsx';
 
 interface GlobalTasksExecutionLogProps {
   tasks: GlobalTaskItem[];
@@ -42,6 +43,13 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
   const [activeTab, setActiveTab] = useState<ConsoleDrawerTab>(activeDrawerTab || 'active');
   const [isExpanded, setIsExpanded] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [selectedStdoutTaskId, setSelectedStdoutTaskId] = useState<string | null>(null);
+  const [showExitedTasks, setShowExitedTasks] = useState(false);
+
+  const handleOpenStdout = (taskId: string) => {
+    setSelectedStdoutTaskId(taskId);
+    onOpenTaskDetails?.(taskId);
+  };
 
   useEffect(() => {
     if (activeDrawerTab && activeDrawerTab !== activeTab) {
@@ -216,7 +224,10 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
   };
 
 
-  const activeCount = tasks.filter(t => t.status === 'RUNNING').length;
+  const activeTasks = tasks.filter(t => t.status === 'RUNNING');
+  const exitedTasks = tasks.filter(t => t.status !== 'RUNNING');
+  const activeCount = activeTasks.length;
+  const displayedTasks = showExitedTasks ? tasks : activeTasks;
 
   const runningOrRecentAnsible = tasks.find(t => t.category === 'ansible' && t.logs && t.logs.length > 0);
   const liveAnsibleLogs = runningOrRecentAnsible?.logs && runningOrRecentAnsible.logs.length > 0
@@ -393,74 +404,118 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
       {!isCollapsed && (
         <div className="flex-1 overflow-x-auto overflow-y-auto">
           {activeTab === 'active' && (
-            <table className="w-full text-left font-mono text-xs">
-              <thead className="bg-[#171a2d] text-[#8d909b] text-[10px] sticky top-0">
-                <tr className="h-6">
-                  <th className="px-3 py-0.5">Start Time</th>
-                  <th className="px-3 py-0.5">Node / Target</th>
-                  <th className="px-3 py-0.5">User</th>
-                  <th className="px-3 py-0.5">Description / Task Command</th>
-                  <th className="px-3 py-0.5">Progress / ETA</th>
-                  <th className="px-3 py-0.5 text-right">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#26293c]/50">
-                {tasks.length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="px-3 py-6 text-center text-[#8d909b]">
-                      No active or historical tasks queued. Run a playbook or execute a node action to see real execution telemetry.
-                    </td>
+            <div className="flex flex-col h-full">
+              <div className="h-7 bg-[#121528] px-3 flex items-center justify-between border-b border-[#26293c] font-mono text-[11px] text-[#8d909b] shrink-0">
+                <span>
+                  Double-click a running subprocess task to stream live stdout ({activeCount} running)
+                </span>
+                {exitedTasks.length > 0 && (
+                  <button
+                    type="button"
+                    data-testid="toggle-exited-tasks"
+                    onClick={() => setShowExitedTasks(prev => !prev)}
+                    className={`px-2 py-0.5 rounded border text-[10px] font-mono transition-colors cursor-pointer ${
+                      showExitedTasks
+                        ? 'bg-[#21263d] text-[#b0c9ff] border-[#b0c9ff]/40 font-bold'
+                        : 'bg-[#171a2d] text-[#8d909b] hover:text-[#dfe1fa] border-[#26293c]'
+                    }`}
+                  >
+                    {showExitedTasks
+                      ? `Hide Exited (${exitedTasks.length})`
+                      : `Show Exited History (${exitedTasks.length})`}
+                  </button>
+                )}
+              </div>
+              <table className="w-full text-left font-mono text-xs">
+                <thead className="bg-[#171a2d] text-[#8d909b] text-[10px] sticky top-0">
+                  <tr className="h-6">
+                    <th className="px-3 py-0.5">Start Time</th>
+                    <th className="px-3 py-0.5">Node / Target</th>
+                    <th className="px-3 py-0.5">User</th>
+                    <th className="px-3 py-0.5">Description / Task Command</th>
+                    <th className="px-3 py-0.5">Progress / ETA</th>
+                    <th className="px-3 py-0.5 text-right">Status</th>
                   </tr>
-                ) : (
-                  tasks.map(task => (
-                    <tr
-                      key={task.id}
-                      onClick={() => onOpenTaskDetails?.(task.id)}
-                      className="h-7 bg-[#0a0d1f] hover:bg-[#26293c]/60 transition-colors cursor-pointer"
-                    >
-                      <td className="px-3 py-0.5 text-[#c3c6d2] whitespace-nowrap">{task.startTime}</td>
-                      <td className="px-3 py-0.5 text-[#d9b9ff] whitespace-nowrap">
-                        {task.nodeTarget}
-                      </td>
-                      <td className="px-3 py-0.5 text-[#dfe1fa] whitespace-nowrap">{task.user}</td>
-                      <td className="px-3 py-0.5 text-[#dfe1fa] font-mono truncate max-w-md">
-                        {task.description}
-                      </td>
-                      <td className="px-3 py-0.5">
-                        {task.status === 'RUNNING' ? (
-                          <div className="flex items-center gap-2">
-                            <div className="w-36 bg-[#26293c] h-2 rounded overflow-hidden">
-                              <div
-                                className="bg-[#b0c9ff] h-full transition-all duration-300"
-                                style={{ width: `${task.progress}%` }}
-                              ></div>
-                            </div>
-                            <span className="text-[10px] text-[#8d909b]">{task.progressEta}</span>
-                          </div>
-                        ) : (
-                          <span className="text-[#8d909b]">{task.progressEta}</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-0.5 text-right">
-                        {task.status === 'RUNNING' ? (
-                          <span className="px-1.5 py-0.5 bg-[#b0c9ff]/20 text-[#b0c9ff] font-bold rounded text-[10px] border border-[#b0c9ff]/30">
-                            RUNNING
-                          </span>
-                        ) : task.status === 'FAILED' ? (
-                          <span className="px-1.5 py-0.5 bg-[#ffb4ab]/20 text-[#ffb4ab] font-bold rounded text-[10px] border border-[#ffb4ab]/30">
-                            FAILED
-                          </span>
-                        ) : (
-                          <span className="px-1.5 py-0.5 bg-[#8cd6cb]/20 text-[#8cd6cb] font-bold rounded text-[10px] border border-[#8cd6cb]/30">
-                            OK
-                          </span>
-                        )}
+                </thead>
+                <tbody className="divide-y divide-[#26293c]/50">
+                  {displayedTasks.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-3 py-6 text-center text-[#8d909b]">
+                        {activeCount === 0 && exitedTasks.length > 0
+                          ? `No currently running subprocess tasks (${exitedTasks.length} exited task${
+                              exitedTasks.length === 1 ? '' : 's'
+                            } in history — click "Show Exited History" to view captured output).`
+                          : 'No active or historical tasks queued. Run a playbook or execute a node action to see real execution telemetry.'}
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    displayedTasks.map(task => (
+                      <tr
+                        key={task.id}
+                        data-testid={`active-task-row-${task.id}`}
+                        title="Double-click to open live stdout stream"
+                        onClick={() => onOpenTaskDetails?.(task.id)}
+                        onDoubleClick={() => handleOpenStdout(task.id)}
+                        className="h-7 bg-[#0a0d1f] hover:bg-[#26293c]/60 transition-colors cursor-pointer select-none"
+                      >
+                        <td className="px-3 py-0.5 text-[#c3c6d2] whitespace-nowrap">{task.startTime}</td>
+                        <td className="px-3 py-0.5 text-[#d9b9ff] whitespace-nowrap">
+                          {task.nodeTarget}
+                        </td>
+                        <td className="px-3 py-0.5 text-[#dfe1fa] whitespace-nowrap">{task.user}</td>
+                        <td className="px-3 py-0.5 text-[#dfe1fa] font-mono truncate max-w-md">
+                          {task.description}
+                        </td>
+                        <td className="px-3 py-0.5">
+                          {task.status === 'RUNNING' ? (
+                            <div className="flex items-center gap-2">
+                              <div className="w-36 bg-[#26293c] h-2 rounded overflow-hidden">
+                                <div
+                                  className="bg-[#b0c9ff] h-full transition-all duration-300"
+                                  style={{ width: `${task.progress}%` }}
+                                ></div>
+                              </div>
+                              <span className="text-[10px] text-[#8d909b]">{task.progressEta}</span>
+                            </div>
+                          ) : (
+                            <span className="text-[#8d909b]">{task.progressEta}</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-0.5 text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              data-testid={`open-task-stdout-${task.id}`}
+                              onClick={e => {
+                                e.stopPropagation();
+                                handleOpenStdout(task.id);
+                              }}
+                              className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[#171a2d] hover:bg-[#26293c] text-[#b0c9ff] border border-[#26293c] cursor-pointer"
+                              title="Open live stdout stream"
+                            >
+                              Stdout
+                            </button>
+                            {task.status === 'RUNNING' ? (
+                              <span className="px-1.5 py-0.5 bg-[#b0c9ff]/20 text-[#b0c9ff] font-bold rounded text-[10px] border border-[#b0c9ff]/30">
+                                RUNNING
+                              </span>
+                            ) : task.status === 'FAILED' ? (
+                              <span className="px-1.5 py-0.5 bg-[#ffb4ab]/20 text-[#ffb4ab] font-bold rounded text-[10px] border border-[#ffb4ab]/30">
+                                FAILED
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.5 bg-[#8cd6cb]/20 text-[#8cd6cb] font-bold rounded text-[10px] border border-[#8cd6cb]/30">
+                                OK
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           )}
 
           {activeTab === 'task_queue' && (
@@ -507,6 +562,13 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
           {activeTab === 'vault' && <VaultAuditPanel />}
         </div>
       )}
+
+      <TaskStdoutModal
+        taskId={selectedStdoutTaskId}
+        task={tasks.find(t => t.id === selectedStdoutTaskId) || null}
+        isOpen={Boolean(selectedStdoutTaskId)}
+        onClose={() => setSelectedStdoutTaskId(null)}
+      />
     </section>
   );
 };

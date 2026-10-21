@@ -58,3 +58,48 @@ func TestPodmanPlugin_ProbeAndCompile(t *testing.T) {
 		t.Errorf("expected become_user apps, got %v", task.Steps[0].Params["become_user"])
 	}
 }
+
+func TestPodmanPlugin_ReadBothRootfulAndRootlessContainers(t *testing.T) {
+	p, ok := plugin.Get("container/podman")
+	if !ok {
+		t.Fatalf("container/podman not registered")
+	}
+
+	reader, ok := p.(plugin.Reader)
+	if !ok {
+		t.Fatalf("container/podman does not implement plugin.Reader")
+	}
+
+	runner := &mockRunner{
+		responses: map[string]string{
+			"--unix-socket=/run/podman/podman.sock \"http://d/v4.0.0/libpod/containers/json?all=true\"": `[
+				{"Id": "e377a55482d2", "Names": ["systemd-caddy"], "Image": "ghcr.io/braccae/caddy:latest", "State": "running", "Status": "healthy", "IsInfra": false}
+			]`,
+			"--unix-socket=/run/podman/podman.sock \"http://d/v4.0.0/libpod/pods/json\"": `[
+				{"Id": "f4e8950bc5d4", "Name": "systemd-proxy", "Status": "Running"}
+			]`,
+			"/etc/passwd": "root:x:0:0:root:/root:/bin/bash\napps:x:2200:2200:Apps:/home/apps:/bin/bash\n",
+			"ls -1d /run/user/*/podman/podman.sock": "/run/user/2200/podman/podman.sock\n",
+			"--unix-socket=/run/user/2200/podman/podman.sock \"http://d/v4.0.0/libpod/containers/json?all=true\"": `[
+				{"Id": "869408baab38", "Names": ["FeedCord"], "Image": "docker.io/qolors/feedcord:latest", "State": "running", "Status": "Up 3 days", "IsInfra": false}
+			]`,
+		},
+	}
+
+	raw, err := reader.Read(context.Background(), runner, plugin.HostFacts{NodeID: "node-1", OSFamily: "linux"})
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	data, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any from Read, got %T", raw)
+	}
+
+	if _, hasRoot := data["rootContainers"]; !hasRoot {
+		t.Errorf("expected rootContainers key in Read output")
+	}
+	if _, hasProbed := data["probedUsers"]; !hasProbed {
+		t.Errorf("expected probedUsers key in Read output")
+	}
+}

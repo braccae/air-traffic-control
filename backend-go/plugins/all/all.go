@@ -59,4 +59,8 @@ import (
 	_ "air-traffic-control/backend/plugins/firewall/firewalld"
 	_ "air-traffic-control/backend/plugins/network/interfaces"
 	_ "air-traffic-control/backend/plugins/network/tailscale"
+
+	// Database & NoSQL plugins
+	_ "air-traffic-control/backend/plugins/database/nosql"
+	_ "air-traffic-control/backend/plugins/database/sql"
 )

@@ -204,7 +204,7 @@ func TestListPods_IncludesRootAndUnprivilegedUserPods(t *testing.T) {
 	runner := &mockRunner{
 		handler: func(cfg ssh.Config, cmd string) (string, error) {
 			switch {
-			case strings.Contains(cmd, "podman pod ps --format json") && !strings.Contains(cmd, "-u"):
+			case strings.Contains(cmd, "podman pod ps --format json") && !strings.Contains(cmd, "XDG_RUNTIME_DIR"):
 				return `[{"Id": "root-pod-1", "Name": "system-ingress", "Status": "Running"}]`, nil
 			case strings.Contains(cmd, "ps -eo"):
 				return "1001 podman /usr/bin/conmon --api-version 1 -c 7e4b9019a101\n", nil
@@ -296,7 +296,7 @@ func TestListAllContainers_CombinesRootAndUnprivilegedContainers(t *testing.T) {
 	runner := &mockRunner{
 		handler: func(cfg ssh.Config, cmd string) (string, error) {
 			switch {
-			case strings.Contains(cmd, "podman ps --all --format json") && !strings.Contains(cmd, "-u"):
+			case strings.Contains(cmd, "podman ps --all --format json") && !strings.Contains(cmd, "deployer"):
 				return `[{"Id": "root-c1", "Names": ["traefik-proxy"], "Image": "traefik:v3", "State": "running", "Status": "Up 3d"}]`, nil
 			case strings.Contains(cmd, "ps -eo"):
 				return "1000 deployer /usr/bin/conmon -c rootless-c1\n", nil
@@ -332,11 +332,11 @@ func TestRootlessFallback_ContainerLogsAndActions(t *testing.T) {
 		handler: func(cfg ssh.Config, cmd string) (string, error) {
 			executedCmds = append(executedCmds, cmd)
 			switch {
-			case strings.Contains(cmd, "podman logs --tail 50 jellyfin") && !strings.Contains(cmd, "-u"):
+			case strings.Contains(cmd, "podman logs --tail 50 jellyfin") && !strings.Contains(cmd, "deployer"):
 				return "", fmt.Errorf("Error: no container with name or ID \"jellyfin\" found")
-			case strings.Contains(cmd, "podman restart jellyfin") && !strings.Contains(cmd, "-u"):
+			case strings.Contains(cmd, "podman restart jellyfin") && !strings.Contains(cmd, "deployer"):
 				return "", fmt.Errorf("Error: no container with name or ID \"jellyfin\" found")
-			case strings.Contains(cmd, "podman pod restart media-stack") && !strings.Contains(cmd, "-u"):
+			case strings.Contains(cmd, "podman pod restart media-stack") && !strings.Contains(cmd, "deployer"):
 				return "", fmt.Errorf("Error: no pod with name or ID \"media-stack\" found")
 			case strings.Contains(cmd, "ps -eo"):
 				return "1000 deployer /usr/bin/conmon -c d9841af024ea\n", nil
@@ -430,7 +430,7 @@ func TestListPods_SucceedsWhenRootPodmanFailsButUnprivilegedSucceeds(t *testing.
 	runner := &mockRunner{
 		handler: func(cfg ssh.Config, cmd string) (string, error) {
 			switch {
-			case cmd == "podman pod ps --format json":
+			case strings.Contains(cmd, "podman pod ps --format json") && !strings.Contains(cmd, "XDG_RUNTIME_DIR"):
 				return "", fmt.Errorf("root podman socket not active")
 			case strings.Contains(cmd, "ps -eo"):
 				return "1001 podman /usr/bin/conmon -c c1\n", nil
@@ -453,6 +453,69 @@ func TestListPods_SucceedsWhenRootPodmanFailsButUnprivilegedSucceeds(t *testing.
 	}
 	if len(pods) != 1 || pods[0].Name != "rootless-pod" || !pods[0].Rootless || pods[0].User != "podman" {
 		t.Errorf("unexpected pods: %+v", pods)
+	}
+}
+
+func TestSocketEscalation_QueriesRootfulAndRootlessSocketsWithRun0Preferred(t *testing.T) {
+	var executed []string
+	runner := &mockRunner{
+		handler: func(cfg ssh.Config, cmd string) (string, error) {
+			executed = append(executed, cmd)
+			switch {
+			case strings.Contains(cmd, "/run/podman/podman.sock") && strings.Contains(cmd, "/v4.0.0/libpod/containers/json?all=true"):
+				// Verify escalation order in command: run0 -> sudo -n -> doas -n -> none -> CLI fallback
+				idxRun0 := strings.Index(cmd, "run0 --background=no curl -sf --unix-socket=/run/podman/podman.sock")
+				idxSudo := strings.Index(cmd, "sudo -n curl -sf --unix-socket=/run/podman/podman.sock")
+				idxDoas := strings.Index(cmd, "doas -n curl -sf --unix-socket=/run/podman/podman.sock")
+				idxNone := strings.Index(cmd, "|| curl -sf --unix-socket=/run/podman/podman.sock")
+				idxCLI := strings.Index(cmd, "podman ps --all --format json")
+				if idxRun0 < 0 || idxSudo <= idxRun0 || idxDoas <= idxSudo || idxNone <= idxDoas || idxCLI <= idxNone {
+					t.Errorf("invalid escalation order in rootful socket command: %s", cmd)
+				}
+				return `[
+					{"Id": "e377a55482d2c038d414d9eec7b89b52", "Names": ["systemd-caddy"], "Image": "ghcr.io/braccae/caddy:latest", "State": "running", "Status": "healthy", "IsInfra": false},
+					{"Id": "2e79f503f9f7adee247a7433dc5601f0", "Names": ["systemd-proxy-infra"], "Image": "", "State": "running", "Status": "", "IsInfra": true, "Pod": "f4e8950bc5d4"},
+					{"Id": "e02b94a88dd845155a56195e978f5dce", "Names": ["systemd-cloudflare"], "Image": "docker.io/cloudflare/cloudflared:latest", "State": "running", "Status": "", "IsInfra": false, "Pod": "f4e8950bc5d4", "PodName": "systemd-proxy"}
+				]`, nil
+			case strings.Contains(cmd, "/run/podman/podman.sock") && strings.Contains(cmd, "/v4.0.0/libpod/containers/stats?stream=false"):
+				return `{"Error":null,"Stats":[{"ContainerID":"e377a55482d2c038d414d9eec7b89b52","Name":"systemd-caddy","CPU":0.18,"MemUsage":182583296,"MemPerc":0.56}]}`, nil
+			case strings.Contains(cmd, "ps -eo"):
+				return "", nil
+			case strings.Contains(cmd, "/etc/passwd"):
+				return "root:x:0:0:root:/root:/bin/bash\napps:x:2200:2200:Apps:/home/apps:/bin/bash\n", nil
+			case strings.Contains(cmd, "ls -1d /run/user/*/podman/podman.sock"):
+				return "/run/user/2200/podman/podman.sock\n", nil
+			case strings.Contains(cmd, "/run/user/2200/podman/podman.sock") && strings.Contains(cmd, "/v4.0.0/libpod/containers/json?all=true"):
+				return `[
+					{"Id": "869408baab381a89ca9d659032245d08", "Names": ["FeedCord"], "Image": "docker.io/qolors/feedcord:latest", "State": "running", "Status": "", "IsInfra": false}
+				]`, nil
+			default:
+				return `[]`, nil
+			}
+		},
+	}
+
+	mgr := NewManager(runner, ssh.Config{Host: "100.105.71.49", Port: 22, User: "core"})
+	containers, err := mgr.ListAllContainers()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// 2 non-infra rootful containers (systemd-caddy, systemd-cloudflare) + 1 rootless container (FeedCord)
+	if len(containers) != 3 {
+		t.Fatalf("expected 3 containers (2 rootful + 1 rootless), got %d: %+v", len(containers), containers)
+	}
+
+	if containers[0].Name != "systemd-caddy" || containers[0].Rootless || containers[0].User != "root" {
+		t.Errorf("expected rootful systemd-caddy container, got %+v", containers[0])
+	}
+	if containers[0].Status != "running (healthy)" {
+		t.Errorf("expected combined socket state/status 'running (healthy)', got %q", containers[0].Status)
+	}
+	if containers[0].CPU != "0.18%" || containers[0].Memory != "182.6MB" {
+		t.Errorf("expected socket stats CPU=0.18%% Memory=182.6MB, got CPU=%q Memory=%q", containers[0].CPU, containers[0].Memory)
+	}
+	if containers[2].Name != "FeedCord" || !containers[2].Rootless || containers[2].User != "apps" || containers[2].UID != 2200 {
+		t.Errorf("expected rootless FeedCord container for apps (2200), got %+v", containers[2])
 	}
 }
 

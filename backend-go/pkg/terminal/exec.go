@@ -151,14 +151,17 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 		if cleanOut == "" {
 			cleanOut = "(command completed with exit code 0)"
 		}
+      execLogJSON, _ := json.Marshal([]string{cleanOut})
 		if a.store != nil {
 			_ = a.store.SaveTask(hostcache.Task{
 				ID:          taskID,
 				NodeTarget:  nodeID,
 				Description: fmt.Sprintf("Terminal: %s", cmd),
-				Status:      "COMPLETED",
+				Status:      "OK",
 				Progress:    100,
+				ProgressEta: "Completed (exit code 0)",
 				StartTime:   startTimeStr,
+				Logs:        json.RawMessage(execLogJSON),
 				UpdatedAt:   time.Now().UnixMilli(),
 			})
 		}
@@ -176,6 +179,7 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 	// Check if runErr produced output
 	outStr := strings.TrimRight(output, "\r\n ")
 	if outStr != "" {
+		errLogJSON, _ := json.Marshal([]string{outStr})
 		if a.store != nil {
 			_ = a.store.SaveTask(hostcache.Task{
 				ID:          taskID,
@@ -183,7 +187,9 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 				Description: fmt.Sprintf("Terminal: %s", cmd),
 				Status:      "FAILED",
 				Progress:    100,
+				ProgressEta: "Failed (exit code 1)",
 				StartTime:   startTimeStr,
+				Logs:        json.RawMessage(errLogJSON),
 				UpdatedAt:   time.Now().UnixMilli(),
 			})
 		}
@@ -203,8 +209,9 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 	fallbackOut, fallbackCode := ParseTerminalCommand(cmd, targetNode)
 	status := "FAILED"
 	if fallbackCode == 0 {
-		status = "COMPLETED"
+		status = "OK"
 	}
+	fbLogJSON, _ := json.Marshal([]string{fallbackOut})
 	if a.store != nil {
 		_ = a.store.SaveTask(hostcache.Task{
 			ID:          taskID,
@@ -213,6 +220,7 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 			Status:      status,
 			Progress:    100,
 			StartTime:   startTimeStr,
+			Logs:        json.RawMessage(fbLogJSON),
 			UpdatedAt:   time.Now().UnixMilli(),
 		})
 	}

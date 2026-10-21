@@ -30,7 +30,8 @@ type Store struct {
 }
 
 // Open opens (creating if needed) the cache database read-write. It applies the
-// schema and returns a Store. This is the write owner: it must run before any
+// schema, recovers any running background tasks interrupted by a server restart,
+// and returns a Store. This is the write owner: it must run before any
 // read-only consumer so the WAL sidecar files exist.
 func Open(path string) (*Store, error) { return openStore(path, false) }
 
@@ -93,6 +94,18 @@ func openStore(path string, readOnly bool) (*Store, error) {
 				_ = db.Close()
 				return nil, fmt.Errorf("hostcache: evolve schema: %w", err)
 			}
+		}
+		// Crash recovery: any background task left in RUNNING or QUEUED state
+		// when the daemon starts up was interrupted by a process exit/restart.
+		if _, err := db.Exec(`
+			UPDATE tasks
+			   SET status = 'FAILED',
+			       progress = 100,
+			       progress_eta = 'Task execution interrupted by server restart',
+			       updated_at = ?
+			 WHERE status IN ('RUNNING', 'QUEUED')`, nowMS()); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("hostcache: recover running tasks: %w", err)
 		}
 	}
 
@@ -565,6 +578,32 @@ func (s *Store) SaveTask(t Task) error {
 		string(orEmpty(t.Logs)), nowMS(),
 	)
 	return err
+}
+
+// GetTask returns a single task by ID.
+func (s *Store) GetTask(id string) (*Task, error) {
+	var (
+		t           Task
+		progressEta sql.NullString
+		logJSON     sql.NullString
+	)
+	err := s.db.QueryRow(`
+		SELECT id, start_time, node_target, user, description, progress, progress_eta, status, category, log_json, updated_at
+		FROM tasks WHERE id = ?`, id).
+		Scan(&t.ID, &t.StartTime, &t.NodeTarget, &t.User, &t.Description, &t.Progress, &progressEta, &t.Status, &t.Category, &logJSON, &t.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if progressEta.Valid {
+		t.ProgressEta = progressEta.String
+	}
+	if logJSON.Valid {
+		t.Logs = json.RawMessage(logJSON.String)
+	}
+	return &t, nil
 }
 
 // GetAllTasks returns up to limit tasks ordered by updated_at descending.

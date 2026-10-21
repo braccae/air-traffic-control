@@ -118,8 +118,9 @@ func TestTerminalExec_SuccessExecution(t *testing.T) {
 	if len(store.tasks) < 2 {
 		t.Fatalf("expected at least 2 task updates (running + completed), got %d", len(store.tasks))
 	}
-	if store.tasks[len(store.tasks)-1].Status != "COMPLETED" {
-		t.Fatalf("expected task status COMPLETED, got %s", store.tasks[len(store.tasks)-1].Status)
+	lastStatus := store.tasks[len(store.tasks)-1].Status
+	if lastStatus != "OK" && lastStatus != "COMPLETED" {
+		t.Fatalf("expected task status OK or COMPLETED, got %s", lastStatus)
 	}
 }
 

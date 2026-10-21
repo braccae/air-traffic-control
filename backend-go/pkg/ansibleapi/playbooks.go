@@ -1,6 +1,7 @@
 package ansibleapi
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -336,20 +337,22 @@ func ParsePlaybookYamlDocument(content string) (any, map[string]any, error) {
 
 // PlaybookRunnerState manages active executions.
 type PlaybookRunnerState struct {
-	mu        sync.Mutex
-	processes map[string]*exec.Cmd
-	store     *hostcache.Store
-	broadcast func(map[string]any)
-	repoRoot  string
+	mu           sync.Mutex
+	processes    map[string]*exec.Cmd
+	store        *hostcache.Store
+	broadcast    func(map[string]any)
+	repoRoot     string
+	playbooksDir string
 }
 
 // NewPlaybookRunner creates a PlaybookRunnerState.
 func NewPlaybookRunner(repoRoot string, store *hostcache.Store, broadcast func(map[string]any)) *PlaybookRunnerState {
 	return &PlaybookRunnerState{
-		processes: make(map[string]*exec.Cmd),
-		store:     store,
-		broadcast: broadcast,
-		repoRoot:  repoRoot,
+		processes:    make(map[string]*exec.Cmd),
+		store:        store,
+		broadcast:    broadcast,
+		repoRoot:     repoRoot,
+		playbooksDir: filepath.Join(repoRoot, "ansible", "playbooks"),
 	}
 }
 
@@ -378,7 +381,10 @@ func (r *PlaybookRunnerState) Run(ctx context.Context, req RunRequest) (string, 
 		return "", hostcache.Task{}, fmt.Errorf("%s", val.Error)
 	}
 
-	playbooksDir := filepath.Join(r.repoRoot, "ansible", "playbooks")
+	playbooksDir := r.playbooksDir
+	if playbooksDir == "" {
+		playbooksDir = filepath.Join(r.repoRoot, "ansible", "playbooks")
+	}
 	playbookPath := filepath.Join(playbooksDir, val.Name)
 	if _, err := os.Stat(playbookPath); os.IsNotExist(err) {
 		return "", hostcache.Task{}, fmt.Errorf("playbook %s not found on filesystem", req.Playbook)
@@ -465,26 +471,133 @@ func (r *PlaybookRunnerState) Run(ctx context.Context, req RunRequest) (string, 
 	r.mu.Unlock()
 
 	go func() {
-		out, err := cmd.CombinedOutput()
+		stdoutPipe, errOut := cmd.StdoutPipe()
+		if errOut != nil {
+			// fallback if pipe fails
+			out, err := cmd.CombinedOutput()
+			r.mu.Lock()
+			delete(r.processes, taskId)
+			r.mu.Unlock()
+
+			task.Progress = 100
+			task.UpdatedAt = time.Now().UnixMilli()
+
+			logLines := []string{fmt.Sprintf("[ansible] Starting playbook %s against %s", req.Playbook, req.Target)}
+			for _, line := range strings.Split(string(out), "\n") {
+				if strings.TrimSpace(line) != "" {
+					logLines = append(logLines, line)
+				}
+			}
+			if len(logLines) > 300 {
+				logLines = logLines[len(logLines)-300:]
+			}
+			logBytes, _ := json.Marshal(logLines)
+			task.Logs = json.RawMessage(logBytes)
+
+			if err != nil {
+				task.Status = "FAILED"
+				task.ProgressEta = fmt.Sprintf("Failed: %v", err)
+			} else {
+				task.Status = "OK"
+				if req.CheckMode {
+					task.ProgressEta = "Completed dry-run (0 failed)"
+				} else {
+					task.ProgressEta = "Completed successfully"
+				}
+			}
+
+			if r.store != nil {
+				_ = r.store.SaveTask(task)
+			}
+			if r.broadcast != nil {
+				r.broadcast(map[string]any{"type": "task_updated", "task": task})
+				r.broadcast(map[string]any{
+					"type":        "playbook_log",
+					"taskId":      taskId,
+					"output":      string(out),
+					"status":      task.Status,
+					"progressEta": task.ProgressEta,
+				})
+			}
+			return
+		}
+		cmd.Stderr = cmd.Stdout
+
+		if err := cmd.Start(); err != nil {
+			r.mu.Lock()
+			delete(r.processes, taskId)
+			r.mu.Unlock()
+
+			task.Status = "FAILED"
+			task.Progress = 100
+			task.ProgressEta = fmt.Sprintf("Failed to spawn: %v", err)
+			task.UpdatedAt = time.Now().UnixMilli()
+			if r.store != nil {
+				_ = r.store.SaveTask(task)
+			}
+			if r.broadcast != nil {
+				r.broadcast(map[string]any{"type": "task_updated", "task": task})
+			}
+			return
+		}
+
+		scanner := bufio.NewScanner(stdoutPipe)
+		var logLines []string
+		logLines = append(logLines, fmt.Sprintf("[ansible] Starting playbook %s against %s", req.Playbook, req.Target))
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			logLines = append(logLines, line)
+			if len(logLines) > 500 {
+				logLines = logLines[len(logLines)-500:]
+			}
+
+			// Broadcast live line
+			if r.broadcast != nil {
+				r.broadcast(map[string]any{
+					"type":   "task_output",
+					"taskId": taskId,
+					"line":   line,
+				})
+			}
+
+			// Parse progress
+			if strings.Contains(line, "PLAY [") {
+				task.Progress = 25
+				task.ProgressEta = "Starting plays..."
+			} else if strings.Contains(line, "TASK [") {
+				if task.Progress < 85 {
+					task.Progress += 5
+				}
+				task.ProgressEta = line
+			} else if strings.Contains(line, "PLAY RECAP") {
+				task.Progress = 90
+				task.ProgressEta = "Finalizing recap..."
+			}
+			task.UpdatedAt = time.Now().UnixMilli()
+			logBytes, _ := json.Marshal(logLines)
+			task.Logs = json.RawMessage(logBytes)
+			if r.store != nil {
+				_ = r.store.SaveTask(task)
+			}
+			if r.broadcast != nil {
+				r.broadcast(map[string]any{
+					"type": "task_updated",
+					"task": task,
+				})
+			}
+		}
+
+		err := cmd.Wait()
 		r.mu.Lock()
 		delete(r.processes, taskId)
 		r.mu.Unlock()
 
 		task.Progress = 100
 		task.UpdatedAt = time.Now().UnixMilli()
-
-		logLines := []string{fmt.Sprintf("[ansible] Starting playbook %s against %s", req.Playbook, req.Target)}
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.TrimSpace(line) != "" {
-				logLines = append(logLines, line)
-			}
-		}
-		if len(logLines) > 300 {
-			logLines = logLines[len(logLines)-300:]
-		}
-		logBytes, _ := json.Marshal(logLines)
-		task.Logs = json.RawMessage(logBytes)
-
 		if err != nil {
 			task.Status = "FAILED"
 			task.ProgressEta = fmt.Sprintf("Failed: %v", err)
@@ -497,6 +610,9 @@ func (r *PlaybookRunnerState) Run(ctx context.Context, req RunRequest) (string, 
 			}
 		}
 
+		logBytes, _ := json.Marshal(logLines)
+		task.Logs = json.RawMessage(logBytes)
+
 		if r.store != nil {
 			_ = r.store.SaveTask(task)
 		}
@@ -508,7 +624,7 @@ func (r *PlaybookRunnerState) Run(ctx context.Context, req RunRequest) (string, 
 			r.broadcast(map[string]any{
 				"type":        "playbook_log",
 				"taskId":      taskId,
-				"output":      string(out),
+				"output":      strings.Join(logLines, "\n"),
 				"status":      task.Status,
 				"progressEta": task.ProgressEta,
 			})
@@ -532,13 +648,19 @@ func (r *PlaybookRunnerState) Cancel(taskId string) bool {
 		delete(r.processes, taskId)
 		r.mu.Unlock()
 
-		task := hostcache.Task{
-			ID:          taskId,
-			Status:      "FAILED",
-			ProgressEta: "Cancelled by user",
-			Progress:    100,
-			UpdatedAt:   time.Now().UnixMilli(),
+		var task hostcache.Task
+		if r.store != nil {
+			if existing, err := r.store.GetTask(taskId); err == nil && existing != nil {
+				task = *existing
+			}
 		}
+		if task.ID == "" {
+			task.ID = taskId
+		}
+		task.Status = "FAILED"
+		task.ProgressEta = "Cancelled by user"
+		task.Progress = 100
+		task.UpdatedAt = time.Now().UnixMilli()
 		if r.store != nil {
 			_ = r.store.SaveTask(task)
 		}

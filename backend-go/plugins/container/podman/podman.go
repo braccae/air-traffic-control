@@ -9,6 +9,7 @@ import (
 	"air-traffic-control/backend/pkg/plugin"
 	pkgpodman "air-traffic-control/backend/pkg/podman"
 	"air-traffic-control/backend/pkg/ssh"
+	"air-traffic-control/backend/pkg/types"
 )
 
 func init() {
@@ -65,17 +66,29 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		}, nil
 	}
 
-	// Quick check on running containers
-	cntOut, err := r.RunCommand(ctx, "podman ps -q 2>/dev/null || true")
+	// Probe both rootful (/run/podman/podman.sock) and rootless (/run/user/<uid>/podman/podman.sock)
+	// with AGENTS.md §3 privilege escalation (run0 -> sudo -n -> doas -n -> none), falling back to native CLI.
+	cntCmd := "(" + pkgpodman.RootSocketOrCLICommand("/v4.0.0/libpod/containers/json?all=true", "podman ps -q") + " 2>/dev/null || true)"
+	cntOut, err := r.RunCommand(ctx, cntCmd)
 	count := 0
-	if err == nil && strings.TrimSpace(cntOut) != "" {
-		count = len(strings.Fields(strings.TrimSpace(cntOut)))
+	trimmed := strings.TrimSpace(cntOut)
+	if err == nil && trimmed != "" {
+		if strings.HasPrefix(trimmed, "[") {
+			// Count non-infra containers in socket JSON
+			adapter := &runnerAdapter{ctx: ctx, runner: r}
+			mgr := pkgpodman.NewManager(adapter, ssh.Config{})
+			if all, listErr := mgr.ListAllContainers(); listErr == nil {
+				count = len(all)
+			}
+		} else {
+			count = len(strings.Fields(trimmed))
+		}
 	}
 
 	return plugin.Detection{
 		Detected: true,
 		Status:   fmt.Sprintf("%d container(s)", count),
-		Details:  "Podman engine detected",
+		Details:  "Podman engine detected (rootful & rootless sockets probed)",
 	}, nil
 }
 
@@ -104,13 +117,28 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 		containers = nil
 	}
 
+	var rootContainers []types.PodmanContainer
+	for _, c := range containers {
+		if !c.Rootless && (c.User == "root" || c.UID == 0) {
+			rootContainers = append(rootContainers, c)
+		}
+	}
+
 	pods, _ := mgr.ListPods()
+	var rootPods []types.PodmanPod
+	for _, pod := range pods {
+		if !pod.Rootless && (pod.User == "root" || pod.UID == 0) {
+			rootPods = append(rootPods, pod)
+		}
+	}
 	unprivUsers, _ := mgr.ProbeUnprivilegedUsers()
 
 	return map[string]any{
-		"containers":  containers,
-		"pods":        pods,
-		"probedUsers": unprivUsers,
+		"containers":     containers,
+		"rootContainers": rootContainers,
+		"pods":           pods,
+		"rootPods":       rootPods,
+		"probedUsers":    unprivUsers,
 	}, nil
 }
 

@@ -327,4 +327,79 @@ test('GlobalTasksExecutionLog renders Task Queue tab with staged count badge', a
   assert.ok(html.includes('Task Queue (1)'));
 });
 
+test('GlobalTasksExecutionLog lists only RUNNING tasks in Active Tasks by default and hides exited tasks until toggled', async () => {
+  const { GlobalTasksExecutionLog } = await import('./GlobalTasksExecutionLog.tsx');
+
+  const html = renderToString(
+    React.createElement(GlobalTasksExecutionLog, {
+      tasks: [
+        {
+          id: 'task-run-1',
+          startTime: '2026-10-21 15:00:00',
+          nodeTarget: 'likes-it-cold',
+          user: 'core@ansible',
+          description: 'ansible-playbook site.yml -l likes-it-cold',
+          progress: 45,
+          progressEta: 'TASK [Gathering Facts]',
+          status: 'RUNNING',
+          category: 'ansible',
+          logs: ['PLAY [all] ***', 'TASK [Gathering Facts] ***'],
+        },
+        {
+          id: 'task-exited-1',
+          startTime: '2026-10-21 14:55:00',
+          nodeTarget: 'ping',
+          user: 'core@ssh-agent',
+          description: 'podman ps --all',
+          progress: 100,
+          progressEta: 'Completed',
+          status: 'OK',
+          category: 'active',
+          logs: ['CONTAINER ID  IMAGE'],
+        },
+      ],
+      queue: [],
+      isRunning: false,
+    })
+  );
+
+  assert.ok(/Active Tasks\s*\(<!-- -->1<!-- -->\)|Active Tasks\s*\(1\)/.test(html), 'Active Tasks tab badge must count only RUNNING tasks');
+  assert.ok(html.includes('active-task-row-task-run-1'), 'Running task must appear in Active Tasks table');
+  assert.ok(!html.includes('active-task-row-task-exited-1'), 'Exited task must be removed from default active list');
+  assert.ok(/Show Exited History\s*\(<!-- -->1<!-- -->\)|Show Exited History\s*\(1\)/.test(html), 'Toggle button must show count of exited tasks with retrievable output');
+});
+
+test('TaskStdoutModal renders live streaming stdout lines and non-destructive close notice', async () => {
+  const { TaskStdoutModal } = await import('./modals/TaskStdoutModal.tsx');
+
+  const html = renderToString(
+    React.createElement(TaskStdoutModal, {
+      taskId: 'task-run-1',
+      task: {
+        id: 'task-run-1',
+        startTime: '2026-10-21 15:00:00',
+        nodeTarget: 'likes-it-cold',
+        user: 'core@ansible',
+        description: 'ansible-playbook site.yml -l likes-it-cold',
+        progress: 50,
+        progressEta: 'TASK [Deploy containers]',
+        status: 'RUNNING',
+        category: 'ansible',
+        logs: ['PLAY [all] ***', 'TASK [Gathering Facts] ***', 'ok: [likes-it-cold]'],
+      },
+      isOpen: true,
+      onClose: () => {},
+    })
+  );
+
+  assert.ok(html.includes('LIVE STREAMING'), 'Running task must show LIVE STREAMING indicator');
+  assert.ok(html.includes('PLAY [all] ***'), 'Initial / prop task logs must render');
+  assert.ok(html.includes('ok: [likes-it-cold]'), 'Incremental stdout lines must render');
+  assert.ok(
+    html.includes('closing this window will not interrupt or terminate the task'),
+    'Must state that closing stdout view does not kill the task'
+  );
+});
+
+
 

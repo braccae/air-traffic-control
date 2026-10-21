@@ -59,9 +59,9 @@ func (a *API) handlePodmanLogs(w http.ResponseWriter, r *http.Request) {
 	var cmd string
 	switch {
 	case strings.Contains(target, "dmesg") || strings.Contains(target, "kernel") || strings.Contains(target, "journal"):
-		cmd = "run0 --background=no journalctl -n 100 --no-pager 2>&1 || sudo -n journalctl -n 100 --no-pager 2>&1 || dmesg | tail -n 100 2>&1"
+		cmd = "run0 --background=no journalctl -n 100 --no-pager 2>&1 || sudo -n journalctl -n 100 --no-pager 2>&1 || doas -n journalctl -n 100 --no-pager 2>&1 || dmesg | tail -n 100 2>&1"
 	case strings.Contains(target, "audit") || strings.Contains(target, "pam"):
-		cmd = "run0 --background=no journalctl -u sshd -n 100 --no-pager 2>&1 || sudo -n journalctl -u sshd -n 100 --no-pager 2>&1 || last -n 30 2>&1"
+		cmd = "run0 --background=no journalctl -u sshd -n 100 --no-pager 2>&1 || sudo -n journalctl -u sshd -n 100 --no-pager 2>&1 || doas -n journalctl -u sshd -n 100 --no-pager 2>&1 || last -n 30 2>&1"
 	case user != "" && user != "root":
 		effectiveUID := 1000
 		if hasUID {
@@ -69,10 +69,12 @@ func (a *API) handlePodmanLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		cmd = "run0 --background=no --user " + user + " podman logs --tail 100 " + target + " 2>&1 || " +
 			"sudo -n -u " + user + " XDG_RUNTIME_DIR=/run/user/" + strconv.Itoa(effectiveUID) + " podman logs --tail 100 " + target + " 2>&1 || " +
+			"doas -n -u " + user + " XDG_RUNTIME_DIR=/run/user/" + strconv.Itoa(effectiveUID) + " podman logs --tail 100 " + target + " 2>&1 || " +
 			"podman logs --tail 100 " + target + " 2>&1"
 	default:
 		cmd = "run0 --background=no podman logs --tail 100 " + target + " 2>&1 || " +
 			"sudo -n podman logs --tail 100 " + target + " 2>&1 || " +
+			"doas -n podman logs --tail 100 " + target + " 2>&1 || " +
 			"podman logs --tail 100 " + target + " 2>&1"
 	}
 

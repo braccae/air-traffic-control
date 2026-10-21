@@ -360,3 +360,69 @@ func TestDeleteCustomFolderStripsHosts(t *testing.T) {
 		t.Fatalf("folder field not stripped from host: %q", host.Folder)
 	}
 }
+
+// TestTaskCrashRecoveryOnStartup verifies that any tasks left in RUNNING or QUEUED
+// when the server restarts are marked FAILED rather than lingering indefinitely.
+func TestTaskCrashRecoveryOnStartup(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks-crash.sqlite")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open #1: %v", err)
+	}
+
+	if err := store.SaveTask(Task{
+		ID:          "task-running-1",
+		StartTime:   "2026-10-21 12:00:00",
+		NodeTarget:  "likes-it-cold",
+		User:        "core@ansible",
+		Description: "ansible-playbook site.yml",
+		Progress:    45,
+		ProgressEta: "TASK [Gathering Facts]",
+		Status:      "RUNNING",
+		Category:    "ansible",
+	}); err != nil {
+		t.Fatalf("SaveTask running: %v", err)
+	}
+
+	if err := store.SaveTask(Task{
+		ID:          "task-ok-1",
+		StartTime:   "2026-10-21 11:55:00",
+		NodeTarget:  "likes-it-cold",
+		User:        "core@ansible",
+		Description: "ansible-playbook verify.yml",
+		Progress:    100,
+		ProgressEta: "Completed",
+		Status:      "OK",
+		Category:    "ansible",
+	}); err != nil {
+		t.Fatalf("SaveTask ok: %v", err)
+	}
+
+	_ = store.Close()
+
+	// Re-open the store simulating daemon restart.
+	reopened, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open #2: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+
+	recovered, err := reopened.GetTask("task-running-1")
+	if err != nil || recovered == nil {
+		t.Fatalf("GetTask(task-running-1): task=%v err=%v", recovered, err)
+	}
+	if recovered.Status != "FAILED" {
+		t.Errorf("expected interrupted RUNNING task to be FAILED after restart, got %q", recovered.Status)
+	}
+	if recovered.Progress != 100 {
+		t.Errorf("expected progress 100, got %d", recovered.Progress)
+	}
+
+	completed, err := reopened.GetTask("task-ok-1")
+	if err != nil || completed == nil {
+		t.Fatalf("GetTask(task-ok-1): task=%v err=%v", completed, err)
+	}
+	if completed.Status != "OK" {
+		t.Errorf("expected completed OK task to remain OK, got %q", completed.Status)
+	}
+}
