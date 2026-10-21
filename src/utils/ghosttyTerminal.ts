@@ -146,3 +146,83 @@ export function applyTerminalInputKey(
     echo: clean,
   };
 }
+
+export interface GhosttyThemeDefinition {
+  background: string;
+  foreground: string;
+  cursor: string;
+  cursorAccent?: string;
+  selectionBackground?: string;
+  selectionForeground?: string;
+  black?: string;
+  red?: string;
+  green?: string;
+  yellow?: string;
+  blue?: string;
+  magenta?: string;
+  cyan?: string;
+  white?: string;
+  brightBlack?: string;
+  brightRed?: string;
+  brightGreen?: string;
+  brightYellow?: string;
+  brightBlue?: string;
+  brightMagenta?: string;
+  brightCyan?: string;
+  brightWhite?: string;
+}
+
+export const CATPPUCCIN_MACCHIATO_GHOSTTY: GhosttyThemeDefinition = {
+  background: '#181926', // crust/surface lowest matching manager dark modal body
+  foreground: '#cad3f5', // text
+  cursor: '#8aadf4',     // blue
+  cursorAccent: '#181926',
+  selectionBackground: '#494d64', // surface1
+  selectionForeground: '#cad3f5',
+  black: '#494d64',
+  red: '#ed8796',
+  green: '#a6da95',
+  yellow: '#eed49f',
+  blue: '#8aadf4',
+  magenta: '#c6a0f6',
+  cyan: '#8bd5ca',
+  white: '#b8c0e0',
+  brightBlack: '#5b6078',
+  brightRed: '#ed8796',
+  brightGreen: '#a6da95',
+  brightYellow: '#eed49f',
+  brightBlue: '#8aadf4',
+  brightMagenta: '#c6a0f6',
+  brightCyan: '#8bd5ca',
+  brightWhite: '#cad3f5',
+};
+
+export const CATPPUCCIN_LATTE_GHOSTTY: GhosttyThemeDefinition = {
+  background: '#eff1f5', // base
+  foreground: '#4c4f69', // text
+  cursor: '#1e66f5',     // blue
+  cursorAccent: '#eff1f5',
+  selectionBackground: '#bcc0cc', // surface1
+  selectionForeground: '#4c4f69',
+  black: '#5c5f77',
+  red: '#d20f39',
+  green: '#40a02b',
+  yellow: '#df8e1d',
+  blue: '#1e66f5',
+  magenta: '#8839ef',
+  cyan: '#179299',
+  white: '#acb0be',
+  brightBlack: '#6c6f85',
+  brightRed: '#d20f39',
+  brightGreen: '#40a02b',
+  brightYellow: '#df8e1d',
+  brightBlue: '#1e66f5',
+  brightMagenta: '#8839ef',
+  brightCyan: '#179299',
+  brightWhite: '#4c4f69',
+};
+
+export function getGhosttyTheme(resolvedTheme?: 'macchiato' | 'latte' | string | null): GhosttyThemeDefinition {
+  return resolvedTheme === 'latte' ? CATPPUCCIN_LATTE_GHOSTTY : CATPPUCCIN_MACCHIATO_GHOSTTY;
+}
+

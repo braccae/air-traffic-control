@@ -3,6 +3,7 @@ import type { NodeItem } from '../../types/index.ts';
 import type { DragPosition } from '../../hooks/useDraggable.ts';
 import type { WindowSize } from '../../hooks/useResizable.ts';
 import type { TerminalSession } from '../../utils/terminalSessionManager.ts';
+import type { ThemeChoice, ResolvedTheme } from '../../utils/themeManager.ts';
 import { TerminalWindow } from '../TerminalWindow.tsx';
 
 export interface TerminalModalProps {
@@ -10,6 +11,8 @@ export interface TerminalModalProps {
   activeSessionId: string | null;
   nodes: NodeItem[];
   isOpen: boolean;
+  themeChoice?: ThemeChoice;
+  resolvedTheme?: ResolvedTheme;
   onClose: () => void;
   onSelectSession: (id: string) => void;
   onCloseSession: (id: string) => void;
@@ -25,6 +28,8 @@ export const TerminalModal: React.FC<TerminalModalProps> = ({
   activeSessionId,
   nodes,
   isOpen,
+  themeChoice,
+  resolvedTheme,
   onClose,
   onSelectSession,
   onCloseSession,
@@ -48,6 +53,8 @@ export const TerminalModal: React.FC<TerminalModalProps> = ({
             node={node}
             isActive={session.id === activeSessionId}
             isOpen={isOpen}
+            themeChoice={themeChoice}
+            resolvedTheme={resolvedTheme}
             onFocus={() => onSelectSession(session.id)}
             onClose={() => {
               onCloseSession(session.id);

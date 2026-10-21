@@ -5,6 +5,9 @@ import {
   formatGhosttyPrompt,
   formatCommandOutputForGhostty,
   applyTerminalInputKey,
+  getGhosttyTheme,
+  CATPPUCCIN_MACCHIATO_GHOSTTY,
+  CATPPUCCIN_LATTE_GHOSTTY,
 } from './ghosttyTerminal.ts';
 import type { NodeItem } from '../types/index.ts';
 
@@ -92,5 +95,14 @@ describe('libghostty (ghostty-web) terminal formatting and input state', () => {
     assert.equal(step.submitCommand, 'id');
     assert.equal(step.nextState.buffer, '');
     assert.deepEqual(step.nextState.history, ['uname -a', 'uptime', 'id']);
+  });
+
+  it('provides Catppuccin theme definitions for Ghostty matching app color scheme', () => {
+    assert.equal(getGhosttyTheme('macchiato').background, '#181926');
+    assert.equal(getGhosttyTheme('macchiato').foreground, '#cad3f5');
+    assert.equal(getGhosttyTheme('latte').background, '#eff1f5');
+    assert.equal(getGhosttyTheme('latte').foreground, '#4c4f69');
+    assert.deepEqual(getGhosttyTheme(), CATPPUCCIN_MACCHIATO_GHOSTTY);
+    assert.deepEqual(getGhosttyTheme('latte'), CATPPUCCIN_LATTE_GHOSTTY);
   });
 });

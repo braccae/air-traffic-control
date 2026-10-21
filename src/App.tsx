@@ -1859,6 +1859,8 @@ export default function App() {
         activeSessionId={activeSessionId}
         nodes={nodesList}
         isOpen={terminalOpen && !!activeSessionId}
+        themeChoice={themeChoice}
+        resolvedTheme={resolvedTheme}
         onClose={() => setTerminalOpen(false)}
         onSelectSession={setActiveSessionId}
         onCloseSession={handleCloseTerminalSession}

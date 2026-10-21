@@ -9,6 +9,7 @@ import {
   formatCommandOutputForGhostty,
   applyTerminalInputKey,
   type TerminalInputState,
+  getGhosttyTheme,
 } from '../utils/ghosttyTerminal.ts';
 import { useDraggable, type DragPosition } from '../hooks/useDraggable.ts';
 import { useResizable, type WindowSize, type ResizeDirection } from '../hooks/useResizable.ts';
@@ -16,6 +17,8 @@ import {
   type TerminalSession,
   formatSshTarget,
 } from '../utils/terminalSessionManager.ts';
+import type { ThemeChoice, ResolvedTheme } from '../utils/themeManager.ts';
+import { resolveTheme } from '../utils/themeManager.ts';
 import {
   loadQuickCommands,
   QUICK_COMMAND_EVENT,
@@ -35,6 +38,8 @@ export interface TerminalWindowProps {
   node: NodeItem;
   isActive: boolean;
   isOpen: boolean;
+  themeChoice?: ThemeChoice;
+  resolvedTheme?: ResolvedTheme;
   onFocus: () => void;
   onClose: () => void;
   onMinimize: () => void;
@@ -48,6 +53,8 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
   node,
   isActive,
   isOpen,
+  themeChoice,
+  resolvedTheme,
   onFocus,
   onClose,
   onMinimize,
@@ -61,6 +68,9 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
   const [connStatus, setConnStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('connected');
   const [showQuickMenu, setShowQuickMenu] = useState(false);
   const [quickCommands, setQuickCommands] = useState<QuickCommandItem[]>(() => loadQuickCommands());
+
+  const currentThemeMode: ResolvedTheme = resolvedTheme || resolveTheme(themeChoice);
+  const ghosttyTheme = getGhosttyTheme(currentThemeMode);
 
   useEffect(() => {
     const handleQuickCommandsUpdated = (event: Event) => {
@@ -236,11 +246,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
           cursorBlink: true,
           fontFamily: '"Fira Code", monospace',
           fontSize: 13,
-          theme: {
-            background: '#0d1117',
-            foreground: '#c9d1d9',
-            cursor: '#58a6ff',
-          },
+          theme: ghosttyTheme,
         });
 
         fitAddon = new FitAddon();
@@ -369,7 +375,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
       termRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [isOpen, session.id, node?.id]);
+  }, [isOpen, session.id, node?.id, currentThemeMode]);
 
   const isMax = session.isMaximized;
   const sshTarget = formatSshTarget(node, session.hostIp);
@@ -426,8 +432,8 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
       }}
       onPointerDown={() => onFocus()}
       {...resizeProps}
-      className={`bg-[#0d1117] rounded-lg shadow-2xl border ${
-        isActive ? 'border-[#58a6ff]/80 shadow-[0_0_20px_rgba(88,166,255,0.15)]' : 'border-[#30363d]'
+      className={`bg-[#0a0d1f] rounded-lg shadow-2xl border ${
+        isActive ? 'border-[#b0c9ff]/70 shadow-[0_4px_24px_rgba(0,0,0,0.6)]' : 'border-[#313447]'
       } flex flex-col overflow-hidden backdrop-blur-md select-none`}
     >
       {/* 8-Direction Resize Handles (when not maximized) */}
@@ -439,7 +445,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
               onFocus();
               startResize(dir, e, position);
             }}
-            className={`absolute z-30 ${getHandleClass(dir)} hover:bg-[#58a6ff]/30`}
+            className={`absolute z-30 ${getHandleClass(dir)} hover:bg-[#b0c9ff]/20`}
           />
         ))}
 
@@ -450,15 +456,15 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
           onFocus();
           dragProps.onPointerDown?.(e);
         }}
-        className="flex items-center justify-between bg-[#161b22] border-b border-[#30363d] px-3 py-1.5 cursor-grab active:cursor-grabbing select-none"
+        className="h-10 bg-[#171a2d] border-b border-[#26293c] px-3.5 flex items-center justify-between cursor-grab active:cursor-grabbing select-none shrink-0"
       >
         {/* Left: Terminal Icon + Host Name + SSH Target + Status Dot */}
         <div className="flex items-center gap-2 min-w-0">
-          <TerminalIcon className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-[#58a6ff]' : 'text-gray-400'}`} />
-          <span className="font-mono font-bold text-xs text-white truncate max-w-[150px]">
+          <TerminalIcon className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-[#8cd6cb]' : 'text-[#8d909b]'}`} />
+          <span className="font-mono font-bold text-xs text-[#dfe1fa] truncate max-w-[150px]">
             {session.nodeName || node.name}
           </span>
-          <span className="font-mono text-[11px] text-gray-400 hidden sm:inline truncate max-w-[220px]">
+          <span className="font-mono text-[11px] text-[#8d909b] hidden sm:inline truncate max-w-[220px]">
             {sshTarget}
           </span>
           <span
@@ -476,9 +482,9 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
         {/* Right: Quick Commands + Window Action Buttons */}
         <div className="flex items-center gap-2 shrink-0">
           {/* Quick Commands for Desktop */}
-          <div className="hidden md:flex items-center gap-1 px-1.5 py-0.5 bg-[#0d1117] rounded border border-[#30363d]/60">
-            <span className="text-[10px] text-gray-500 font-mono flex items-center gap-1">
-              <TerminalSquare className="w-3 h-3 text-[#79c0ff]" />
+          <div className="hidden md:flex items-center gap-1 px-1.5 py-0.5 bg-[#121528] rounded border border-[#26293c]">
+            <span className="text-[10px] text-[#8d909b] font-mono flex items-center gap-1">
+              <TerminalSquare className="w-3 h-3 text-[#8cd6cb]" />
             </span>
             {quickCommands.map((qc) => (
               <button
@@ -488,7 +494,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
                   e.stopPropagation();
                   handleRunQuickCommand(qc.cmd);
                 }}
-                className="px-1.5 py-0.5 text-[10px] font-mono text-gray-300 hover:text-white hover:bg-[#21262d] rounded transition-colors"
+                className="px-1.5 py-0.5 text-[10px] font-mono text-[#c3c6d2] hover:text-[#dfe1fa] hover:bg-[#26293c] rounded transition-colors cursor-pointer"
                 title={qc.description ? `${qc.description} (${qc.cmd})` : `Run '${qc.cmd}'`}
               >
                 {qc.label}
@@ -504,14 +510,14 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
                 e.stopPropagation();
                 setShowQuickMenu(!showQuickMenu);
               }}
-              className="p-1 rounded text-gray-400 hover:text-white hover:bg-[#21262d] transition-colors"
+              className="p-1 rounded text-[#8d909b] hover:text-[#dfe1fa] hover:bg-[#26293c] transition-colors cursor-pointer"
               title="Quick Commands"
             >
-              <TerminalSquare className="w-3.5 h-3.5 text-[#79c0ff]" />
+              <TerminalSquare className="w-3.5 h-3.5 text-[#8cd6cb]" />
             </button>
             {showQuickMenu && (
-              <div className="absolute right-0 top-8 z-50 bg-[#161b22] border border-[#30363d] rounded-md shadow-xl py-1 w-48">
-                <div className="px-2.5 py-1 text-[10px] font-mono text-gray-400 uppercase tracking-wider border-b border-[#30363d]/50">
+              <div className="absolute right-0 top-8 z-50 bg-[#171a2d] border border-[#26293c] rounded-md shadow-xl py-1 w-48">
+                <div className="px-2.5 py-1 text-[10px] font-mono text-[#8d909b] uppercase tracking-wider border-b border-[#26293c]">
                   Quick Commands
                 </div>
                 {quickCommands.map((qc) => (
@@ -523,12 +529,12 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
                       handleRunQuickCommand(qc.cmd);
                       setShowQuickMenu(false);
                     }}
-                    className="w-full text-left px-2.5 py-1.5 text-xs font-mono text-gray-200 hover:text-white hover:bg-[#1f6feb]/20 flex flex-col"
+                    className="w-full text-left px-2.5 py-1.5 text-xs font-mono text-[#c3c6d2] hover:text-[#dfe1fa] hover:bg-[#26293c] flex flex-col cursor-pointer"
                     title={qc.cmd}
                   >
                     <span>{qc.label}</span>
                     {qc.description && (
-                      <span className="text-[10px] text-gray-400 font-sans truncate">{qc.description}</span>
+                      <span className="text-[10px] text-[#8d909b] font-sans truncate">{qc.description}</span>
                     )}
                   </button>
                 ))}
@@ -544,7 +550,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
                 e.stopPropagation();
                 onMinimize();
               }}
-              className="p-1 rounded text-gray-400 hover:text-white hover:bg-[#21262d] transition-colors"
+              className="p-1 rounded text-[#8d909b] hover:text-[#dfe1fa] hover:bg-[#26293c] transition-colors cursor-pointer"
               title="Minimize to Console"
             >
               <Minus className="w-3.5 h-3.5" />
@@ -555,7 +561,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
                 e.stopPropagation();
                 onToggleMaximize();
               }}
-              className="p-1 rounded text-gray-400 hover:text-white hover:bg-[#21262d] transition-colors"
+              className="p-1 rounded text-[#8d909b] hover:text-[#dfe1fa] hover:bg-[#26293c] transition-colors cursor-pointer"
               title={isMax ? 'Restore' : 'Maximize'}
             >
               {isMax ? <Copy className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
@@ -566,7 +572,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
                 e.stopPropagation();
                 onClose();
               }}
-              className="p-1 rounded text-gray-400 hover:text-red-400 hover:bg-red-500/20 transition-colors"
+              className="p-1 rounded text-[#8d909b] hover:text-[#ffb4ab] hover:bg-[#ffb4ab]/10 transition-colors cursor-pointer"
               title="Close Terminal Session"
             >
               <X className="w-3.5 h-3.5" />
@@ -583,7 +589,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
           termRef.current?.focus();
         }}
         data-testid="ghostty-terminal-container"
-        className="flex-1 bg-[#0d1117] p-2 overflow-hidden relative cursor-text select-text"
+        className="flex-1 bg-[#0a0d1f] overflow-hidden relative cursor-text select-text"
       />
 
       {/* Accessible screen-reader mirror */}
@@ -594,7 +600,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
       )}
 
       {/* Terminal Footer Status Bar */}
-      <div className="h-6 bg-[#161b22] px-3 flex items-center justify-between font-mono text-[10px] text-gray-400 border-t border-[#30363d]">
+      <div className="h-7 bg-[#171a2d] px-3.5 flex items-center justify-between font-mono text-[10px] text-[#8d909b] border-t border-[#26293c] shrink-0">
         <div className="flex items-center gap-2">
           <span className="flex items-center gap-1">
             <span
@@ -602,21 +608,21 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
                 connStatus === 'connected' ? 'bg-[#3fb950]' : 'bg-red-500'
               }`}
             />
-            <span>{connStatus}</span>
+            <span className="capitalize">{connStatus}</span>
           </span>
-          <span className="text-gray-600">|</span>
-          <span className="truncate max-w-[200px]">
+          <span className="text-[#313447]">|</span>
+          <span className="truncate max-w-[200px] text-[#c3c6d2]">
             {sshTarget}:{node?.port || 22}
           </span>
-          <span className="text-gray-600">|</span>
-          <span className="text-[#58a6ff]">libghostty-vt WASM</span>
+          <span className="text-[#313447]">|</span>
+          <span className="text-[#8cd6cb]">libghostty-vt WASM</span>
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="text-gray-500">
+          <span className="text-[#8d909b]">
             {isMax ? 'Maximized' : `${size.width}x${size.height}`}
           </span>
-          <span className="text-[#7ee787]">
+          <span className="text-[#3fb950]">
             {running ? 'Executing remote SSH...' : 'WireGuard encrypted'}
           </span>
         </div>
