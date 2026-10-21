@@ -422,6 +422,7 @@ export const PLUGIN_VIEW_REGISTRY: Record<string, PluginViewComponent> = {
 
   // Containers
   'container/podman': PodmanViewAdapter,
+  'container/docker': PodmanViewAdapter,
   'container': PodmanViewAdapter,
 
   // Disks & SMART

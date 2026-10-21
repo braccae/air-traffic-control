@@ -11,7 +11,11 @@ import (
 )
 
 func TestResolveSSHAgentAuthMethod_ConnectsToAgentSocket(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir, err := os.MkdirTemp("/tmp", "ssh-agent-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir in /tmp: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
 	sockPath := filepath.Join(tmpDir, "ssh-agent.socket")
 
 	ln, err := net.Listen("unix", sockPath)
