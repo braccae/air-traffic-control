@@ -1,0 +1,178 @@
+package ansibleapi
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// RequiredVenvPackages lists packages that must be present in the virtualenv.
+var RequiredVenvPackages = []string{
+	"ansible-core",
+	"pywinrm",
+	"requests",
+	"jmespath",
+	"cryptography",
+	"netaddr",
+}
+
+// EnvironmentInfo describes the Ansible runtime environment.
+type EnvironmentInfo struct {
+	Success          bool     `json:"success"`
+	VenvPath         string   `json:"venvPath"`
+	UvPath           string   `json:"uvPath"`
+	Installed        bool     `json:"installed"`
+	Packages         []string `json:"packages"`
+	PythonVersion    string   `json:"pythonVersion,omitempty"`
+	AnsibleVersion   string   `json:"ansibleVersion,omitempty"`
+	Collections      []string `json:"collections,omitempty"`
+	AnsibleBinary    string   `json:"ansibleBinary,omitempty"`
+	PlaybookBinary   string   `json:"ansiblePlaybookBinary,omitempty"`
+	VaultBinary      string   `json:"ansibleVaultBinary,omitempty"`
+}
+
+// GetAnsibleVenvPath returns the path to the persistent Ansible virtualenv.
+func GetAnsibleVenvPath(repoRoot string) string {
+	if custom := os.Getenv("ANSIBLE_VENV_PATH"); custom != "" {
+		return custom
+	}
+	return filepath.Join(repoRoot, "data", "ansible-venv")
+}
+
+// FindUv locates the uv binary on disk without downloading.
+func FindUv(repoRoot string) string {
+	// 1. Check data/bin/uv
+	localUv := filepath.Join(repoRoot, "data", "bin", "uv")
+	if fi, err := os.Stat(localUv); err == nil && !fi.IsDir() {
+		return localUv
+	}
+
+	// 2. Look in PATH
+	if p, err := exec.LookPath("uv"); err == nil {
+		return p
+	}
+
+	// 3. Fallback to standard locations
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", "uv"),
+		filepath.Join(home, ".cargo", "bin", "uv"),
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// EnsureAnsibleVenv checks if the virtualenv exists; if missing and uv is available, creates it.
+func EnsureAnsibleVenv(repoRoot string) (string, error) {
+	venvDir := GetAnsibleVenvPath(repoRoot)
+	ansibleBin := filepath.Join(venvDir, "bin", "ansible")
+	if fi, err := os.Stat(ansibleBin); err == nil && !fi.IsDir() {
+		return venvDir, nil
+	}
+
+	uvPath := FindUv(repoRoot)
+	if uvPath == "" {
+		return "", fmt.Errorf("uv binary not found to bootstrap ansible-venv")
+	}
+
+	// Create venv
+	cmd := exec.Command(uvPath, "venv", venvDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("uv venv failed (%w): %s", err, string(out))
+	}
+
+	// Install required packages
+	pythonBin := filepath.Join(venvDir, "bin", "python")
+	args := append([]string{"pip", "install", "--python", pythonBin}, RequiredVenvPackages...)
+	installCmd := exec.Command(uvPath, args...)
+	if out, err := installCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("uv pip install failed (%w): %s", err, string(out))
+	}
+
+	return venvDir, nil
+}
+
+// InspectEnvironment probes the environment for JSON reporting.
+func InspectEnvironment(repoRoot string) EnvironmentInfo {
+	venvPath := GetAnsibleVenvPath(repoRoot)
+	binDir := filepath.Join(venvPath, "bin")
+	ansibleBinary := filepath.Join(binDir, "ansible")
+	playbookBinary := filepath.Join(binDir, "ansible-playbook")
+	vaultBinary := filepath.Join(binDir, "ansible-vault")
+	pythonBinary := filepath.Join(binDir, "python")
+
+	installed := false
+	if fi, err := os.Stat(ansibleBinary); err == nil && !fi.IsDir() {
+		installed = true
+	} else if fi, err := os.Stat(playbookBinary); err == nil && !fi.IsDir() {
+		installed = true
+	} else if p, err := exec.LookPath("ansible-playbook"); err == nil {
+		installed = true
+		playbookBinary = p
+	}
+
+	uvPath := FindUv(repoRoot)
+
+	info := EnvironmentInfo{
+		Success:        true,
+		VenvPath:       venvPath,
+		UvPath:         uvPath,
+		Installed:      installed,
+		Packages:       RequiredVenvPackages,
+		AnsibleBinary:  ansibleBinary,
+		PlaybookBinary: playbookBinary,
+		VaultBinary:    vaultBinary,
+	}
+
+	// Python version probe
+	pyToRun := pythonBinary
+	if _, err := os.Stat(pyToRun); err != nil {
+		if p, err := exec.LookPath("python3"); err == nil {
+			pyToRun = p
+		}
+	}
+	if out, err := exec.Command(pyToRun, "--version").CombinedOutput(); err == nil {
+		info.PythonVersion = strings.TrimSpace(string(out))
+	}
+
+	// Ansible version probe
+	ansToRun := playbookBinary
+	if _, err := os.Stat(ansToRun); err != nil {
+		ansToRun, _ = exec.LookPath("ansible-playbook")
+	}
+	if ansToRun != "" {
+		if out, err := exec.Command(ansToRun, "--version").CombinedOutput(); err == nil {
+			firstLine := strings.Split(string(out), "\n")[0]
+			info.AnsibleVersion = strings.TrimSpace(firstLine)
+		}
+	}
+
+	// Galaxy collections list
+	galaxyToRun := filepath.Join(binDir, "ansible-galaxy")
+	if _, err := os.Stat(galaxyToRun); err != nil {
+		galaxyToRun, _ = exec.LookPath("ansible-galaxy")
+	}
+	if galaxyToRun != "" {
+		if out, err := exec.Command(galaxyToRun, "collection", "list").CombinedOutput(); err == nil {
+			var collections []string
+			for _, line := range strings.Split(string(out), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.Contains(trimmed, ".") && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "Collection") {
+					parts := strings.Fields(trimmed)
+					if len(parts) >= 1 && strings.Contains(parts[0], ".") {
+						collections = append(collections, parts[0])
+					}
+				}
+			}
+			info.Collections = collections
+		}
+	}
+
+	return info
+}

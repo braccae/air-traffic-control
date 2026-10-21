@@ -712,6 +712,19 @@ func (s *Store) GetAllGroupVars() (map[string]string, error) {
 	return out, rows.Err()
 }
 
+// DeleteGroupVar deletes a single group var file from cache and reports whether a row was removed.
+func (s *Store) DeleteGroupVar(file string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.Exec(`DELETE FROM group_vars_cache WHERE file_path = ?`, file)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // ---------------------------------------------------------------------------
 // custom folders
 // ---------------------------------------------------------------------------

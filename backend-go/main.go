@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"air-traffic-control/backend/cmd/proxy"
+	"air-traffic-control/backend/pkg/ansibleapi"
 	"air-traffic-control/backend/pkg/ansqueue"
 	"air-traffic-control/backend/pkg/glances"
 	"air-traffic-control/backend/pkg/hostcache"
@@ -189,6 +190,18 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 			log.Printf("ansible queue API disabled: %v", err)
 		} else {
 			qAPI.Register(mux)
+		}
+
+		// Mount ported Ansible API routes (config, environment, inventory, modules, playbooks, group-vars)
+		if ansAPI, err := ansibleapi.NewAPI(ansibleapi.APIOptions{
+			Store:      store,
+			QueueStore: qStore,
+			RepoRoot:   ansqueue.ResolveWorkDir(),
+			Broadcast:  queueBroadcast,
+		}); err != nil {
+			log.Printf("ansible API disabled: %v", err)
+		} else {
+			ansAPI.Register(mux)
 		}
 
 		// Mount the node lifecycle and hardware probe API (CRUD, testSsh, probes).
