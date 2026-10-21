@@ -264,6 +264,16 @@ func (a *API) emit(event map[string]any) {
 	}
 }
 
+// LogStore returns the underlying log store.
+func (a *API) LogStore() *LogStore {
+	return a.logStore
+}
+
+// ConnReg returns the underlying connection registry.
+func (a *API) ConnReg() *ConnectionRegistry {
+	return a.connReg
+}
+
 // Register mounts the cluster routes on mux.
 func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/cluster-log", a.handleClusterLog)

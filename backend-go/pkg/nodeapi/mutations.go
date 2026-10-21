@@ -18,6 +18,12 @@ import (
 // findNode resolves a target node matching query from persistence.
 // Parity: matches server.ts findNode(query) fallback behavior.
 func (a *API) findNode(query string) (*Object, error) {
+	return a.FindNode(query)
+}
+
+// FindNode resolves a target node matching query from persistence.
+// Parity: matches server.ts findNode(query) fallback behavior.
+func (a *API) FindNode(query string) (*Object, error) {
 	hosts, err := a.store.GetAllHosts()
 	if err != nil {
 		return nil, err

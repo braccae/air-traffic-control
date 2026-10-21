@@ -26,6 +26,7 @@ import (
 	"air-traffic-control/backend/pkg/restic"
 	"air-traffic-control/backend/pkg/ssh"
 	"air-traffic-control/backend/pkg/tailscale"
+	"air-traffic-control/backend/pkg/terminal"
 	"air-traffic-control/backend/pkg/types"
 	"air-traffic-control/backend/pkg/vaultapi"
 	"air-traffic-control/backend/pkg/websocket"
@@ -271,6 +272,29 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 		} else {
 			nodeAPI = nAPI
 			nodeAPI.Register(mux)
+		}
+
+		// Mount Terminal exec API (/api/terminal/exec)
+		termRunner := nodeapi.NewSSHRunner(sshManager.Pool())
+		termAPI := terminal.NewAPI(nodeAPI, termRunner, store)
+		termAPI.Register(mux)
+
+		// Provide dependencies to WebSocket Hub
+		if hub != nil {
+			var connReg *clusterapi.ConnectionRegistry
+			var logStore *clusterapi.LogStore
+			if clAPI, err := clusterapi.NewAPI(clusterapi.Options{Store: store}); err == nil {
+				connReg = clAPI.ConnReg()
+				logStore = clAPI.LogStore()
+			}
+			hub.SetOptions(websocket.HubOptions{
+				Store:      store,
+				QueueStore: qStore,
+				ConnReg:    connReg,
+				LogStore:   logStore,
+				SSHManager: sshManager,
+				Resolver:   nodeAPI,
+			})
 		}
 	}
 
