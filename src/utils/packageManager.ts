@@ -1,4 +1,3 @@
-import type { Express } from 'express';
 import type { NodeItem, GlobalTaskItem } from '../types/index.ts';
 
 export type PackageManager = 'dnf' | 'apt' | 'apk' | 'rpm-ostree' | 'bootc';
@@ -608,8 +607,8 @@ export interface PackageRouteOptions {
 /**
  * Registers REST API endpoints for package checking and updates on target nodes.
  */
-export function registerPackageRoutes(app: Express, options: PackageRouteOptions): void {
-  app.get('/api/nodes/:id/packages/check', async (req, res) => {
+export function registerPackageRoutes(app: any, options: PackageRouteOptions): void {
+  app.get('/api/nodes/:id/packages/check', async (req: any, res: any) => {
     const targetNode = options.findNode(req.params.id);
     if (!targetNode) {
       res.status(404).json({ success: false, error: 'Host not found' });
@@ -699,7 +698,7 @@ export function registerPackageRoutes(app: Express, options: PackageRouteOptions
     }
   });
 
-  app.post('/api/nodes/:id/packages/apply', async (req, res) => {
+  app.post('/api/nodes/:id/packages/apply', async (req: any, res: any) => {
     const targetNode = options.findNode(req.params.id);
     if (!targetNode) {
       res.status(404).json({ success: false, error: 'Host not found' });

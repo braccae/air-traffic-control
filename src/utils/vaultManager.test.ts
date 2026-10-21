@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import http from 'node:http';
-import express from 'express';
 import {
   resolveVaultPasswordSource,
   encryptVaultString,
@@ -14,6 +13,81 @@ import {
   type VaultPasswordSource,
 } from './vaultManager.ts';
 import { createHostCacheStore } from './hostCacheDb.ts';
+
+function createMockApp() {
+  const routes: Array<{ method: string; path: string; handler: Function }> = [];
+  const app = {
+    get: (p: string, h: Function) => routes.push({ method: 'GET', path: p, handler: h }),
+    post: (p: string, h: Function) => routes.push({ method: 'POST', path: p, handler: h }),
+    put: (p: string, h: Function) => routes.push({ method: 'PUT', path: p, handler: h }),
+    delete: (p: string, h: Function) => routes.push({ method: 'DELETE', path: p, handler: h }),
+  };
+
+  const server = http.createServer((req, res) => {
+    const parsedUrl = new URL(req.url || '/', 'http://127.0.0.1');
+    const pathname = parsedUrl.pathname;
+    const method = req.method || 'GET';
+
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', async () => {
+      let parsedBody = {};
+      if (body) {
+        try { parsedBody = JSON.parse(body); } catch {}
+      }
+
+      for (const r of routes) {
+        if (r.method !== method) continue;
+        const rParts = r.path.split('/');
+        const uParts = pathname.split('/');
+        if (rParts.length !== uParts.length) continue;
+
+        const params: Record<string, string> = {};
+        let match = true;
+        for (let i = 0; i < rParts.length; i++) {
+          if (rParts[i].startsWith(':')) {
+            params[rParts[i].slice(1)] = decodeURIComponent(uParts[i]);
+          } else if (rParts[i] !== uParts[i]) {
+            match = false;
+            break;
+          }
+        }
+
+        if (match) {
+          const reqMock = { params, body: parsedBody, query: Object.fromEntries(parsedUrl.searchParams) };
+          const resMock = {
+            status(code: number) {
+              res.statusCode = code;
+              return resMock;
+            },
+            json(data: any) {
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify(data));
+              return resMock;
+            },
+          };
+          await r.handler(reqMock, resMock);
+          return;
+        }
+      }
+
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'Not found' }));
+    });
+  });
+
+  return { app, server };
+}
+
+function listenServer(server: http.Server): Promise<{ baseUrl: string }> {
+  return new Promise(resolve => {
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      resolve({ baseUrl: `http://127.0.0.1:${port}` });
+    });
+  });
+}
 
 describe('Tiered Ansible Vault Credential Engine', () => {
   let tmpDir: string;
@@ -256,24 +330,15 @@ describe('Tiered Ansible Vault Credential Engine', () => {
   });
 
   describe('REST API Endpoints', () => {
-    let app: express.Express;
     let server: http.Server;
     let baseUrl: string;
 
     beforeEach(async () => {
-      app = express();
-      app.use(express.json());
-      registerVaultRoutes(app);
-
-      await new Promise<void>((resolve) => {
-        server = app.listen(0, '127.0.0.1', () => {
-          const addr = server.address();
-          if (typeof addr === 'object' && addr) {
-            baseUrl = `http://127.0.0.1:${addr.port}`;
-          }
-          resolve();
-        });
-      });
+      const mock = createMockApp();
+      server = mock.server;
+      registerVaultRoutes(mock.app);
+      const listening = await listenServer(server);
+      baseUrl = listening.baseUrl;
     });
 
     afterEach(async () => {
@@ -372,22 +437,18 @@ describe('Vault decryption audit trail', () => {
     }
   });
 
-  const listen = async (app: express.Express): Promise<{ server: http.Server; baseUrl: string }> => {
-    const server = await new Promise<http.Server>(resolve => {
-      const s = app.listen(0, '127.0.0.1', () => resolve(s));
-    });
-    const addr = server.address() as { port: number };
-    return { server, baseUrl: `http://127.0.0.1:${addr.port}` };
+  const listen = async (server: http.Server): Promise<{ baseUrl: string }> => {
+    return listenServer(server);
   };
 
   it('writes exactly one plaintext-free row per decryption and survives a store restart', async () => {
     const dbPath = path.join(tmpDir, 'hosts-cache.sqlite');
     const store = createHostCacheStore(dbPath);
 
-    const app = express();
-    app.use(express.json());
-    registerVaultRoutes(app, { auditStore: store, actor: 'atc-coordinator', action: 'default-action' });
-    const { server, baseUrl } = await listen(app);
+    const mock = createMockApp();
+    registerVaultRoutes(mock.app, { auditStore: store, actor: 'atc-coordinator', action: 'default-action' });
+    const { baseUrl } = await listen(mock.server);
+    const server = mock.server;
 
     try {
       const plaintextValue = 'super-secret-db-password-do-not-log';
@@ -467,10 +528,10 @@ describe('Vault decryption audit trail', () => {
 
   it('returns newest events first and defaults metadata when the request is bare', async () => {
     const store = createHostCacheStore(path.join(tmpDir, 'audit.sqlite'));
-    const app = express();
-    app.use(express.json());
-    registerVaultRoutes(app, { auditStore: store });
-    const { server, baseUrl } = await listen(app);
+    const mock = createMockApp();
+    registerVaultRoutes(mock.app, { auditStore: store });
+    const { baseUrl } = await listen(mock.server);
+    const server = mock.server;
 
     try {
       const encRes = await fetch(`${baseUrl}/api/vault/encrypt`, {

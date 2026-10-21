@@ -28,7 +28,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import type { Express, Request, Response } from 'express';
 import type { HostCacheStore } from './hostCacheDb.ts';
 import type {
   NodeItem,
@@ -644,18 +643,18 @@ function normalizeSteps(task: RcloneCompiledTask) {
   }));
 }
 
-export function registerRcloneRoutes(app: Express, options: RcloneRouteOptions): void {
+export function registerRcloneRoutes(app: any, options: RcloneRouteOptions): void {
   const { hostCache, broadcast, getNode, compileInstall, stageTask, actor: defaultActor } = options;
 
-  app.get('/api/rclone/providers', (_req: Request, res: Response) => {
+  app.get('/api/rclone/providers', (_req: any, res: any) => {
     res.json({ success: true, providers: RCLONE_PROVIDERS });
   });
 
-  app.get('/api/rclone/remotes', (_req: Request, res: Response) => {
+  app.get('/api/rclone/remotes', (_req: any, res: any) => {
     res.json({ success: true, remotes: hostCache.getAllRcloneRemotes().map(remoteView) });
   });
 
-  app.get('/api/rclone/remotes/:id', (req: Request, res: Response) => {
+  app.get('/api/rclone/remotes/:id', (req: any, res: any) => {
     const remote = hostCache.getRcloneRemote(req.params.id);
     if (!remote) {
       res.status(404).json({ success: false, error: 'Remote not found' });
@@ -668,7 +667,7 @@ export function registerRcloneRoutes(app: Express, options: RcloneRouteOptions):
   // ATC's Ansible Vault store (`vault_variables`) before they touch the database.
   // `verify: true` checks the remote against the real provider first and refuses
   // to persist a remote that cannot be reached.
-  app.post('/api/rclone/remotes', async (req: Request, res: Response) => {
+  app.post('/api/rclone/remotes', async (req: any, res: any) => {
     try {
       const { id, name, provider: providerId, fields, verify, password, actor } = req.body || {};
       const provider = getProvider(providerId);
@@ -752,7 +751,7 @@ export function registerRcloneRoutes(app: Express, options: RcloneRouteOptions):
     }
   });
 
-  app.delete('/api/rclone/remotes/:id', (req: Request, res: Response) => {
+  app.delete('/api/rclone/remotes/:id', (req: any, res: any) => {
     const existing = hostCache.getRcloneRemote(req.params.id);
     if (existing) {
       try {
@@ -773,7 +772,7 @@ export function registerRcloneRoutes(app: Express, options: RcloneRouteOptions):
 
   // Verify a remote against the real provider without persisting.
   // Decrypts secret fields from the Ansible Vault store and records a Vault Audit row.
-  app.post('/api/rclone/remotes/:id/verify', async (req: Request, res: Response) => {
+  app.post('/api/rclone/remotes/:id/verify', async (req: any, res: any) => {
     try {
       const remote = hostCache.getRcloneRemote(req.params.id);
       if (!remote) {
@@ -795,7 +794,7 @@ export function registerRcloneRoutes(app: Express, options: RcloneRouteOptions):
     }
   });
 
-  app.get('/api/rclone/nodes/:nodeId/mounts', (req: Request, res: Response) => {
+  app.get('/api/rclone/nodes/:nodeId/mounts', (req: any, res: any) => {
     res.json({ success: true, mounts: hostCache.getRcloneMounts(req.params.nodeId) });
   });
 
@@ -804,7 +803,7 @@ export function registerRcloneRoutes(app: Express, options: RcloneRouteOptions):
   // chosen mount policy through the Go daemon, and stage the declarative task.
   // The config write step carries obscured values under no_log; unit files never
   // contain credentials.
-  app.post('/api/rclone/remotes/:id/install', async (req: Request, res: Response) => {
+  app.post('/api/rclone/remotes/:id/install', async (req: any, res: any) => {
     try {
       const remote = hostCache.getRcloneRemote(req.params.id);
       if (!remote) {
@@ -894,7 +893,7 @@ export function registerRcloneRoutes(app: Express, options: RcloneRouteOptions):
     }
   });
 
-  app.delete('/api/rclone/nodes/:nodeId/mounts/:remoteId', (req: Request, res: Response) => {
+  app.delete('/api/rclone/nodes/:nodeId/mounts/:remoteId', (req: any, res: any) => {
     const deleted = hostCache.deleteRcloneMount(req.params.nodeId, req.params.remoteId);
     if (broadcast) broadcast({ type: 'rclone_mounts_updated', mounts: hostCache.getRcloneMounts(req.params.nodeId) });
     res.json({ success: true, deleted });

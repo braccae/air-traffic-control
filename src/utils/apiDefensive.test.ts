@@ -146,35 +146,32 @@ describe('apiDefensive - safeFetchJson', () => {
   });
 });
 
-describe('Express API 404 Guard Simulation', () => {
+describe('HTTP API 404 Guard Simulation (node:http)', () => {
   let appServer: http.Server;
   let appUrl: string;
 
   before(async () => {
-    const { default: express } = await import('express');
-    const app = express();
-    app.use(express.json());
-
-    // Sample valid route
-    app.get('/api/test-route', (_req, res) => {
-      res.json({ success: true, item: 'valid' });
-    });
-
-    // Catch-all API 404 guard
-    app.all(['/api', '/api/*'], (req, res) => {
-      res.status(404).json({
-        success: false,
-        error: `API route not found: ${req.method} ${req.path}`,
-      });
-    });
-
-    // Fallthrough SPA handler simulating Vite / index.html
-    app.get('*', (_req, res) => {
-      res.status(200).send('<!doctype html><html><head><title>SPA</title></head><body><div id="root"></div></body></html>');
+    appServer = http.createServer((req, res) => {
+      const url = req.url || '';
+      if (url === '/api/test-route') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, item: 'valid' }));
+        return;
+      }
+      if (url.startsWith('/api')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: false,
+          error: `API route not found: ${req.method} ${url}`,
+        }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<!doctype html><html><head><title>SPA</title></head><body><div id="root"></div></body></html>');
     });
 
     await new Promise<void>((resolve) => {
-      appServer = app.listen(0, '127.0.0.1', () => {
+      appServer.listen(0, '127.0.0.1', () => {
         const addr = appServer.address();
         if (typeof addr === 'object' && addr) {
           appUrl = `http://127.0.0.1:${addr.port}`;

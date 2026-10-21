@@ -3,7 +3,6 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import type { Express, Request, Response } from 'express';
 import { parseAnsibleCfg } from './ansibleConfigManager.ts';
 import { getAnsibleExecutionEnv } from './ansibleVenvManager.ts';
 import type { VaultAuditEvent, VaultVariable } from '../types/index.ts';
@@ -487,7 +486,7 @@ export interface RegisterVaultRoutesOptions {
  * - POST /api/vault/decrypt: decrypts vault block back to plaintext and records
  *   exactly one audit row (variable name + metadata, never the plaintext)
  */
-export function registerVaultRoutes(app: Express, options: RegisterVaultRoutesOptions = {}): void {
+export function registerVaultRoutes(app: any, options: RegisterVaultRoutesOptions = {}): void {
   const { auditStore, variableStore } = options;
   const defaultActor = options.actor || process.env.SUDO_USER || process.env.USER || 'atc-coordinator';
   const defaultHost = options.host || 'n/a';
@@ -498,7 +497,7 @@ export function registerVaultRoutes(app: Express, options: RegisterVaultRoutesOp
     return text || defaultActor;
   };
 
-  app.get('/api/vault/status', (_req: Request, res: Response) => {
+  app.get('/api/vault/status', (_req: any, res: any) => {
     try {
       const source = resolveVaultPasswordSource();
       res.json({
@@ -511,15 +510,15 @@ export function registerVaultRoutes(app: Express, options: RegisterVaultRoutesOp
     }
   });
 
-  app.get('/api/vault/audit', (req: Request, res: Response) => {
+  app.get('/api/vault/audit', (req: any, res: any) => {
     try {
       if (!auditStore) {
         res.json({ success: true, events: [], total: 0 });
         return;
       }
-      const variableName = typeof req.query.variable === 'string' ? req.query.variable : undefined;
-      const host = typeof req.query.host === 'string' ? req.query.host : undefined;
-      const limitParam = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined;
+      const variableName = typeof req.query?.variable === 'string' ? req.query.variable : undefined;
+      const host = typeof req.query?.host === 'string' ? req.query.host : undefined;
+      const limitParam = typeof req.query?.limit === 'string' ? Number(req.query.limit) : undefined;
 
       const events = auditStore.getVaultAuditEvents({
         variableName,
@@ -545,7 +544,7 @@ export function registerVaultRoutes(app: Express, options: RegisterVaultRoutesOp
     maskedValue: maskVaultValue(variable.name),
   });
 
-  const requireVariableStore = (res: Response): VaultVariableStore | null => {
+  const requireVariableStore = (res: any): VaultVariableStore | null => {
     if (!variableStore) {
       res.status(503).json({ success: false, error: 'Vault variable store is not configured' });
       return null;
@@ -561,7 +560,7 @@ export function registerVaultRoutes(app: Express, options: RegisterVaultRoutesOp
   const findVariable = (store: VaultVariableStore, name: string): VaultVariable | null =>
     store.listVaultVariables().find(variable => variable.name === name) || null;
 
-  app.get('/api/vault/variables', (_req: Request, res: Response) => {
+  app.get('/api/vault/variables', (_req: any, res: any) => {
     const store = requireVariableStore(res);
     if (!store) return;
     try {
@@ -572,7 +571,7 @@ export function registerVaultRoutes(app: Express, options: RegisterVaultRoutesOp
     }
   });
 
-  app.post('/api/vault/variables', async (req: Request, res: Response) => {
+  app.post('/api/vault/variables', async (req: any, res: any) => {
     const store = requireVariableStore(res);
     if (!store) return;
     try {
@@ -603,7 +602,7 @@ export function registerVaultRoutes(app: Express, options: RegisterVaultRoutesOp
     }
   });
 
-  app.put('/api/vault/variables/:name', async (req: Request, res: Response) => {
+  app.put('/api/vault/variables/:name', async (req: any, res: any) => {
     const store = requireVariableStore(res);
     if (!store) return;
     try {
@@ -665,7 +664,7 @@ export function registerVaultRoutes(app: Express, options: RegisterVaultRoutesOp
     }
   });
 
-  app.delete('/api/vault/variables/:name', (req: Request, res: Response) => {
+  app.delete('/api/vault/variables/:name', (req: any, res: any) => {
     const store = requireVariableStore(res);
     if (!store) return;
     try {
@@ -681,7 +680,7 @@ export function registerVaultRoutes(app: Express, options: RegisterVaultRoutesOp
     }
   });
 
-  app.post('/api/vault/encrypt', async (req: Request, res: Response) => {
+  app.post('/api/vault/encrypt', async (req: any, res: any) => {
     try {
       const { plaintext, varName, password } = req.body || {};
       if (plaintext === undefined || typeof plaintext !== 'string') {
@@ -696,7 +695,7 @@ export function registerVaultRoutes(app: Express, options: RegisterVaultRoutesOp
     }
   });
 
-  app.post('/api/vault/decrypt', async (req: Request, res: Response) => {
+  app.post('/api/vault/decrypt', async (req: any, res: any) => {
     try {
       const { vaultBlock, password, varName, host, actor, action } = req.body || {};
       if (!vaultBlock || typeof vaultBlock !== 'string') {

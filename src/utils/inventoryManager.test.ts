@@ -1,7 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import express, { Express } from 'express';
 import { createHostCacheStore, registerInventoryRoutes, type HostCacheStore } from './hostCacheDb.ts';
 import type { NodeItem, CustomFolder, TagInventoryChunk } from '../types/index.ts';
 
@@ -246,8 +245,13 @@ describe('Inventory Manager: Tag Chunks & Custom Folders', () => {
       nodes = [{ ...baseTestNode, id: 'node-1', folder: 'folder-alpha' }];
       broadcastMessages.length = 0;
 
-      const app: Express = express();
-      app.use(express.json());
+      const routes: Array<{ method: string; path: string; handler: Function }> = [];
+      const app = {
+        get: (p: string, h: Function) => routes.push({ method: 'GET', path: p, handler: h }),
+        post: (p: string, h: Function) => routes.push({ method: 'POST', path: p, handler: h }),
+        put: (p: string, h: Function) => routes.push({ method: 'PUT', path: p, handler: h }),
+        delete: (p: string, h: Function) => routes.push({ method: 'DELETE', path: p, handler: h }),
+      };
 
       registerInventoryRoutes(app, {
         hostCache: store,
@@ -256,8 +260,61 @@ describe('Inventory Manager: Tag Chunks & Custom Folders', () => {
         setNodes: (newNodes) => { nodes = newNodes; },
       });
 
+      server = http.createServer((req, res) => {
+        const parsedUrl = new URL(req.url || '/', 'http://127.0.0.1');
+        const pathname = parsedUrl.pathname;
+        const method = req.method || 'GET';
+
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', async () => {
+          let parsedBody = {};
+          if (body) {
+            try { parsedBody = JSON.parse(body); } catch {}
+          }
+
+          for (const r of routes) {
+            if (r.method !== method) continue;
+            const rParts = r.path.split('/');
+            const uParts = pathname.split('/');
+            if (rParts.length !== uParts.length) continue;
+
+            const params: Record<string, string> = {};
+            let match = true;
+            for (let i = 0; i < rParts.length; i++) {
+              if (rParts[i].startsWith(':')) {
+                params[rParts[i].slice(1)] = decodeURIComponent(uParts[i]);
+              } else if (rParts[i] !== uParts[i]) {
+                match = false;
+                break;
+              }
+            }
+
+            if (match) {
+              const reqMock = { params, body: parsedBody, query: Object.fromEntries(parsedUrl.searchParams) };
+              const resMock = {
+                status(code: number) {
+                  res.statusCode = code;
+                  return resMock;
+                },
+                json(data: any) {
+                  res.setHeader('Content-Type', 'application/json');
+                  res.end(JSON.stringify(data));
+                  return resMock;
+                },
+              };
+              await r.handler(reqMock, resMock);
+              return;
+            }
+          }
+
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: 'Not found' }));
+        });
+      });
+
       await new Promise<void>((resolve) => {
-        server = app.listen(0, '127.0.0.1', () => {
+        server.listen(0, '127.0.0.1', () => {
           const addr = server.address();
           if (typeof addr === 'object' && addr) {
             baseUrl = `http://127.0.0.1:${addr.port}`;

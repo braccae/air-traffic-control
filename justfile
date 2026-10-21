@@ -1,7 +1,6 @@
 # Air Traffic Control — dev, test, and build entry points.
 #
-#   just dev         Express coordinator + Vite middleware on :3000  (current workflow)
-#   just dev-split   Go daemon :18090 + Vite :5173 with /api and /ws proxied  (migration workflow)
+#   just dev         Go daemon :18090 + Vite :5173 with /api and /ws proxied
 #
 # See docs/superpowers/plans/2026-10-20-node-to-pure-go-migration.md
 
@@ -14,11 +13,9 @@ default:
 # dev
 # ---------------------------------------------------------------------------
 
-# Full-stack dev: Express coordinator serves API + WS + Vite HMR on :3000.
-dev:
-    npm run dev
+# Full-stack dev: Go daemon on :18090, Vite on :5173 proxying /api and /ws.
+dev: dev-split
 
-# Split dev for the migration: Go daemon on :18090, Vite on :5173 proxying /api and /ws.
 dev-split:
     #!/usr/bin/env bash
     set -euo pipefail

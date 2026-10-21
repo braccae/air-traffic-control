@@ -2,6 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import http from 'node:http';
 import os from 'node:os';
 import {
   validatePlaybookName,
@@ -232,14 +233,73 @@ describe('Ansible Playbook Manager & Validation', () => {
       // Seed site.yml
       fs.writeFileSync(path.join(tempDir, 'site.yml'), '---\n- name: Baseline Site\n');
 
-      const express = (await import('express')).default;
-      const app = express();
-      app.use(express.json());
       const { registerPlaybookRoutes } = await import('./playbookManager.ts');
+      const routes: Array<{ method: string; path: string; handler: Function }> = [];
+      const app = {
+        get: (p: string, h: Function) => routes.push({ method: 'GET', path: p, handler: h }),
+        post: (p: string, h: Function) => routes.push({ method: 'POST', path: p, handler: h }),
+        put: (p: string, h: Function) => routes.push({ method: 'PUT', path: p, handler: h }),
+        delete: (p: string, h: Function) => routes.push({ method: 'DELETE', path: p, handler: h }),
+      };
       registerPlaybookRoutes(app, tempDir);
 
+      server = http.createServer((req, res) => {
+        const parsedUrl = new URL(req.url || '/', 'http://127.0.0.1');
+        const pathname = parsedUrl.pathname;
+        const method = req.method || 'GET';
+
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', async () => {
+          let parsedBody = {};
+          if (body) {
+            try { parsedBody = JSON.parse(body); } catch {}
+          }
+
+          // Match routes
+          for (const r of routes) {
+            if (r.method !== method) continue;
+            // Handle param matching (e.g. /api/playbooks/:name)
+            const rParts = r.path.split('/');
+            const uParts = pathname.split('/');
+            if (rParts.length !== uParts.length) continue;
+
+            const params: Record<string, string> = {};
+            let match = true;
+            for (let i = 0; i < rParts.length; i++) {
+              if (rParts[i].startsWith(':')) {
+                params[rParts[i].slice(1)] = decodeURIComponent(uParts[i]);
+              } else if (rParts[i] !== uParts[i]) {
+                match = false;
+                break;
+              }
+            }
+
+            if (match) {
+              const reqMock = { params, body: parsedBody, query: Object.fromEntries(parsedUrl.searchParams) };
+              const resMock = {
+                status(code: number) {
+                  res.statusCode = code;
+                  return resMock;
+                },
+                json(data: any) {
+                  res.setHeader('Content-Type', 'application/json');
+                  res.end(JSON.stringify(data));
+                  return resMock;
+                },
+              };
+              await r.handler(reqMock, resMock);
+              return;
+            }
+          }
+
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: 'Not found' }));
+        });
+      });
+
       await new Promise<void>((resolve) => {
-        server = app.listen(0, '127.0.0.1', () => {
+        server.listen(0, '127.0.0.1', () => {
           const addr = server.address();
           baseUrl = `http://127.0.0.1:${addr.port}`;
           resolve();
