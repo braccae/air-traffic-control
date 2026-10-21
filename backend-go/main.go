@@ -14,16 +14,20 @@ import (
 	"air-traffic-control/backend/cmd/proxy"
 	"air-traffic-control/backend/pkg/ansibleapi"
 	"air-traffic-control/backend/pkg/ansqueue"
+	"air-traffic-control/backend/pkg/clusterapi"
+	"air-traffic-control/backend/pkg/cronapi"
 	"air-traffic-control/backend/pkg/glances"
 	"air-traffic-control/backend/pkg/hostcache"
 	"air-traffic-control/backend/pkg/nodeapi"
 	"air-traffic-control/backend/pkg/plugin"
 	"air-traffic-control/backend/pkg/podman"
+	"air-traffic-control/backend/pkg/rcloneapi"
 	"air-traffic-control/backend/pkg/readonlyapi"
 	"air-traffic-control/backend/pkg/restic"
 	"air-traffic-control/backend/pkg/ssh"
 	"air-traffic-control/backend/pkg/tailscale"
 	"air-traffic-control/backend/pkg/types"
+	"air-traffic-control/backend/pkg/vaultapi"
 	"air-traffic-control/backend/pkg/websocket"
 	_ "air-traffic-control/backend/plugins/all"
 	"air-traffic-control/backend/webui"
@@ -202,6 +206,56 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 			log.Printf("ansible API disabled: %v", err)
 		} else {
 			ansAPI.Register(mux)
+		}
+
+		// Mount ported Ansible Vault API routes
+		if vAPI, err := vaultapi.NewAPI(vaultapi.Options{
+			Store:    store,
+			RepoRoot: ansqueue.ResolveWorkDir(),
+		}); err != nil {
+			log.Printf("vault API disabled: %v", err)
+		} else {
+			vAPI.Register(mux)
+		}
+
+		// Mount ported Rclone Remotes and Mounts API routes
+		if rcAPI, err := rcloneapi.NewAPI(rcloneapi.Options{
+			Store:      store,
+			QueueStore: qStore,
+			RepoRoot:   ansqueue.ResolveWorkDir(),
+			Broadcast:  queueBroadcast,
+		}); err != nil {
+			log.Printf("rclone API disabled: %v", err)
+		} else {
+			rcAPI.Register(mux)
+		}
+
+		// Mount ported Cron Schedules and Scheduler API routes
+		cronScheduler := cronapi.NewScheduler(cronapi.SchedulerOptions{
+			Store:      store,
+			QueueStore: qStore,
+			RepoRoot:   ansqueue.ResolveWorkDir(),
+			Broadcast:  queueBroadcast,
+		})
+		cronScheduler.Start()
+		if cAPI, err := cronapi.NewAPI(cronapi.APIOptions{
+			Store:     store,
+			Scheduler: cronScheduler,
+			Broadcast: queueBroadcast,
+		}); err != nil {
+			log.Printf("cron API disabled: %v", err)
+		} else {
+			cAPI.Register(mux)
+		}
+
+		// Mount ported Cluster API routes (cluster-log, connections, tasks, inventory chunks/folders, tailscale ping, restic snapshot)
+		if clAPI, err := clusterapi.NewAPI(clusterapi.Options{
+			Store:     store,
+			Broadcast: queueBroadcast,
+		}); err != nil {
+			log.Printf("cluster API disabled: %v", err)
+		} else {
+			clAPI.Register(mux)
 		}
 
 		// Mount the node lifecycle and hardware probe API (CRUD, testSsh, probes).

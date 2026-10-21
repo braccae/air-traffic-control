@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -891,3 +892,528 @@ func (s *Store) DeleteTagChunk(id string) (bool, error) {
 	n, _ := res.RowsAffected()
 	return n > 0, nil
 }
+
+// -----------------------------------------------------------------------------
+// Vault Variables & Audit Store
+// -----------------------------------------------------------------------------
+
+// UpsertVaultVariable stores a named ansible-vault ciphertext block.
+func (s *Store) UpsertVaultVariable(name, vaultBlock string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UnixMilli()
+	const q = `
+		INSERT INTO vault_variables (name, vault_block, created_at, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET
+			vault_block = excluded.vault_block,
+			updated_at = excluded.updated_at
+	`
+	_, err := s.db.Exec(q, name, vaultBlock, now, now)
+	return err
+}
+
+// GetVaultVariable retrieves a vault variable block by name.
+func (s *Store) GetVaultVariable(name string) (VaultVariable, bool, error) {
+	const q = `SELECT name, vault_block, created_at, updated_at FROM vault_variables WHERE name = ?`
+	row := s.db.QueryRow(q, name)
+	var v VaultVariable
+	if err := row.Scan(&v.Name, &v.VaultBlock, &v.CreatedAt, &v.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return VaultVariable{}, false, nil
+		}
+		return VaultVariable{}, false, err
+	}
+	return v, true, nil
+}
+
+// ListVaultVariables returns all vault variables.
+func (s *Store) ListVaultVariables() ([]VaultVariable, error) {
+	const q = `SELECT name, vault_block, created_at, updated_at FROM vault_variables ORDER BY name ASC`
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]VaultVariable, 0)
+	for rows.Next() {
+		var v VaultVariable
+		if err := rows.Scan(&v.Name, &v.VaultBlock, &v.CreatedAt, &v.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// DeleteVaultVariable deletes a vault variable by name.
+func (s *Store) DeleteVaultVariable(name string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.Exec(`DELETE FROM vault_variables WHERE name = ?`, name)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// RecordVaultAuditEvent persists a vault audit entry.
+func (s *Store) RecordVaultAuditEvent(ev VaultAuditEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	const q = `
+		INSERT INTO vault_audit_log (id, timestamp, variable_name, actor, host, action, password_source)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`
+	_, err := s.db.Exec(q, ev.ID, ev.Timestamp, ev.VariableName, ev.Actor, ev.Host, ev.Action, ev.PasswordSource)
+	return err
+}
+
+// GetVaultAuditEvents returns vault audit events with optional filters.
+func (s *Store) GetVaultAuditEvents(varName, host string, limit int) ([]VaultAuditEvent, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	var (
+		q    string
+		args []any
+	)
+
+	if varName != "" && host != "" {
+		q = `SELECT id, timestamp, variable_name, actor, host, action, password_source FROM vault_audit_log WHERE variable_name = ? AND host = ? ORDER BY timestamp DESC LIMIT ?`
+		args = []any{varName, host, limit}
+	} else if varName != "" {
+		q = `SELECT id, timestamp, variable_name, actor, host, action, password_source FROM vault_audit_log WHERE variable_name = ? ORDER BY timestamp DESC LIMIT ?`
+		args = []any{varName, limit}
+	} else if host != "" {
+		q = `SELECT id, timestamp, variable_name, actor, host, action, password_source FROM vault_audit_log WHERE host = ? ORDER BY timestamp DESC LIMIT ?`
+		args = []any{host, limit}
+	} else {
+		q = `SELECT id, timestamp, variable_name, actor, host, action, password_source FROM vault_audit_log ORDER BY timestamp DESC LIMIT ?`
+		args = []any{limit}
+	}
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]VaultAuditEvent, 0)
+	for rows.Next() {
+		var e VaultAuditEvent
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.VariableName, &e.Actor, &e.Host, &e.Action, &e.PasswordSource); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// -----------------------------------------------------------------------------
+// Rclone Remotes & Mounts
+// -----------------------------------------------------------------------------
+
+// UpsertRcloneRemote inserts or updates an rclone remote record.
+func (s *Store) UpsertRcloneRemote(r RcloneRemote) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	const q = `
+		INSERT INTO rclone_remotes (id, name, provider, type, config_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name = excluded.name,
+			provider = excluded.provider,
+			type = excluded.type,
+			config_json = excluded.config_json,
+			updated_at = excluded.updated_at
+	`
+	_, err := s.db.Exec(q, r.ID, r.Name, r.Provider, r.Type, r.ConfigJSON, r.CreatedAt, r.UpdatedAt)
+	return err
+}
+
+// GetAllRcloneRemotes returns all rclone remotes ordered by name ASC.
+func (s *Store) GetAllRcloneRemotes() ([]RcloneRemote, error) {
+	const q = `SELECT id, name, provider, type, config_json, created_at, updated_at FROM rclone_remotes ORDER BY name ASC`
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]RcloneRemote, 0)
+	for rows.Next() {
+		var r RcloneRemote
+		if err := rows.Scan(&r.ID, &r.Name, &r.Provider, &r.Type, &r.ConfigJSON, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetRcloneRemote returns an rclone remote by ID.
+func (s *Store) GetRcloneRemote(id string) (RcloneRemote, bool, error) {
+	const q = `SELECT id, name, provider, type, config_json, created_at, updated_at FROM rclone_remotes WHERE id = ?`
+	row := s.db.QueryRow(q, id)
+	var r RcloneRemote
+	if err := row.Scan(&r.ID, &r.Name, &r.Provider, &r.Type, &r.ConfigJSON, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RcloneRemote{}, false, nil
+		}
+		return RcloneRemote{}, false, err
+	}
+	return r, true, nil
+}
+
+// GetRcloneRemoteByName returns an rclone remote by sanitized name.
+func (s *Store) GetRcloneRemoteByName(name string) (RcloneRemote, bool, error) {
+	const q = `SELECT id, name, provider, type, config_json, created_at, updated_at FROM rclone_remotes WHERE name = ?`
+	row := s.db.QueryRow(q, name)
+	var r RcloneRemote
+	if err := row.Scan(&r.ID, &r.Name, &r.Provider, &r.Type, &r.ConfigJSON, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RcloneRemote{}, false, nil
+		}
+		return RcloneRemote{}, false, err
+	}
+	return r, true, nil
+}
+
+// DeleteRcloneRemote deletes a remote and cleans up associated mounts.
+func (s *Store) DeleteRcloneRemote(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM rclone_mounts WHERE remote_id = ?`, id); err != nil {
+		return false, err
+	}
+	res, err := tx.Exec(`DELETE FROM rclone_remotes WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// UpsertRcloneMount stores an rclone mount record.
+func (s *Store) UpsertRcloneMount(m RcloneMount) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	const q = `
+		INSERT INTO rclone_mounts (node_id, remote_id, remote_name, mount_target, policy, status, error, installed_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(node_id, remote_id) DO UPDATE SET
+			remote_name = excluded.remote_name,
+			mount_target = excluded.mount_target,
+			policy = excluded.policy,
+			status = excluded.status,
+			error = excluded.error,
+			updated_at = excluded.updated_at
+	`
+	_, err := s.db.Exec(q, m.NodeID, m.RemoteID, m.RemoteName, m.MountTarget, m.Policy, m.Status, m.Error, m.InstalledAt, m.UpdatedAt)
+	return err
+}
+
+// GetRcloneMounts returns rclone mounts, optionally filtered by nodeId.
+func (s *Store) GetRcloneMounts(nodeID string) ([]RcloneMount, error) {
+	var (
+		q    string
+		args []any
+	)
+	if nodeID != "" {
+		q = `SELECT node_id, remote_id, remote_name, mount_target, policy, status, error, installed_at, updated_at FROM rclone_mounts WHERE node_id = ? ORDER BY remote_name ASC`
+		args = []any{nodeID}
+	} else {
+		q = `SELECT node_id, remote_id, remote_name, mount_target, policy, status, error, installed_at, updated_at FROM rclone_mounts ORDER BY remote_name ASC`
+	}
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]RcloneMount, 0)
+	for rows.Next() {
+		var (
+			m        RcloneMount
+			errField sql.NullString
+		)
+		if err := rows.Scan(&m.NodeID, &m.RemoteID, &m.RemoteName, &m.MountTarget, &m.Policy, &m.Status, &errField, &m.InstalledAt, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if errField.Valid {
+			m.Error = &errField.String
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// DeleteRcloneMount deletes a mount by (node_id, remote_id).
+func (s *Store) DeleteRcloneMount(nodeID, remoteID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.Exec(`DELETE FROM rclone_mounts WHERE node_id = ? AND remote_id = ?`, nodeID, remoteID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// -----------------------------------------------------------------------------
+// Cron Schedules Store
+// -----------------------------------------------------------------------------
+
+// UpsertCronSchedule inserts or updates a cron schedule.
+func (s *Store) UpsertCronSchedule(cs CronSchedule) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	enabledInt := 0
+	if cs.Enabled {
+		enabledInt = 1
+	}
+
+	const q = `
+		INSERT INTO cron_schedules (
+			id, name, cron_expression, enabled, scope_kind, scope_target, task_kind,
+			payload_json, created_at, updated_at, next_run_at, last_run_at, last_run_status, last_run_task_id, last_run_error
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name = excluded.name,
+			cron_expression = excluded.cron_expression,
+			enabled = excluded.enabled,
+			scope_kind = excluded.scope_kind,
+			scope_target = excluded.scope_target,
+			task_kind = excluded.task_kind,
+			payload_json = excluded.payload_json,
+			updated_at = excluded.updated_at,
+			next_run_at = excluded.next_run_at,
+			last_run_at = excluded.last_run_at,
+			last_run_status = excluded.last_run_status,
+			last_run_task_id = excluded.last_run_task_id,
+			last_run_error = excluded.last_run_error
+	`
+	_, err := s.db.Exec(q,
+		cs.ID, cs.Name, cs.CronExpression, enabledInt, cs.ScopeKind, cs.ScopeTarget, cs.TaskKind,
+		string(cs.PayloadJSON), cs.CreatedAt, cs.UpdatedAt, cs.NextRunAt, cs.LastRunAt, cs.LastRunStatus, cs.LastRunTaskID, cs.LastRunError,
+	)
+	return err
+}
+
+// GetAllCronSchedules returns all schedules ordered by created_at ASC.
+func (s *Store) GetAllCronSchedules() ([]CronSchedule, error) {
+	const q = `
+		SELECT id, name, cron_expression, enabled, scope_kind, scope_target, task_kind,
+		       payload_json, created_at, updated_at, next_run_at, last_run_at, last_run_status, last_run_task_id, last_run_error
+		FROM cron_schedules ORDER BY created_at ASC
+	`
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]CronSchedule, 0)
+	for rows.Next() {
+		var (
+			cs         CronSchedule
+			enabled    int
+			payloadStr string
+			nextRun    sql.NullInt64
+			lastRun    sql.NullInt64
+			status     sql.NullString
+			taskID     sql.NullString
+			lastErr    sql.NullString
+		)
+		if err := rows.Scan(
+			&cs.ID, &cs.Name, &cs.CronExpression, &enabled, &cs.ScopeKind, &cs.ScopeTarget, &cs.TaskKind,
+			&payloadStr, &cs.CreatedAt, &cs.UpdatedAt, &nextRun, &lastRun, &status, &taskID, &lastErr,
+		); err != nil {
+			return nil, err
+		}
+		cs.Enabled = enabled == 1
+		cs.PayloadJSON = json.RawMessage(payloadStr)
+		if nextRun.Valid {
+			cs.NextRunAt = &nextRun.Int64
+		}
+		if lastRun.Valid {
+			cs.LastRunAt = &lastRun.Int64
+		}
+		if status.Valid {
+			cs.LastRunStatus = &status.String
+		}
+		if taskID.Valid {
+			cs.LastRunTaskID = &taskID.String
+		}
+		if lastErr.Valid {
+			cs.LastRunError = &lastErr.String
+		}
+		out = append(out, cs)
+	}
+	return out, rows.Err()
+}
+
+// GetCronSchedule returns a cron schedule by ID.
+func (s *Store) GetCronSchedule(id string) (CronSchedule, bool, error) {
+	const q = `
+		SELECT id, name, cron_expression, enabled, scope_kind, scope_target, task_kind,
+		       payload_json, created_at, updated_at, next_run_at, last_run_at, last_run_status, last_run_task_id, last_run_error
+		FROM cron_schedules WHERE id = ?
+	`
+	row := s.db.QueryRow(q, id)
+	var (
+		cs         CronSchedule
+		enabled    int
+		payloadStr string
+		nextRun    sql.NullInt64
+		lastRun    sql.NullInt64
+		status     sql.NullString
+		taskID     sql.NullString
+		lastErr    sql.NullString
+	)
+	if err := row.Scan(
+		&cs.ID, &cs.Name, &cs.CronExpression, &enabled, &cs.ScopeKind, &cs.ScopeTarget, &cs.TaskKind,
+		&payloadStr, &cs.CreatedAt, &cs.UpdatedAt, &nextRun, &lastRun, &status, &taskID, &lastErr,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return CronSchedule{}, false, nil
+		}
+		return CronSchedule{}, false, err
+	}
+	cs.Enabled = enabled == 1
+	cs.PayloadJSON = json.RawMessage(payloadStr)
+	if nextRun.Valid {
+		cs.NextRunAt = &nextRun.Int64
+	}
+	if lastRun.Valid {
+		cs.LastRunAt = &lastRun.Int64
+	}
+	if status.Valid {
+		cs.LastRunStatus = &status.String
+	}
+	if taskID.Valid {
+		cs.LastRunTaskID = &taskID.String
+	}
+	if lastErr.Valid {
+		cs.LastRunError = &lastErr.String
+	}
+	return cs, true, nil
+}
+
+// DeleteCronSchedule deletes a cron schedule by ID.
+func (s *Store) DeleteCronSchedule(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.Exec(`DELETE FROM cron_schedules WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ListDueCronSchedules returns enabled schedules where next_run_at <= nowMs.
+func (s *Store) ListDueCronSchedules(nowMs int64) ([]CronSchedule, error) {
+	const q = `
+		SELECT id, name, cron_expression, enabled, scope_kind, scope_target, task_kind,
+		       payload_json, created_at, updated_at, next_run_at, last_run_at, last_run_status, last_run_task_id, last_run_error
+		FROM cron_schedules
+		WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+		ORDER BY next_run_at ASC
+	`
+	rows, err := s.db.Query(q, nowMs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]CronSchedule, 0)
+	for rows.Next() {
+		var (
+			cs         CronSchedule
+			enabled    int
+			payloadStr string
+			nextRun    sql.NullInt64
+			lastRun    sql.NullInt64
+			status     sql.NullString
+			taskID     sql.NullString
+			lastErr    sql.NullString
+		)
+		if err := rows.Scan(
+			&cs.ID, &cs.Name, &cs.CronExpression, &enabled, &cs.ScopeKind, &cs.ScopeTarget, &cs.TaskKind,
+			&payloadStr, &cs.CreatedAt, &cs.UpdatedAt, &nextRun, &lastRun, &status, &taskID, &lastErr,
+		); err != nil {
+			return nil, err
+		}
+		cs.Enabled = enabled == 1
+		cs.PayloadJSON = json.RawMessage(payloadStr)
+		if nextRun.Valid {
+			cs.NextRunAt = &nextRun.Int64
+		}
+		if lastRun.Valid {
+			cs.LastRunAt = &lastRun.Int64
+		}
+		if status.Valid {
+			cs.LastRunStatus = &status.String
+		}
+		if taskID.Valid {
+			cs.LastRunTaskID = &taskID.String
+		}
+		if lastErr.Valid {
+			cs.LastRunError = &lastErr.String
+		}
+		out = append(out, cs)
+	}
+	return out, rows.Err()
+}
+
+// SetCronScheduleNextRun updates only the next_run_at timestamp.
+func (s *Store) SetCronScheduleNextRun(id string, nextRunAt *int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	const q = `UPDATE cron_schedules SET next_run_at = ?, updated_at = ? WHERE id = ?`
+	_, err := s.db.Exec(q, nextRunAt, time.Now().UnixMilli(), id)
+	return err
+}
+
+// RecordCronScheduleRun updates run outcome info.
+func (s *Store) RecordCronScheduleRun(id string, status string, at int64, taskID, lastErr *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	const q = `
+		UPDATE cron_schedules
+		SET last_run_at = ?, last_run_status = ?, last_run_task_id = ?, last_run_error = ?, updated_at = ?
+		WHERE id = ?
+	`
+	_, err := s.db.Exec(q, at, status, taskID, lastErr, time.Now().UnixMilli(), id)
+	return err
+}
+

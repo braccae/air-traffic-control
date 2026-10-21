@@ -594,4 +594,52 @@ func TestMutationRoutes_16RoutesParityAndQueueStaging(t *testing.T) {
 
 		_ = t1
 	})
+
+	t.Run("Route17_Identities", func(t *testing.T) {
+		resp, res := doJSONRequest(t, h.ts.URL+"/api/nodes/node-1/identities", http.MethodPost, map[string]any{
+			"user":   "svc-custom",
+			"uidGid": "3000:3000",
+		})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		identity, _ := res["identity"].(map[string]any)
+		if res["success"] != true || identity["user"] != "svc-custom" {
+			t.Fatalf("unexpected identity response: %+v", res)
+		}
+	})
+
+	t.Run("Route18_PrivilegeProbeAndTest", func(t *testing.T) {
+		// GET
+		resp, getRes := doJSONRequest(t, h.ts.URL+"/api/nodes/node-1/privilege", http.MethodGet, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		if getRes["user"] != "core" {
+			t.Fatalf("unexpected privilege get: %+v", getRes)
+		}
+
+		// POST test
+		respTest, _ := doJSONRequest(t, h.ts.URL+"/api/nodes/node-1/privilege/test", http.MethodPost, map[string]any{"method": "run0"})
+		if respTest.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", respTest.StatusCode)
+		}
+	})
+
+	t.Run("Route19_PackagesCheckAndApply", func(t *testing.T) {
+		// GET check
+		resp, chkRes := doJSONRequest(t, h.ts.URL+"/api/nodes/node-1/packages/check", http.MethodGet, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		if chkRes["success"] != true || chkRes["manager"] == "" {
+			t.Fatalf("unexpected package check: %+v", chkRes)
+		}
+
+		// POST apply
+		respApply, _ := doJSONRequest(t, h.ts.URL+"/api/nodes/node-1/packages/apply", http.MethodPost, map[string]any{"manager": "dnf"})
+		if respApply.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", respApply.StatusCode)
+		}
+	})
 }

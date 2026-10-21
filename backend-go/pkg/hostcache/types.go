@@ -130,3 +130,66 @@ type TagChunk struct {
 	AuthMethod    string `json:"authMethod"`
 	CreatedAt     int64  `json:"createdAt"`
 }
+
+// VaultVariable mirrors a row of vault_variables.
+type VaultVariable struct {
+	Name       string `json:"name"`
+	VaultBlock string `json:"vaultBlock"`
+	CreatedAt  int64  `json:"createdAt"`
+	UpdatedAt  int64  `json:"updatedAt"`
+}
+
+// VaultAuditEvent mirrors a row of vault_audit_log.
+type VaultAuditEvent struct {
+	ID             string `json:"id"`
+	Timestamp      int64  `json:"timestamp"`
+	VariableName   string `json:"variableName"`
+	Actor          string `json:"actor"`
+	Host           string `json:"host"`
+	Action         string `json:"action"`
+	PasswordSource string `json:"passwordSource"`
+}
+
+// RcloneRemote mirrors a row of rclone_remotes.
+type RcloneRemote struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Provider   string `json:"provider"`
+	Type       string `json:"type"`
+	ConfigJSON string `json:"configJson"`
+	CreatedAt  int64  `json:"createdAt"`
+	UpdatedAt  int64  `json:"updatedAt"`
+}
+
+// RcloneMount mirrors a row of rclone_mounts.
+type RcloneMount struct {
+	NodeID      string  `json:"nodeId"`
+	RemoteID    string  `json:"remoteId"`
+	RemoteName  string  `json:"remoteName"`
+	MountTarget string  `json:"mountTarget"`
+	Policy      string  `json:"policy"`
+	Status      string  `json:"status"`
+	Error       *string `json:"error,omitempty"`
+	InstalledAt int64   `json:"installedAt"`
+	UpdatedAt   int64   `json:"updatedAt"`
+}
+
+// CronSchedule mirrors a row of cron_schedules.
+type CronSchedule struct {
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	CronExpression string          `json:"cronExpression"`
+	Enabled        bool            `json:"enabled"`
+	ScopeKind      string          `json:"scopeKind"`
+	ScopeTarget    string          `json:"scopeTarget"`
+	TaskKind       string          `json:"taskKind"`
+	PayloadJSON    json.RawMessage `json:"payloadJson"`
+	CreatedAt      int64           `json:"createdAt"`
+	UpdatedAt      int64           `json:"updatedAt"`
+	NextRunAt      *int64          `json:"nextRunAt,omitempty"`
+	LastRunAt      *int64          `json:"lastRunAt,omitempty"`
+	LastRunStatus  *string         `json:"lastRunStatus,omitempty"`
+	LastRunTaskID  *string         `json:"lastRunTaskId,omitempty"`
+	LastRunError   *string         `json:"lastRunError,omitempty"`
+}
+

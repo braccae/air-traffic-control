@@ -39,6 +39,8 @@ type Store interface {
 	DeleteHostContainerCache(hostID string) error
 	DeleteHostTelemetry(hostID string) error
 	SaveTask(t hostcache.Task) error
+	AddCustomIdentity(hostID string, identityJSON json.RawMessage) error
+	UpsertHostSection(hostID, section string, dataJSON json.RawMessage) error
 }
 
 // Options configures the node API surface.
@@ -305,6 +307,32 @@ func (a *API) handleNodesSubtree(w http.ResponseWriter, r *http.Request) {
 	// 15. POST /api/nodes/:id/reboot
 	if rest == "reboot" && r.Method == http.MethodPost {
 		a.handleReboot(w, r, nodeID)
+		return
+	}
+
+	// 16. POST /api/nodes/:id/identities
+	if rest == "identities" && r.Method == http.MethodPost {
+		a.handleIdentities(w, r, nodeID)
+		return
+	}
+
+	// 17. GET /api/nodes/:id/privilege & POST /api/nodes/:id/privilege/test
+	if rest == "privilege" && r.Method == http.MethodGet {
+		a.handlePrivilegeGet(w, r, nodeID)
+		return
+	}
+	if rest == "privilege/test" && r.Method == http.MethodPost {
+		a.handlePrivilegeTest(w, r, nodeID)
+		return
+	}
+
+	// 18. GET /api/nodes/:id/packages/check & POST /api/nodes/:id/packages/apply
+	if rest == "packages/check" && r.Method == http.MethodGet {
+		a.handlePackagesCheck(w, r, nodeID)
+		return
+	}
+	if rest == "packages/apply" && r.Method == http.MethodPost {
+		a.handlePackagesApply(w, r, nodeID)
 		return
 	}
 

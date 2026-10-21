@@ -100,6 +100,64 @@ CREATE TABLE IF NOT EXISTS ansible_queue_tasks (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS rclone_remotes (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  type TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rclone_mounts (
+  node_id TEXT NOT NULL,
+  remote_id TEXT NOT NULL,
+  remote_name TEXT NOT NULL,
+  mount_target TEXT NOT NULL,
+  policy TEXT NOT NULL,
+  status TEXT NOT NULL,
+  error TEXT,
+  installed_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (node_id, remote_id)
+);
+
+CREATE TABLE IF NOT EXISTS vault_audit_log (
+  id TEXT PRIMARY KEY,
+  timestamp INTEGER NOT NULL,
+  variable_name TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  host TEXT NOT NULL,
+  action TEXT NOT NULL,
+  password_source TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS vault_variables (
+  name TEXT PRIMARY KEY,
+  vault_block TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cron_schedules (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  cron_expression TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  scope_kind TEXT NOT NULL,
+  scope_target TEXT NOT NULL,
+  task_kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  next_run_at INTEGER,
+  last_run_at INTEGER,
+  last_run_status TEXT,
+  last_run_task_id TEXT,
+  last_run_error TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_hosts_sort ON hosts(sort_order ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_hosts_tailscale ON hosts(tailscale_host, tailscale_ip);
 CREATE INDEX IF NOT EXISTS idx_sections_host ON host_section_cache(host_id, section);
@@ -108,6 +166,10 @@ CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_folders_name ON inventory_folders(name ASC);
 CREATE INDEX IF NOT EXISTS idx_chunks_created ON tag_inventory_chunks(created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_ansible_queue_status ON ansible_queue_tasks(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_vault_audit_ts ON vault_audit_log(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_vault_audit_var ON vault_audit_log(variable_name);
+CREATE INDEX IF NOT EXISTS idx_vault_audit_host ON vault_audit_log(host);
+CREATE INDEX IF NOT EXISTS idx_cron_schedules_due ON cron_schedules(enabled, next_run_at);
 `
 
 // schemaEvolve mirrors the TS ALTER TABLE block: later versions of the cache
