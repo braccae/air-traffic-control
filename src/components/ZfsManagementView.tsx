@@ -20,7 +20,11 @@ interface ZfsManagementViewProps {
   targetType?: 'zfs' | 'btrfs' | 'lvm' | 'all';
 }
 
-export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node, onEngineDetected }) => {
+export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({
+  node,
+  onEngineDetected,
+  targetType = 'all',
+}) => {
   const [loading, setLoading] = useState(false);
   const [pools, setPools] = useState<ZfsPoolItem[]>([]);
   const [datasets, setDatasets] = useState<ZfsDatasetItem[]>([]);
@@ -76,21 +80,54 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node, onEn
       const parsedMounts = parseStorageMounts(findmntOut);
       const detectedEngine = detectStorageEngine(zpoolListOut, btrfsOut, findmntOut);
 
-      setEngine(detectedEngine);
-      onEngineDetected?.(detectedEngine);
+      const effectiveEngine: StorageEngineType =
+        targetType === 'zfs'
+          ? 'zfs'
+          : targetType === 'btrfs'
+          ? 'btrfs'
+          : targetType === 'lvm'
+          ? 'lvm_ext'
+          : detectedEngine;
 
-      if (detectedEngine === 'zfs') {
+      setEngine(effectiveEngine);
+      onEngineDetected?.(effectiveEngine);
+
+      if (targetType === 'zfs') {
         setPools(parsedPools);
         setDatasets(parsedDs);
         setBtrfsFilesystems([]);
         setMounts([]);
-        setNotice('');
-      } else {
+        if (parsedPools.length === 0) {
+          setNotice(`No active OpenZFS pools found on ${node.shortName}.`);
+        } else {
+          setNotice('');
+        }
+      } else if (targetType === 'btrfs') {
         setPools([]);
         setDatasets([]);
         setBtrfsFilesystems(parsedBtrfs);
-        setMounts(parsedMounts);
-        setNotice('No active OpenZFS pools found on host. Displaying native Btrfs / LVM filesystems.');
+        setMounts(parsedMounts.filter(m => m.fstype === 'btrfs' || m.source.toLowerCase().includes('btrfs')));
+        setNotice('');
+      } else if (targetType === 'lvm') {
+        setPools([]);
+        setDatasets([]);
+        setBtrfsFilesystems([]);
+        setMounts(parsedMounts.filter(m => m.fstype !== 'btrfs' && m.fstype !== 'zfs'));
+        setNotice('');
+      } else {
+        if (detectedEngine === 'zfs') {
+          setPools(parsedPools);
+          setDatasets(parsedDs);
+          setBtrfsFilesystems([]);
+          setMounts([]);
+          setNotice('');
+        } else {
+          setPools([]);
+          setDatasets([]);
+          setBtrfsFilesystems(parsedBtrfs);
+          setMounts(parsedMounts);
+          setNotice('No active OpenZFS pools found on host. Displaying native Btrfs / LVM filesystems.');
+        }
       }
     } catch {
       setNotice(`Unable to load storage data for ${node.shortName}.`);
@@ -101,7 +138,61 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node, onEn
 
   useEffect(() => {
     loadStorage(false);
-  }, [node.id, node.shortName]);
+  }, [node.id, node.shortName, targetType]);
+
+  const displayIcon =
+    targetType === 'btrfs'
+      ? 'folder_managed'
+      : targetType === 'lvm'
+      ? 'storage'
+      : targetType === 'zfs'
+      ? 'inventory_2'
+      : engine === 'zfs'
+      ? 'inventory_2'
+      : engine === 'btrfs'
+      ? 'folder_managed'
+      : 'storage';
+
+  const displayTitle =
+    targetType === 'btrfs'
+      ? `Btrfs Storage Architecture (${node.shortName})`
+      : targetType === 'lvm'
+      ? `LVM Storage Architecture (${node.shortName})`
+      : targetType === 'zfs'
+      ? `ZFS Pools & Storage Architecture (${node.shortName})`
+      : engine === 'zfs'
+      ? `ZFS Pools & Storage Architecture (${node.shortName})`
+      : engine === 'btrfs'
+      ? `Btrfs Storage Architecture (${node.shortName})`
+      : `Native Storage & Filesystems (${node.shortName})`;
+
+  const displaySubtitle =
+    targetType === 'btrfs'
+      ? 'Btrfs multi-device storage pools, subvolumes, and active mounts'
+      : targetType === 'lvm'
+      ? 'Logical Volume Manager volume groups, thin pools, and active mounts'
+      : targetType === 'zfs'
+      ? 'Kernel OpenZFS pools, dataset hierarchies, and scrub telemetry'
+      : engine === 'zfs'
+      ? 'Kernel OpenZFS pools, dataset hierarchies, and scrub telemetry'
+      : engine === 'btrfs'
+      ? 'Btrfs multi-device storage pools, subvolumes, and active mounts'
+      : 'Native Linux filesystems, LVM volumes, and mountpoint allocation';
+
+  const displayBadge =
+    targetType === 'btrfs'
+      ? 'Engine: Btrfs'
+      : targetType === 'lvm'
+      ? 'Engine: LVM / XFS / ext4'
+      : targetType === 'zfs'
+      ? 'Engine: OpenZFS'
+      : engine === 'zfs'
+      ? 'Engine: OpenZFS'
+      : engine === 'btrfs'
+      ? 'Engine: Btrfs'
+      : engine === 'lvm_ext'
+      ? 'Engine: LVM / XFS'
+      : 'Engine: Standard Storage';
 
   return (
     <section className="bg-[#171a2d] rounded-lg p-4 flex flex-col border border-[#313447] shadow-lg space-y-4">
@@ -109,34 +200,20 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node, onEn
       <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#26293c]">
         <div className="flex items-center gap-2">
           <span className="material-symbols-outlined text-[#8cd6cb] text-[22px]">
-            {engine === 'zfs' ? 'inventory_2' : engine === 'btrfs' ? 'folder_managed' : 'storage'}
+            {displayIcon}
           </span>
           <div>
             <h3 className="font-sans text-sm text-[#dfe1fa] font-bold">
-              {engine === 'zfs'
-                ? `ZFS Pools & Storage Architecture (${node.shortName})`
-                : engine === 'btrfs'
-                ? `Btrfs Storage Architecture (${node.shortName})`
-                : `Native Storage & Filesystems (${node.shortName})`}
+              {displayTitle}
             </h3>
             <p className="font-mono text-[11px] text-[#8d909b]">
-              {engine === 'zfs'
-                ? 'Kernel OpenZFS pools, dataset hierarchies, and scrub telemetry'
-                : engine === 'btrfs'
-                ? 'Btrfs multi-device storage pools, subvolumes, and active mounts'
-                : 'Native Linux filesystems, LVM volumes, and mountpoint allocation'}
+              {displaySubtitle}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2 font-mono text-xs">
           <span className="px-2 py-0.5 bg-[#8cd6cb]/15 text-[#8cd6cb] rounded border border-[#8cd6cb]/30 font-bold">
-            {engine === 'zfs'
-              ? 'Engine: OpenZFS'
-              : engine === 'btrfs'
-              ? 'Engine: Btrfs'
-              : engine === 'lvm_ext'
-              ? 'Engine: LVM / XFS'
-              : 'Engine: Standard Storage'}
+            {displayBadge}
           </span>
           <button
             type="button"
@@ -272,20 +349,28 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({ node, onEn
         </div>
       )}
 
-      {/* Native Storage & Filesystem Allocation (when no ZFS pools exist) */}
-      {pools.length === 0 && (
+      {/* Native Storage & Filesystem Allocation (Btrfs, LVM, or when no ZFS pools exist) */}
+      {(targetType === 'btrfs' || targetType === 'lvm' || (targetType === 'all' && pools.length === 0)) && (
         <div className="space-y-4">
           <div className="border-b border-[#26293c] pb-2">
             <h4 className="font-mono text-xs text-[#8d909b] font-bold uppercase">
-              Native Storage &amp; Filesystem Allocation
+              {targetType === 'btrfs'
+                ? 'Btrfs Storage Pools & Subvolumes'
+                : targetType === 'lvm'
+                ? 'LVM Volume Mounts & Filesystem Allocation'
+                : 'Native Storage & Filesystem Allocation'}
             </h4>
             <p className="font-mono text-[11px] text-[#8d909b] mt-0.5">
-              Host block storage devices, Btrfs subvolumes, and Linux filesystem mountpoints
+              {targetType === 'btrfs'
+                ? 'Host Btrfs multi-device storage pools, member drives, and subvolume mounts'
+                : targetType === 'lvm'
+                ? 'Host block storage devices, logical volume partitions, and active filesystem mounts'
+                : 'Host block storage devices, Btrfs subvolumes, and Linux filesystem mountpoints'}
             </p>
           </div>
 
-          {/* Btrfs Storage Pools Cards */}
-          {btrfsFilesystems.length > 0 && (
+          {/* Btrfs Storage Pools Cards (only for btrfs or all) */}
+          {(targetType === 'btrfs' || targetType === 'all') && btrfsFilesystems.length > 0 && (
             <div>
               <h5 className="font-mono text-xs text-[#b0c9ff] font-semibold pb-2 flex items-center gap-1.5">
                 <span className="material-symbols-outlined text-[15px] text-[#8cd6cb]">folder_managed</span>

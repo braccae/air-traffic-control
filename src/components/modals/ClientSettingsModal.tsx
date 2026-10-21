@@ -13,6 +13,8 @@ export interface ClientSettingsModalProps {
   onSelectAccentColor: (accent: AccentColor) => void;
   highContrast: boolean;
   onToggleHighContrast: () => void;
+  subSidebarWidth?: 'compact' | 'normal' | 'wide';
+  onSelectSubSidebarWidth?: (width: 'compact' | 'normal' | 'wide') => void;
   reduceMotion?: boolean;
   reducedMotion?: boolean;
   onToggleReduceMotion?: () => void;
@@ -30,6 +32,8 @@ export const ClientSettingsModal: React.FC<ClientSettingsModalProps> = ({
   onSelectAccentColor,
   highContrast,
   onToggleHighContrast,
+  subSidebarWidth = 'normal',
+  onSelectSubSidebarWidth,
   reduceMotion = false,
   reducedMotion,
   onToggleReduceMotion,
@@ -220,6 +224,34 @@ export const ClientSettingsModal: React.FC<ClientSettingsModalProps> = ({
                   className="w-4 h-4 rounded border-[#434750] accent-[#8aadf4] cursor-pointer"
                 />
               </label>
+
+              {onSelectSubSidebarWidth && (
+                <>
+                  <div className="h-[1px] bg-[#26293c]"></div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex flex-col pr-4">
+                      <span className="text-xs font-semibold text-[#dfe1fa]">Sub-Sidebar Width</span>
+                      <span className="text-[10px] text-[#8d909b]">Adjust default width of the host cockpit sub-sidebar.</span>
+                    </div>
+                    <div className="flex items-center gap-1 bg-[#171a2d] p-0.5 rounded border border-[#26293c]">
+                      {(['compact', 'normal', 'wide'] as const).map(w => (
+                        <button
+                          key={w}
+                          type="button"
+                          onClick={() => onSelectSubSidebarWidth(w)}
+                          className={`px-2 py-0.5 text-[10px] rounded uppercase font-mono cursor-pointer transition-colors ${
+                            subSidebarWidth === w
+                              ? 'bg-[#26293c] text-[#8cd6cb] font-bold'
+                              : 'text-[#8d909b] hover:text-[#dfe1fa]'
+                          }`}
+                        >
+                          {w}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
 
               {handleToggleMotion && (
                 <>

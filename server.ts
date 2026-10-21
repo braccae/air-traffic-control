@@ -76,7 +76,33 @@ import {
   ensureAnsibleVenv,
   REQUIRED_VENV_PACKAGES,
 } from './src/utils/ansibleVenvManager.ts';
-import { registerVaultRoutes } from './src/utils/vaultManager.ts';
+import { materializeVaultVarsFile, registerVaultRoutes } from './src/utils/vaultManager.ts';
+import { registerRcloneRoutes } from './src/utils/rcloneManager.ts';
+import { createPlaybookRunner } from './src/utils/playbookRunner.ts';
+import {
+  initCronScheduleStore,
+  listSchedules,
+  getSchedule,
+  createSchedule,
+  updateSchedule,
+  removeSchedule,
+} from './src/utils/cronScheduleStore.ts';
+import { createCronScheduler } from './src/utils/cronScheduler.ts';
+import { nextCronRun } from './src/utils/cronExpression.ts';
+import { createCronExecutor } from './src/utils/cronScheduleExecutor.ts';
+import {
+  installConsoleCapture,
+  listClusterLogs,
+  onClusterLog,
+  recordClusterLog,
+  type ClusterLogKind,
+} from './src/utils/clusterLogStore.ts';
+import {
+  beginConnection,
+  getConnectionSnapshot,
+  onConnectionChange,
+  type ConnectionSnapshot,
+} from './src/utils/connectionRegistry.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -86,6 +112,10 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 app.use(express.json());
+
+// Mirror the coordinator's own console output into the cluster syslog buffer so the
+// Cluster Syslog tab shows real ATC application logs (never synthesised lines).
+installConsoleCapture();
 
 // Serve libghostty WASM binary directly so ghostty-web can always load /ghostty-vt.wasm
 app.get('/ghostty-vt.wasm', (_req, res) => {
@@ -97,6 +127,44 @@ app.get('/ghostty-vt.wasm', (_req, res) => {
 const dbFilePath = process.env.HOST_CACHE_DB_PATH || path.resolve(__dirname, 'data/hosts-cache.sqlite');
 const hostCache = createHostCacheStore(dbFilePath);
 initQueueStore(dbFilePath);
+initCronScheduleStore(dbFilePath);
+
+// Shared real playbook runner: POST /api/playbook/run and cron schedules both
+// spawn through this instance so runs land in the same console task stream.
+// Persist a task to SQLite and keep the in-memory console list in sync.
+function persistTask(task: GlobalTaskItem) {
+  hostCache.saveTask(task);
+  const idx = tasks.findIndex(t => t.id === task.id);
+  if (idx >= 0) {
+    tasks[idx] = { ...task };
+  } else {
+    tasks.unshift({ ...task });
+  }
+}
+
+const playbookRunner = createPlaybookRunner({
+  cwd: __dirname,
+  inventoryPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
+  saveTask: task => persistTask(task),
+  broadcast: msg => broadcast(msg),
+  prepareExtraVarsFile: () => materializeVaultVarsFile(hostCache),
+});
+
+const cronExecutor = createCronExecutor({
+  cwd: __dirname,
+  inventoryPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
+  playbookRunner,
+  listNodes: () => nodes,
+  enqueueTask,
+  executeQueuedTask: (inventoryPath, options) => executeNextQueueTask(inventoryPath, options),
+  saveTask: task => hostCache.saveTask(task),
+  broadcast: msg => broadcast(msg),
+});
+
+const cronScheduler = createCronScheduler({
+  execute: schedule => cronExecutor.execute(schedule),
+  log: message => console.log(message),
+});
 
 // Seed or load persisted hosts from SQLite
 let nodes: NodeItem[] = hostCache.seedHostsIfEmpty(LIVE_TAILNET_NODES);
@@ -130,7 +198,9 @@ hostCache.upsertHosts(nodes);
 
 // Dynamic Tailscale Tag Synchronization Wrapper
 async function refreshTailscaleNodes(currentNodes: NodeItem[]): Promise<NodeItem[]> {
-  let updated = await baseRefreshTailscaleNodes(currentNodes);
+  let updated = await withPollLog('tailscale', 'tailnet', 'tailscale status --json', () =>
+    baseRefreshTailscaleNodes(currentNodes)
+  );
   try {
     const chunks = hostCache.getAllTagChunks();
     const hasDynamicNodes = updated.some(n => n.isDynamicTagMember);
@@ -554,7 +624,9 @@ app.get('/api/telemetry', async (req, res) => {
     return;
   }
 
-  const live = await fetchLiveNodeTelemetry(targetNode);
+  const live = await withPollLog('telemetry', targetNode.shortName || targetNode.name, 'live-telemetry', () =>
+    fetchLiveNodeTelemetry(targetNode)
+  );
   hostCache.upsertHostTelemetry(targetNode.id, live);
   telemetry = {
     ...telemetry,
@@ -575,7 +647,12 @@ app.get('/api/nodes/:id/telemetry/glances', async (req, res) => {
     return;
   }
   try {
-    const glances = await fetchNodeTelemetryMultiTier(targetNode);
+    const glances = await withPollLog(
+      'telemetry',
+      targetNode.shortName || targetNode.name,
+      'glances-multi-tier',
+      () => fetchNodeTelemetryMultiTier(targetNode)
+    );
     res.json({ success: true, glances });
   } catch (err: any) {
     res.status(502).json({ success: false, error: err?.message || String(err) });
@@ -1335,8 +1412,10 @@ app.post('/api/terminal/exec', async (req, res) => {
 });
 
 // Active background process registries
-const activePtySessions = new Map<string, { proc: ChildProcess; ws: WebSocket; sessionId: string }>();
-const activePlaybookProcs = new Map<string, ChildProcess>();
+const activePtySessions = new Map<
+  string,
+  { proc: ChildProcess; ws: WebSocket; sessionId: string; releaseConnection: () => void }
+>();
 
 // ==========================================
 // Category C: Tailscale Deep Telemetry Routes
@@ -1822,7 +1901,41 @@ const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
 registerPlaybookRoutes(app, playbookDir, {
   inventoryScriptPath: path.resolve(__dirname, 'inventory/tailscale_inventory.py'),
 });
-registerVaultRoutes(app);
+registerVaultRoutes(app, {
+  // Decryption audit rows persist in data/hosts-cache.sqlite (vault_audit_log).
+  auditStore: hostCache,
+  // Named vault variables persist as AES256 ciphertext in vault_variables.
+  variableStore: hostCache,
+  action: 'POST /api/vault/decrypt',
+});
+
+// ==========================================
+// Category F: rclone remote integration
+// ==========================================
+
+registerRcloneRoutes(app, {
+  hostCache,
+  broadcast,
+  getNode: (id: string) => findNode(id) || hostCache.getHostById(id),
+  // The Go daemon's mount/rclone plugin is the canonical task compiler.
+  compileInstall: async (nodeId, options) => {
+    const result = await proxyToGoDaemon(
+      `/api/nodes/${encodeURIComponent(nodeId)}/plugins/mount/rclone/actions/install_remote`,
+      'POST',
+      { options },
+      15000
+    );
+    if (!result.ok || !result.data) {
+      throw new Error(result.error || 'mount/rclone plugin unavailable on the air-traffic-control-daemon');
+    }
+    return result.data;
+  },
+  stageTask: (task: any) => {
+    const queued = enqueueTask(task);
+    broadcast({ type: 'queue_updated', queue: getQueue() });
+    return queued;
+  },
+});
 
 app.get('/api/ansible/config', async (_req, res) => {
   try {
@@ -1974,142 +2087,27 @@ app.post('/api/ansible/collections/install', (req, res) => {
 });
 
 app.post('/api/playbook/run', (req, res) => {
-  const { playbook = 'site.yml', target = 'all', checkMode = false, tags, extraVars } = req.body;
+  const { playbook = 'site.yml', target = 'all', checkMode = false, tags, extraVars } = req.body || {};
 
-  const playbookValidation = validatePlaybookName(playbook);
-  if (!playbookValidation.valid) {
-    res.status(400).json({ error: playbookValidation.error || 'Invalid playbook name' });
+  const outcome = playbookRunner.run({
+    playbook,
+    target,
+    checkMode: Boolean(checkMode),
+    tags,
+    extraVars,
+  });
+
+  if (!outcome.success) {
+    res.status(outcome.code || 500).json({ error: outcome.error || 'Failed to start playbook' });
     return;
   }
 
-  const inventoryPath = path.resolve(__dirname, 'inventory/tailscale_inventory.py');
-  const playbookDir = path.resolve(__dirname, 'ansible/playbooks');
-  const playbookPath = path.resolve(playbookDir, playbookValidation.name);
-
-  if (!playbookPath.startsWith(playbookDir + path.sep)) {
-    res.status(400).json({ error: 'Path traversal detected in playbook name' });
-    return;
-  }
-
-  if (!fs.existsSync(playbookPath)) {
-    res.status(404).json({ error: `Playbook ${playbook} not found on filesystem` });
-    return;
-  }
-
-  const taskId = `task-ansible-${Date.now()}`;
-  const newTask: GlobalTaskItem = {
-    id: taskId,
-    startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
-    nodeTarget: target,
-    user: 'core@ansible',
-    description: `ansible-playbook ${playbook} --limit ${target} ${checkMode ? '(--check)' : ''}`,
-    progress: 10,
-    progressEta: 'Spawning Ansible runner...',
-    status: 'RUNNING',
-    category: 'ansible',
-    logs: [`[ansible] Starting playbook ${playbook} against ${target}`],
-  };
-
-  tasks.unshift(newTask);
-  hostCache.saveTask(newTask);
-  broadcast({ type: 'task_started', task: newTask });
-
-  const args = ['-i', inventoryPath, playbookPath];
-  if (target && target !== 'all') {
-    args.push('--limit', target);
-  }
-  if (checkMode) {
-    args.push('--check');
-  }
-  if (tags) {
-    args.push('--tags', tags);
-  }
-  if (extraVars) {
-    args.push('--extra-vars', typeof extraVars === 'string' ? extraVars : JSON.stringify(extraVars));
-  }
-
-  const proc = spawn('ansible-playbook', args, {
-    cwd: __dirname,
-    env: { ...process.env, ANSIBLE_FORCE_COLOR: '1' },
-  });
-
-  activePlaybookProcs.set(taskId, proc);
-
-  proc.on('error', (err: any) => {
-    activePlaybookProcs.delete(taskId);
-    newTask.status = 'FAILED';
-    newTask.progress = 100;
-    newTask.progressEta = `Spawn error: ${err?.code || err?.message || 'Failed to spawn runner'}`;
-    newTask.logs = newTask.logs || [];
-    newTask.logs.push(`[error] Process failed to spawn: ${err?.message || String(err)}`);
-    hostCache.saveTask(newTask);
-    broadcast({ type: 'task_output', taskId, line: `[error] Process failed to spawn: ${err?.message || String(err)}` });
-    broadcast({ type: 'task_updated', task: newTask });
-  });
-
-  const appendLog = (line: string) => {
-    newTask.logs = newTask.logs || [];
-    newTask.logs.push(line);
-    if (newTask.logs.length > 300) {
-      newTask.logs.shift();
-    }
-    broadcast({ type: 'task_output', taskId, line });
-
-    if (line.includes('PLAY [')) {
-      newTask.progress = 25;
-      newTask.progressEta = 'Starting plays...';
-    } else if (line.includes('TASK [')) {
-      newTask.progress = Math.min(85, (newTask.progress || 25) + 5);
-      const match = line.match(/TASK \[(.*?)\]/);
-      if (match) newTask.progressEta = match[1];
-    } else if (line.includes('PLAY RECAP')) {
-      newTask.progress = 90;
-      newTask.progressEta = 'Finalizing recap...';
-    }
-    hostCache.saveTask(newTask);
-    broadcast({ type: 'task_updated', task: newTask });
-  };
-
-  proc.stdout.on('data', chunk => {
-    const lines = chunk.toString().split('\n');
-    for (const l of lines) {
-      if (l.trim()) appendLog(l);
-    }
-  });
-
-  proc.stderr.on('data', chunk => {
-    const lines = chunk.toString().split('\n');
-    for (const l of lines) {
-      if (l.trim()) appendLog(`[stderr] ${l}`);
-    }
-  });
-
-  proc.on('close', code => {
-    activePlaybookProcs.delete(taskId);
-    if (newTask.status === 'FAILED') {
-      return;
-    }
-    newTask.progress = 100;
-    if (code === 0) {
-      newTask.status = 'OK';
-      newTask.progressEta = checkMode ? 'Completed dry-run (0 failed)' : 'Completed successfully';
-    } else {
-      newTask.status = 'FAILED';
-      newTask.progressEta = `Failed (exit code ${code})`;
-    }
-    hostCache.saveTask(newTask);
-    broadcast({ type: 'task_updated', task: newTask });
-  });
-
-  res.json({ success: true, taskId, task: newTask });
+  res.json({ success: true, taskId: outcome.taskId, task: outcome.task });
 });
 
 app.post('/api/playbook/cancel', (req, res) => {
   const { taskId } = req.body;
-  const proc = activePlaybookProcs.get(taskId);
-  if (proc) {
-    proc.kill('SIGTERM');
-    activePlaybookProcs.delete(taskId);
+  if (playbookRunner.cancel(taskId)) {
     const task = tasks.find(t => t.id === taskId);
     if (task) {
       task.status = 'FAILED';
@@ -2181,10 +2179,21 @@ app.post('/api/queue/execute', async (req, res) => {
 
   broadcast({ type: 'queue_execution_started', taskId, queue: getQueue() });
 
-  const { result, remainingCount, haltedOnError } = await executeNextQueueTask(inv, {
-    cwd: __dirname,
-    taskId,
-  });
+  // Expose the SQLite vault store to the playbook as an owner-only vars file;
+  // it contains ansible-vault ciphertext only and is removed when the run ends.
+  const vaultVars = materializeVaultVarsFile(hostCache);
+
+  let queueOutcome: Awaited<ReturnType<typeof executeNextQueueTask>>;
+  try {
+    queueOutcome = await executeNextQueueTask(inv, {
+      cwd: __dirname,
+      taskId,
+      vaultVarsFile: vaultVars?.filePath,
+    });
+  } finally {
+    vaultVars?.cleanup();
+  }
+  const { result, remainingCount, haltedOnError } = queueOutcome;
 
   broadcast({
     type: 'queue_execution_finished',
@@ -2201,6 +2210,98 @@ app.post('/api/queue/execute', async (req, res) => {
     remainingCount,
     haltedOnError,
   });
+});
+
+// -------------------------------------------------------------
+// Cron Schedule API Endpoints (ATC in-process scheduler)
+// -------------------------------------------------------------
+function broadcastSchedules() {
+  broadcast({ type: 'cron_updated', schedules: listSchedules() });
+}
+
+app.get('/api/cron/schedules', (_req, res) => {
+  res.json({
+    success: true,
+    schedules: listSchedules(),
+    schedulerRunning: cronScheduler.isRunning(),
+  });
+});
+
+app.get('/api/cron/schedules/:id', (req, res) => {
+  const schedule = getSchedule(req.params.id);
+  if (!schedule) {
+    res.status(404).json({ success: false, error: `Schedule ${req.params.id} not found` });
+    return;
+  }
+  res.json({ success: true, schedule });
+});
+
+app.post('/api/cron/schedules', (req, res) => {
+  try {
+    const schedule = createSchedule(req.body);
+    broadcastSchedules();
+    res.json({ success: true, schedule });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err?.message || 'Failed to create schedule' });
+  }
+});
+
+app.put('/api/cron/schedules/:id', (req, res) => {
+  try {
+    const schedule = updateSchedule(req.params.id, req.body || {});
+    if (!schedule) {
+      res.status(404).json({ success: false, error: `Schedule ${req.params.id} not found` });
+      return;
+    }
+    broadcastSchedules();
+    res.json({ success: true, schedule });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err?.message || 'Failed to update schedule' });
+  }
+});
+
+app.delete('/api/cron/schedules/:id', (req, res) => {
+  const removed = removeSchedule(req.params.id);
+  if (!removed) {
+    res.status(404).json({ success: false, error: `Schedule ${req.params.id} not found` });
+    return;
+  }
+  broadcastSchedules();
+  res.json({ success: true });
+});
+
+// Fires a schedule immediately for verification — does not change its next-run clock.
+app.post('/api/cron/schedules/:id/run', async (req, res) => {
+  const schedule = getSchedule(req.params.id);
+  if (!schedule) {
+    res.status(404).json({ success: false, error: `Schedule ${req.params.id} not found` });
+    return;
+  }
+  const run = await cronScheduler.runNow(schedule.id);
+  res.json({
+    success: run ? run.status === 'OK' : false,
+    run,
+    schedule: getSchedule(schedule.id),
+  });
+});
+
+// Preview the next fire times for an expression before saving a schedule.
+app.get('/api/cron/preview', (req, res) => {
+  const expression = String(req.query.expression || '');
+  const count = Math.min(Math.max(parseInt(String(req.query.count || '5'), 10) || 5, 1), 25);
+  try {
+    const runs: number[] = [];
+    let cursor = Date.now();
+    for (let i = 0; i < count; i++) {
+      const next = nextCronRun(expression, cursor);
+      if (next === null) break;
+      runs.push(next);
+      cursor = next;
+    }
+    res.json({ success: true, expression, runs });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err?.message || 'Invalid cron expression' });
+  }
 });
 
 // -------------------------------------------------------------
@@ -2327,6 +2428,39 @@ app.post('/api/nodes/:id/plugins/refresh', async (req, res) => {
   res.json(result.data);
 });
 
+// -------------------------------------------------------------
+// Module-contributed global settings pages (proxied to the Go daemon)
+// -------------------------------------------------------------
+app.get('/api/settings/pages', async (_req, res) => {
+  const result = await proxyToGoDaemon('/api/settings/pages', 'GET');
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+  res.json(result.data);
+});
+
+app.get('/api/settings/pages/*', async (req, res) => {
+  // The page id may itself contain a slash (e.g. "backup/restic").
+  const pageId = (req.params as Record<string, string>)[0];
+  const result = await proxyToGoDaemon(`/api/settings/pages/${pageId}`, 'GET');
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+  res.json(result.data);
+});
+
+app.put('/api/settings/pages/*', async (req, res) => {
+  const pageId = (req.params as Record<string, string>)[0];
+  const result = await proxyToGoDaemon(`/api/settings/pages/${pageId}`, 'PUT', req.body);
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, error: result.error });
+    return;
+  }
+  res.json(result.data);
+});
+
 app.post('/api/restic/snapshot', async (req, res) => {
   const targetNode = findNode(req.body?.host || 'likes-it-cold');
   const snapshotTask: GlobalTaskItem = {
@@ -2378,9 +2512,107 @@ function broadcast(msg: any) {
   });
 }
 
+// ==========================================
+// Cluster syslog: coordinator app logs, backend poll logs, live connections
+// ==========================================
+
+/**
+ * Times a real backend poll of a node (or of the local tailnet) and records the
+ * measured outcome in the cluster syslog. Errors are logged and re-thrown so the
+ * caller keeps its existing failure behaviour.
+ */
+async function withPollLog<T>(kind: string, host: string, detail: string, fn: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    const durationMs = Date.now() - startedAt;
+    recordClusterLog({
+      kind: 'poll',
+      level: 'info',
+      source: `poll:${kind}`,
+      host,
+      detail,
+      durationMs,
+      ok: true,
+      message: `${detail} ok in ${durationMs}ms`,
+    });
+    return result;
+  } catch (err: any) {
+    const durationMs = Date.now() - startedAt;
+    const reason = err?.message || String(err);
+    recordClusterLog({
+      kind: 'poll',
+      level: 'error',
+      source: `poll:${kind}`,
+      host,
+      detail,
+      durationMs,
+      ok: false,
+      message: `${detail} failed in ${durationMs}ms: ${reason}`,
+    });
+    throw err;
+  }
+}
+
+app.get('/api/cluster-log', (req, res) => {
+  const rawLimit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : NaN;
+  const rawSinceId = typeof req.query.sinceId === 'string' ? Number.parseInt(req.query.sinceId, 10) : NaN;
+  const kind = typeof req.query.kind === 'string' ? (req.query.kind as ClusterLogKind) : undefined;
+  const host = typeof req.query.host === 'string' ? req.query.host : undefined;
+
+  res.json({
+    success: true,
+    entries: listClusterLogs({
+      limit: Number.isFinite(rawLimit) ? rawLimit : 300,
+      kind: kind === 'app' || kind === 'poll' || kind === 'node' ? kind : undefined,
+      host,
+      sinceId: Number.isFinite(rawSinceId) ? rawSinceId : undefined,
+    }),
+  });
+});
+
+app.get('/api/connections', (_req, res) => {
+  res.json({ success: true, connections: getConnectionSnapshot() });
+});
+
+// Push live cluster log entries and connection counts to every dashboard client.
+const pendingClusterLogs: ReturnType<typeof listClusterLogs> = [];
+let clusterLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushClusterLogs(): void {
+  clusterLogFlushTimer = null;
+  if (pendingClusterLogs.length === 0) return;
+  const entries = pendingClusterLogs.splice(0, pendingClusterLogs.length);
+  broadcast({ type: 'cluster_log_batch', entries });
+}
+
+onClusterLog(entry => {
+  pendingClusterLogs.push(entry);
+  if (clusterLogFlushTimer) return;
+  clusterLogFlushTimer = setTimeout(flushClusterLogs, 250);
+  clusterLogFlushTimer.unref?.();
+});
+
+let connectionBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+
+onConnectionChange((snapshot: ConnectionSnapshot) => {
+  if (connectionBroadcastTimer) return;
+  connectionBroadcastTimer = setTimeout(() => {
+    connectionBroadcastTimer = null;
+    broadcast({ type: 'connections_updated', connections: snapshot });
+  }, 250);
+  connectionBroadcastTimer.unref?.();
+});
+
 // WebSocket connection hub for bidirectional PTY and live telemetry
 wss.on('connection', ws => {
+  const releaseWsConnection = beginConnection('websocket', 'ws /ws');
+  ws.on('close', () => releaseWsConnection());
+  ws.on('error', () => releaseWsConnection());
+
   ws.send(JSON.stringify({ type: 'init', telemetry, tasks, nodes, queue: getQueue() }));
+  ws.send(JSON.stringify({ type: 'cluster_log_batch', entries: listClusterLogs({ limit: 200 }) }));
+  ws.send(JSON.stringify({ type: 'connections_updated', connections: getConnectionSnapshot() }));
 
   ws.on('message', async data => {
     try {
@@ -2413,7 +2645,8 @@ wss.on('connection', ws => {
           }
         );
 
-        activePtySessions.set(sessionId, { proc: ptyProc, ws, sessionId });
+        const releasePtyConnection = beginConnection('ssh', `pty ${sshUser}@${targetIp}`);
+        activePtySessions.set(sessionId, { proc: ptyProc, ws, sessionId, releaseConnection: releasePtyConnection });
 
         ptyProc.stdout.on('data', chunk => {
           if (ws.readyState === WebSocket.OPEN) {
@@ -2428,6 +2661,7 @@ wss.on('connection', ws => {
         });
 
         ptyProc.on('error', (err: any) => {
+          releasePtyConnection();
           activePtySessions.delete(sessionId);
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(
@@ -2442,6 +2676,7 @@ wss.on('connection', ws => {
         });
 
         ptyProc.on('close', code => {
+          releasePtyConnection();
           activePtySessions.delete(sessionId);
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'terminal_exit', sessionId, code }));
@@ -2462,6 +2697,7 @@ wss.on('connection', ws => {
         const session = activePtySessions.get(msg.sessionId);
         if (session) {
           session.proc.kill('SIGTERM');
+          session.releaseConnection();
           activePtySessions.delete(msg.sessionId);
         }
       }
@@ -2486,6 +2722,7 @@ wss.on('connection', ws => {
     for (const [id, session] of activePtySessions.entries()) {
       if (session.ws === ws) {
         session.proc.kill('SIGTERM');
+        session.releaseConnection();
         activePtySessions.delete(id);
       }
     }
@@ -2499,13 +2736,18 @@ setInterval(async () => {
   if (nodes.length > 0) {
     try {
       const activeNode = nodes[0];
-      const live = await fetchLiveNodeTelemetry(activeNode);
+      const live = await withPollLog(
+        'telemetry',
+        activeNode.shortName || activeNode.name,
+        'scheduled-live-telemetry',
+        () => fetchLiveNodeTelemetry(activeNode)
+      );
       if (live && live.cpuUsage !== undefined) {
         telemetry = { ...telemetry, ...live };
         broadcast({ type: 'telemetry_tick', telemetry });
       }
     } catch {
-      // Keep existing telemetry if node probe times out
+      // Poll failure is already recorded in the cluster syslog by withPollLog.
     }
   }
 }, TELEMETRY_POLL_INTERVAL_MS);
@@ -2543,6 +2785,10 @@ async function startServer() {
     console.log(`Air Traffic Control Fullstack server running on http://0.0.0.0:${PORT}`);
     // Non-blocking background initialization of persistent Ansible virtual environment
     ensureAnsibleVenv().catch(err => console.warn('Background venv init error:', err));
+    // In-process cron scheduler: fires persisted schedules and records real runs.
+    cronScheduler.start();
+    const scheduleCount = listSchedules().filter(s => s.enabled).length;
+    console.log(`[cron] ATC scheduler started with ${scheduleCount} enabled schedule(s)`);
   });
 }
 

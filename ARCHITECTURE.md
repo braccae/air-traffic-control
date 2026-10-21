@@ -321,3 +321,9 @@ Inventory
 - **Custom Folders:** Non-Tailscale physical/virtual machines can be organized into arbitrary operator-defined folders stored in SQLite (`custom_folders`).
 - **Real-Time WebSocket Synchronization:** Updates to chunks (`chunks_updated`), folders (`folders_updated`), or nodes (`nodes_updated`) trigger live, non-destructive UI re-renders.
 
+---
+
+## 14. Scheduled Playbooks & Tasks (Cron)
+
+Schedules are **driven in-process by the coordinator** (`src/utils/cronScheduler.ts`) — ATC installs no systemd timer or crontab entry on target hosts. Rows persist in SQLite (`cron_schedules`), fire against a 5-field cron expression, and every run goes through the real execution paths (the shared playbook runner, or the Ansible mutation queue for declarative steps) so output lands in the existing console task stream. Full contract, API and behaviour: [`docs/CRON_SCHEDULES.md`](docs/CRON_SCHEDULES.md).
+

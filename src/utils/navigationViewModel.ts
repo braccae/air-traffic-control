@@ -277,7 +277,7 @@ export function formatNodeIpBadge(node: NodeItem): string {
 
 export type SidebarViewMode = 'nodes' | 'datacenter';
 
-export type DatacenterSection = 'overview' | 'playbooks' | 'vars_vault' | 'tasks' | 'storage';
+export type DatacenterSection = 'overview' | 'playbooks' | 'vars_vault' | 'tasks' | 'schedules' | 'storage';
 
 export interface DatacenterNavSection {
   id: DatacenterSection;
@@ -317,12 +317,243 @@ export function getDatacenterNavSections(playbooksCount = 4, tasksCount = 0): Da
       badge: tasksCount > 0 ? `${tasksCount} active` : undefined,
     },
     {
+      id: 'schedules',
+      title: 'Scheduled Jobs',
+      icon: 'schedule',
+      description: 'Cron-scheduled playbooks & tasks',
+    },
+    {
       id: 'storage',
       title: 'Cluster Storage & Pools',
       icon: 'storage',
       description: 'ZFS, NFS, and Samba storage',
     },
   ];
+}
+
+/* ------------------------------------------------------------------ *
+ * Datacenter settings catalog + deep-link routes
+ *
+ * Every individual setting (or explicit setting group) gets its own
+ * page with a stable slug so the sidebar can show grouped categories
+ * and each page can be deep-linked via the URL hash:
+ *
+ *   #/datacenter/overview                       -> cluster section
+ *   #/datacenter/settings/automation/ansible-forks -> single setting page
+ * ------------------------------------------------------------------ */
+
+export type DatacenterSettingCategoryId = 'playbooks' | 'automation' | 'variables' | 'storage' | 'terminal';
+
+export type DatacenterSettingPageId =
+  | 'playbook-editor'
+  | 'datacenter-vars'
+  | 'rclone-remotes'
+  | 'ansible-stdout-callback'
+  | 'ansible-become-method'
+  | 'ansible-forks'
+  | 'ansible-timeout'
+  | 'ansible-ssh-transport'
+  | 'quick-commands';
+
+export interface DatacenterSettingPage {
+  id: DatacenterSettingPageId;
+  category: DatacenterSettingCategoryId;
+  title: string;
+  icon: string;
+  description: string;
+  /** Stable URL slug, unique across the whole settings catalog. */
+  slug: string;
+}
+
+export interface DatacenterSettingCategory {
+  id: DatacenterSettingCategoryId;
+  title: string;
+  icon: string;
+  description: string;
+  pages: DatacenterSettingPage[];
+}
+
+export const DATACENTER_ROUTE_PREFIX = '#/datacenter';
+export const DATACENTER_SETTINGS_SEGMENT = 'settings';
+
+const DATACENTER_SETTING_CATEGORIES: DatacenterSettingCategory[] = [
+  {
+    id: 'playbooks',
+    title: 'Playbooks',
+    icon: 'menu_book',
+    description: 'Ansible playbook files in the cluster repository',
+    pages: [
+      {
+        id: 'playbook-editor',
+        category: 'playbooks',
+        title: 'Playbook Editor',
+        icon: 'menu_book',
+        description: 'List, create, edit and run playbooks from ansible/playbooks',
+        slug: 'playbooks',
+      },
+    ],
+  },
+  {
+    id: 'automation',
+    title: 'Ansible Engine',
+    icon: 'tune',
+    description: 'ansible.cfg execution parameters',
+    pages: [
+      {
+        id: 'ansible-stdout-callback',
+        category: 'automation',
+        title: 'STDOUT Driver',
+        icon: 'code',
+        description: 'Output callback used to format task results (stdout_callback)',
+        slug: 'ansible-stdout-callback',
+      },
+      {
+        id: 'ansible-become-method',
+        category: 'automation',
+        title: 'Privilege Elevation',
+        icon: 'admin_panel_settings',
+        description: 'Method used to elevate on remote nodes (become_method)',
+        slug: 'ansible-become-method',
+      },
+      {
+        id: 'ansible-forks',
+        category: 'automation',
+        title: 'Parallel Forks',
+        icon: 'account_tree',
+        description: 'Max parallel SSH worker processes (forks)',
+        slug: 'ansible-forks',
+      },
+      {
+        id: 'ansible-timeout',
+        category: 'automation',
+        title: 'Connection Timeout',
+        icon: 'timer',
+        description: 'Default SSH connection timeout in seconds (timeout)',
+        slug: 'ansible-timeout',
+      },
+      {
+        id: 'ansible-ssh-transport',
+        category: 'automation',
+        title: 'SSH Transport',
+        icon: 'vpn_key',
+        description: 'Host key checking and SSH pipelining',
+        slug: 'ansible-ssh-transport',
+      },
+    ],
+  },
+  {
+    id: 'variables',
+    title: 'Variables',
+    icon: 'data_object',
+    description: 'Ansible group variables stored for this datacenter',
+    pages: [
+      {
+        id: 'datacenter-vars',
+        category: 'variables',
+        title: 'Datacenter Vars',
+        icon: 'data_object',
+        description: 'List, add, edit and remove group_vars entries persisted in the vars store',
+        slug: 'vars',
+      },
+    ],
+  },
+  {
+    id: 'storage',
+    title: 'Storage & Remotes',
+    icon: 'cloud_queue',
+    description: 'Datacenter-wide rclone remotes and mount defaults',
+    pages: [
+      {
+        id: 'rclone-remotes',
+        category: 'storage',
+        title: 'Rclone Remotes',
+        icon: 'cloud_queue',
+        description: 'Guided rclone.conf remote setup, Ansible Vault secret storage, and device installation',
+        slug: 'rclone-remotes',
+      },
+    ],
+  },
+  {
+    id: 'terminal',
+    title: 'Terminal',
+    icon: 'terminal',
+    description: 'Operator terminal behaviour',
+    pages: [
+      {
+        id: 'quick-commands',
+        category: 'terminal',
+        title: 'Quick Commands',
+        icon: 'bolt',
+        description: 'Command shortcuts available in terminal sessions',
+        slug: 'quick-commands',
+      },
+    ],
+  },
+];
+
+export function getDatacenterSettingCategories(): DatacenterSettingCategory[] {
+  return DATACENTER_SETTING_CATEGORIES;
+}
+
+export function getDatacenterSettingPages(): DatacenterSettingPage[] {
+  return DATACENTER_SETTING_CATEGORIES.flatMap(category => category.pages);
+}
+
+export function findDatacenterSettingPage(id: string): DatacenterSettingPage | undefined {
+  return getDatacenterSettingPages().find(page => page.id === id || page.slug === id);
+}
+
+export function findDatacenterSettingCategory(
+  id: DatacenterSettingCategoryId
+): DatacenterSettingCategory | undefined {
+  return DATACENTER_SETTING_CATEGORIES.find(category => category.id === id);
+}
+
+export function isDatacenterSection(id: string): id is DatacenterSection {
+  return getDatacenterNavSections().some(section => section.id === id);
+}
+
+export type DatacenterRoute =
+  | { kind: 'section'; section: DatacenterSection }
+  | { kind: 'setting'; setting: DatacenterSettingPageId };
+
+export const DEFAULT_DATACENTER_ROUTE: DatacenterRoute = { kind: 'section', section: 'overview' };
+
+/** Stable hash URL for a datacenter route, e.g. `#/datacenter/settings/automation/ansible-forks`. */
+export function formatDatacenterRoute(route: DatacenterRoute): string {
+  if (route.kind === 'section') {
+    return `${DATACENTER_ROUTE_PREFIX}/${route.section}`;
+  }
+  const page = findDatacenterSettingPage(route.setting);
+  if (!page) {
+    return `${DATACENTER_ROUTE_PREFIX}/${DATACENTER_SETTINGS_SEGMENT}`;
+  }
+  return `${DATACENTER_ROUTE_PREFIX}/${DATACENTER_SETTINGS_SEGMENT}/${page.category}/${page.slug}`;
+}
+
+/**
+ * Parse a location hash into a datacenter route.
+ * Returns null when the hash does not address a datacenter page, so callers
+ * can leave the rest of the application untouched.
+ */
+export function parseDatacenterRoute(hash: string): DatacenterRoute | null {
+  if (!hash) return null;
+  const cleaned = hash.split('?')[0].split('#').join('').trim();
+  const segments = cleaned.split('/').filter(Boolean);
+  if (segments.length === 0 || segments[0] !== 'datacenter') return null;
+
+  if (segments[1] === DATACENTER_SETTINGS_SEGMENT) {
+    const rest = segments.slice(2);
+    if (rest.length === 0) return null;
+    const page = findDatacenterSettingPage(rest[rest.length - 1]);
+    if (!page) return null;
+    return { kind: 'setting', setting: page.id };
+  }
+
+  if (segments.length < 2) return null;
+  const section = segments[1];
+  if (!isDatacenterSection(section)) return null;
+  return { kind: 'section', section };
 }
 
 export interface ConsoleHeaderLayoutClasses {

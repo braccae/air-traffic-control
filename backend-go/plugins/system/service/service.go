@@ -2,11 +2,11 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/systemd"
 )
 
 func init() {
@@ -15,17 +15,22 @@ func init() {
 
 // ServiceUnit represents a single system service unit.
 type ServiceUnit struct {
-	Unit        string `json:"unit"`
-	Load        string `json:"load"`
-	Active      string `json:"active"`
-	Sub         string `json:"sub"`
-	Description string `json:"description"`
+	Unit          string `json:"unit"`
+	Load          string `json:"load"`
+	Active        string `json:"active"`
+	Sub           string `json:"sub"`
+	Description   string `json:"description"`
+	UnitFileState string `json:"unitFileState,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	Scope         string `json:"scope,omitempty"`
 }
 
 // ServiceReadPayload represents the JSON payload returned by Reader.
 type ServiceReadPayload struct {
 	Manager  string        `json:"manager"` // "systemd", "sysv", "openrc"
 	Services []ServiceUnit `json:"services"`
+	// Warnings carries non-fatal read problems (e.g. no reachable user manager).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Plugin implements plugin.Plugin, plugin.Reader, and plugin.Actor for systemd and SysV/OpenRC service management.
@@ -117,22 +122,38 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}
 
 	if isSystemd {
-		// 1. Try systemctl list-units with JSON output (systemd 246+)
-		jsonOut, err := r.RunCommand(ctx, "systemctl list-units --type=service --all -o json")
-		if err == nil && strings.TrimSpace(jsonOut) != "" && strings.HasPrefix(strings.TrimSpace(jsonOut), "[") {
-			var units []ServiceUnit
-			if err := json.Unmarshal([]byte(strings.TrimSpace(jsonOut)), &units); err == nil && len(units) > 0 {
-				return ServiceReadPayload{
-					Manager:  "systemd",
-					Services: units,
-				}, nil
+		// 1. systemd's own JSON interface for system units, plus the user
+		//    manager's units when a user session bus is reachable. Unit-file
+		//    state (enabled/disabled/static/masked) is merged in per unit.
+		if listed, warnings, err := systemd.ListAllScopes(ctx, r); err == nil && len(listed) > 0 {
+			units := make([]ServiceUnit, 0, len(listed))
+			for _, u := range listed {
+				units = append(units, ServiceUnit{
+					Unit:          u.Unit,
+					Load:          u.Load,
+					Active:        u.Active,
+					Sub:           u.Sub,
+					Description:   u.Description,
+					UnitFileState: u.UnitFileState,
+					Enabled:       u.Enabled,
+					Scope:         u.Scope,
+				})
 			}
+			return ServiceReadPayload{
+				Manager:  "systemd",
+				Services: units,
+				Warnings: warnings,
+			}, nil
 		}
 
-		// 2. Fallback: plain text tabular list-units
+		// 2. Fallback for hosts whose systemd predates `--output=json` (or whose
+		//    list-units output was unusable): parse the tabular listing.
 		txtOut, err := r.RunCommand(ctx, "systemctl list-units --type=service --all --no-legend --no-pager")
 		if err == nil && strings.TrimSpace(txtOut) != "" {
 			units := parseSystemctlText(txtOut)
+			for i := range units {
+				units[i].Scope = string(systemd.ScopeSystem)
+			}
 			return ServiceReadPayload{
 				Manager:  "systemd",
 				Services: units,
@@ -227,61 +248,80 @@ func parseSysvText(output string) []ServiceUnit {
 	return units
 }
 
+// scopeOption is the shared selector between system and user unit managers.
+func scopeOption() plugin.OptionSchema {
+	return plugin.OptionSchema{
+		Name:        "scope",
+		Type:        "select",
+		Required:    false,
+		Default:     "system",
+		Enum:        []string{"system", "user"},
+		Description: "systemd manager instance (user units act as the connecting user, no root required)",
+	}
+}
+
+// unitOptions is the option set shared by every per-unit lifecycle action.
+func unitOptions() []plugin.OptionSchema {
+	return []plugin.OptionSchema{
+		{Name: "name", Type: "string", Required: true, Description: "Service unit name (e.g. sshd.service)"},
+		scopeOption(),
+	}
+}
+
 // Actions enumerates mutation actions supported by service plugin.
 func (p *Plugin) Actions() []plugin.ActionSpec {
 	return []plugin.ActionSpec{
 		{
 			Name:        "daemon-reload",
 			Label:       "Reload Daemon",
-			Description: "Reloads systemd manager configuration (systemctl daemon-reload)",
-			Options:     []plugin.OptionSchema{},
+			Description: "Reloads systemd manager configuration (declarative daemon_reload)",
+			Options:     []plugin.OptionSchema{scopeOption()},
 		},
 		{
 			Name:        "start",
 			Label:       "Start Service",
 			Description: "Starts a system service",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Service unit name"},
-			},
+			Options:     unitOptions(),
 		},
 		{
 			Name:        "stop",
 			Label:       "Stop Service",
 			Description: "Stops a system service",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Service unit name"},
-			},
+			Options:     unitOptions(),
 		},
 		{
 			Name:        "restart",
 			Label:       "Restart Service",
 			Description: "Restarts a system service",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Service unit name"},
-			},
+			Options:     unitOptions(),
 		},
 		{
 			Name:        "reload",
 			Label:       "Reload Service",
 			Description: "Reloads service configuration without full restart",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Service unit name"},
-			},
+			Options:     unitOptions(),
 		},
 		{
 			Name:        "enable",
 			Label:       "Enable Service",
 			Description: "Enables service to start automatically on boot",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Service unit name"},
-			},
+			Options:     unitOptions(),
 		},
 		{
 			Name:        "disable",
 			Label:       "Disable Service",
 			Description: "Disables service from automatic startup",
+			Options:     unitOptions(),
+		},
+		{
+			Name:  "write-dropin",
+			Label: "Install Drop-in",
+			Description: "Writes an ATC-owned drop-in under /etc/systemd/system/<unit>.d/ and reloads the manager. " +
+				"Upstream unit files are never modified.",
 			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Service unit name"},
+				{Name: "name", Type: "string", Required: true, Description: "Target unit name (e.g. sshd.service)"},
+				{Name: "dropin", Type: "string", Required: false, Default: "atc-override.conf", Description: "Drop-in file name (must end in .conf)"},
+				{Name: "content", Type: "string", Required: true, Description: "Drop-in [Service]/[Unit] section body"},
 			},
 		},
 		{
@@ -296,25 +336,48 @@ func (p *Plugin) Actions() []plugin.ActionSpec {
 	}
 }
 
+// scopeFromOpts reads the requested systemd scope, defaulting to system.
+func scopeFromOpts(opts map[string]any) (systemd.Scope, error) {
+	raw, _ := opts["scope"].(string)
+	return systemd.ParseScope(raw)
+}
+
 // Compile generates a declarative TaskSpec for service or reboot actions.
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
 	normAction := strings.ToLower(action)
 
 	// Daemon reload action
 	if normAction == "daemon-reload" || normAction == "daemon_reload" {
+		scope, err := scopeFromOpts(opts)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+		params := map[string]any{"daemon_reload": true}
+		name := fmt.Sprintf("Reload systemd daemon on %s", h.NodeID)
+		stepName := "Reload systemd manager"
+		if scope == systemd.ScopeUser {
+			params["scope"] = string(systemd.ScopeUser)
+			name = fmt.Sprintf("Reload systemd user daemon on %s", h.NodeID)
+			stepName = "Reload systemd user manager"
+		} else {
+			params["become"] = true
+		}
 		return plugin.TaskSpec{
-			Name: fmt.Sprintf("Reload systemd daemon on %s", h.NodeID),
+			Name: name,
 			Steps: []plugin.TaskStep{
 				{
-					Name:   "Reload systemd manager",
-					Module: "ansible.builtin.systemd",
-					Params: map[string]any{
-						"daemon_reload": true,
-						"become":        true,
-					},
+					Name:   stepName,
+					Module: "ansible.builtin.systemd_service",
+					Params: params,
 				},
 			},
 		}, nil
+	}
+
+	// ATC-owned drop-in: never touches upstream unit files, only
+	// /etc/systemd/system/<unit>.d/<dropin> plus a manager reload.
+	if normAction == "write-dropin" || normAction == "write_dropin" || normAction == "install-dropin" {
+		return compileDropIn(h, opts)
 	}
 
 	// Reboot action
@@ -368,9 +431,23 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		}
 	}
 
-	module := "ansible.builtin.systemd"
+	if !isNonSystemd {
+		normalized, err := systemd.NormalizeUnitName(name)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+		name = normalized
+	}
+
+	scope, err := scopeFromOpts(opts)
+	if err != nil {
+		return plugin.TaskSpec{}, err
+	}
+
+	module := "ansible.builtin.systemd_service"
 	if isNonSystemd {
 		module = "ansible.builtin.service"
+		scope = systemd.ScopeSystem
 	}
 
 	stateMap := map[string]string{
@@ -380,10 +457,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		"reload":  "reloaded",
 	}
 
-	params := map[string]any{
-		"name":   name,
-		"become": true,
-	}
+	params := map[string]any{"name": name}
 
 	switch normAction {
 	case "start", "stop", "restart", "reload":
@@ -396,13 +470,80 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		return plugin.TaskSpec{}, fmt.Errorf("unsupported service action: %s", action)
 	}
 
+	if !isNonSystemd && scope == systemd.ScopeUser {
+		// `scope: user` drives the per-user manager as the connecting user, so
+		// no privilege escalation is requested for user units.
+		params["scope"] = string(systemd.ScopeUser)
+	} else {
+		params["become"] = true
+	}
+
+	label := fmt.Sprintf("%s service %s", strings.Title(normAction), name)
+	if scope == systemd.ScopeUser {
+		label = fmt.Sprintf("%s user service %s", strings.Title(normAction), name)
+	}
+
 	return plugin.TaskSpec{
-		Name: fmt.Sprintf("%s service %s", strings.Title(normAction), name),
+		Name: label,
 		Steps: []plugin.TaskStep{
 			{
-				Name:   fmt.Sprintf("%s service %s", strings.Title(normAction), name),
+				Name:   label,
 				Module: module,
 				Params: params,
+			},
+		},
+	}, nil
+}
+
+// compileDropIn stages an ATC-owned drop-in write plus a manager reload. It never
+// writes to the upstream unit file: the drop-in path is always
+// /etc/systemd/system/<unit>.d/<dropin>.
+func compileDropIn(h plugin.HostFacts, opts map[string]any) (plugin.TaskSpec, error) {
+	rawName, _ := opts["name"].(string)
+	name, err := systemd.NormalizeUnitName(rawName)
+	if err != nil {
+		return plugin.TaskSpec{}, err
+	}
+
+	dropin, _ := opts["dropin"].(string)
+	if strings.TrimSpace(dropin) == "" {
+		dropin = "atc-override.conf"
+	}
+	dropin = strings.TrimSpace(dropin)
+	if !strings.HasSuffix(dropin, ".conf") || strings.ContainsAny(dropin, "/ 	\n") || strings.Contains(dropin, "..") {
+		return plugin.TaskSpec{}, fmt.Errorf("invalid drop-in file name %q (must be a plain .conf name)", dropin)
+	}
+
+	content, _ := opts["content"].(string)
+	if strings.TrimSpace(content) == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("drop-in content is required")
+	}
+
+	dest := fmt.Sprintf("/etc/systemd/system/%s.d/%s", name, dropin)
+	title := fmt.Sprintf("Install ATC drop-in for %s on %s", name, h.NodeID)
+
+	return plugin.TaskSpec{
+		Name: title,
+		Steps: []plugin.TaskStep{
+			{
+				Name:   fmt.Sprintf("Write ATC drop-in %s", dest),
+				Module: "ansible.builtin.copy",
+				Params: map[string]any{
+					"dest":    dest,
+					"content": content,
+					"owner":   "root",
+					"group":   "root",
+					"mode":    "0644",
+					"become":  true,
+				},
+			},
+			{
+				Name:   "Reload systemd manager",
+				Module: "ansible.builtin.systemd_service",
+				Params: map[string]any{
+					"daemon_reload": true,
+					"become":        true,
+				},
 			},
 		},
 	}, nil

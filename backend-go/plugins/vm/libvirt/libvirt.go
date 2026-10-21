@@ -192,6 +192,46 @@ func (p *Plugin) Actions() []plugin.ActionSpec {
 				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
 			},
 		},
+		{
+			Name:        "reboot",
+			Label:       "Reboot Virtual Machine",
+			Description: "Reboots a virtual machine guest",
+			Options: []plugin.OptionSchema{
+				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			},
+		},
+		{
+			Name:        "reset",
+			Label:       "Reset Virtual Machine",
+			Description: "Force resets a virtual machine guest",
+			Options: []plugin.OptionSchema{
+				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			},
+		},
+		{
+			Name:        "suspend",
+			Label:       "Suspend Virtual Machine",
+			Description: "Suspends (pauses) a running virtual machine",
+			Options: []plugin.OptionSchema{
+				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			},
+		},
+		{
+			Name:        "resume",
+			Label:       "Resume Virtual Machine",
+			Description: "Resumes a suspended (paused) virtual machine",
+			Options: []plugin.OptionSchema{
+				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			},
+		},
+		{
+			Name:        "create",
+			Label:       "Create Virtual Machine",
+			Description: "Provisions a new KVM/QEMU virtual machine",
+			Options: []plugin.OptionSchema{
+				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			},
+		},
 	}
 }
 
@@ -205,10 +245,54 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		return plugin.TaskSpec{}, fmt.Errorf("vm domain name is required")
 	}
 
+	if norm == "create" {
+		vcpus := 2
+		if v, ok := opts["vcpus"].(int); ok && v > 0 {
+			vcpus = v
+		} else if vf, ok := opts["vcpus"].(float64); ok && vf > 0 {
+			vcpus = int(vf)
+		}
+		ramGiB := 4
+		if r, ok := opts["ramGiB"].(int); ok && r > 0 {
+			ramGiB = r
+		} else if rf, ok := opts["ramGiB"].(float64); ok && rf > 0 {
+			ramGiB = int(rf)
+		}
+		ramMb := ramGiB * 1024
+		diskGb := 20
+		if d, ok := opts["diskGb"].(int); ok && d > 0 {
+			diskGb = d
+		} else if df, ok := opts["diskGb"].(float64); ok && df > 0 {
+			diskGb = int(df)
+		}
+		bridge, _ := opts["bridge"].(string)
+		if bridge == "" {
+			bridge = "virbr0"
+		}
+		cmd := fmt.Sprintf("virt-install --name %q --vcpus %d --memory %d --disk size=%d --network bridge=%s --noautoconsole --import --check path_in_use=off 2>&1 || virsh define /dev/stdin << 'EOF'\n<domain type='kvm'><name>%s</name><memory unit='MiB'>%d</memory><vcpu>%d</vcpu><os><type arch='x86_64'>hvm</type></os></domain>\nEOF 2>&1", name, vcpus, ramMb, diskGb, bridge, name, ramMb, vcpus)
+		return plugin.TaskSpec{
+			Name: fmt.Sprintf("Create virtual machine %s", name),
+			Steps: []plugin.TaskStep{
+				{
+					Name:   fmt.Sprintf("Define and provision VM %s", name),
+					Module: "ansible.builtin.command",
+					Params: map[string]any{
+						"cmd":    cmd,
+						"become": true,
+					},
+				},
+			},
+		}, nil
+	}
+
 	stateMap := map[string]string{
 		"start":    "running",
 		"shutdown": "shutdown",
 		"destroy":  "destroyed",
+		"reboot":   "restarted",
+		"reset":    "restarted",
+		"suspend":  "paused",
+		"resume":   "unpaused",
 	}
 
 	state, ok := stateMap[norm]

@@ -11,6 +11,10 @@ import type {
   PodItem,
   CustomFolder,
   TagInventoryChunk,
+  RcloneRemoteRecord,
+  RcloneMountRecord,
+  VaultAuditEvent,
+  VaultVariable,
 } from '../types/index.ts';
 
 export interface CachedHostTelemetry {
@@ -71,6 +75,22 @@ export interface HostCacheStore {
   upsertTagChunk(chunk: TagInventoryChunk): void;
   getAllTagChunks(): TagInventoryChunk[];
   deleteTagChunk(id: string): boolean;
+  upsertRcloneRemote(remote: RcloneRemoteRecord): void;
+  getAllRcloneRemotes(): RcloneRemoteRecord[];
+  getRcloneRemote(id: string): RcloneRemoteRecord | null;
+  getRcloneRemoteByName(name: string): RcloneRemoteRecord | null;
+  deleteRcloneRemote(id: string): boolean;
+  upsertRcloneMount(mount: RcloneMountRecord): void;
+  getRcloneMounts(nodeId?: string): RcloneMountRecord[];
+  getRcloneMount(nodeId: string, remoteId: string): RcloneMountRecord | null;
+  deleteRcloneMount(nodeId: string, remoteId: string): boolean;
+  recordVaultAuditEvent(event: VaultAuditEvent): void;
+  getVaultAuditEvents(filter?: { variableName?: string; host?: string; limit?: number }): VaultAuditEvent[];
+  countVaultAuditEvents(): number;
+  listVaultVariables(): VaultVariable[];
+  getVaultVariableBlock(name: string): string | null;
+  upsertVaultVariable(name: string, vaultBlock: string): void;
+  deleteVaultVariable(name: string): boolean;
   close(): void;
 }
 
@@ -163,6 +183,51 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
       created_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS rclone_remotes (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      type TEXT NOT NULL,
+      config_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rclone_mounts (
+      node_id TEXT NOT NULL,
+      remote_id TEXT NOT NULL,
+      remote_name TEXT NOT NULL,
+      mount_target TEXT NOT NULL,
+      policy TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error TEXT,
+      installed_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (node_id, remote_id)
+    );
+
+    -- Vault decryption audit trail. Deliberately has no column for plaintext:
+    -- the Secret Protection Invariant is enforced by the schema, not by trust.
+    CREATE TABLE IF NOT EXISTS vault_audit_log (
+      id TEXT PRIMARY KEY,
+      timestamp INTEGER NOT NULL,
+      variable_name TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      host TEXT NOT NULL,
+      action TEXT NOT NULL,
+      password_source TEXT NOT NULL
+    );
+
+    -- Ansible Vault variables. Only the ansible-vault ciphertext block is stored:
+    -- there is no plaintext column, so the Secret Protection Invariant is a
+    -- property of the schema rather than of the code paths reading it.
+    CREATE TABLE IF NOT EXISTS vault_variables (
+      name TEXT PRIMARY KEY,
+      vault_block TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_hosts_sort ON hosts(sort_order ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_hosts_tailscale ON hosts(tailscale_host, tailscale_ip);
     CREATE INDEX IF NOT EXISTS idx_sections_host ON host_section_cache(host_id, section);
@@ -170,6 +235,9 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
     CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_folders_name ON inventory_folders(name ASC);
     CREATE INDEX IF NOT EXISTS idx_chunks_created ON tag_inventory_chunks(created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_vault_audit_ts ON vault_audit_log(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_vault_audit_var ON vault_audit_log(variable_name);
+    CREATE INDEX IF NOT EXISTS idx_vault_audit_host ON vault_audit_log(host);
   `);
 
   try {
@@ -283,6 +351,142 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
       auth_method = excluded.auth_method
   `);
   const stmtDeleteTagChunk = db.prepare('DELETE FROM tag_inventory_chunks WHERE id = ?');
+
+  const stmtSelectAllRcloneRemotes = db.prepare(`
+    SELECT id, name, provider, type, config_json, created_at, updated_at
+    FROM rclone_remotes ORDER BY name ASC
+  `);
+  const stmtSelectRcloneRemoteById = db.prepare(
+    'SELECT id, name, provider, type, config_json, created_at, updated_at FROM rclone_remotes WHERE id = ?'
+  );
+  const stmtSelectRcloneRemoteByName = db.prepare(
+    'SELECT id, name, provider, type, config_json, created_at, updated_at FROM rclone_remotes WHERE name = ?'
+  );
+  const stmtUpsertRcloneRemote = db.prepare(`
+    INSERT INTO rclone_remotes (id, name, provider, type, config_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      provider = excluded.provider,
+      type = excluded.type,
+      config_json = excluded.config_json,
+      updated_at = excluded.updated_at
+  `);
+  const stmtDeleteRcloneRemote = db.prepare('DELETE FROM rclone_remotes WHERE id = ?');
+  const stmtDeleteRcloneMountsForRemote = db.prepare('DELETE FROM rclone_mounts WHERE remote_id = ?');
+
+  const stmtSelectRcloneMounts = db.prepare(`
+    SELECT node_id, remote_id, remote_name, mount_target, policy, status, error, installed_at, updated_at
+    FROM rclone_mounts ORDER BY remote_name ASC
+  `);
+  const stmtSelectRcloneMountsForNode = db.prepare(`
+    SELECT node_id, remote_id, remote_name, mount_target, policy, status, error, installed_at, updated_at
+    FROM rclone_mounts WHERE node_id = ? ORDER BY remote_name ASC
+  `);
+  const stmtSelectRcloneMount = db.prepare(`
+    SELECT node_id, remote_id, remote_name, mount_target, policy, status, error, installed_at, updated_at
+    FROM rclone_mounts WHERE node_id = ? AND remote_id = ?
+  `);
+  const stmtUpsertRcloneMount = db.prepare(`
+    INSERT INTO rclone_mounts (
+      node_id, remote_id, remote_name, mount_target, policy, status, error, installed_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(node_id, remote_id) DO UPDATE SET
+      remote_name = excluded.remote_name,
+      mount_target = excluded.mount_target,
+      policy = excluded.policy,
+      status = excluded.status,
+      error = excluded.error,
+      updated_at = excluded.updated_at
+  `);
+  const stmtDeleteRcloneMount = db.prepare('DELETE FROM rclone_mounts WHERE node_id = ? AND remote_id = ?');
+
+  const stmtInsertVaultAudit = db.prepare(`
+    INSERT INTO vault_audit_log (id, timestamp, variable_name, actor, host, action, password_source)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  const stmtSelectVaultAudit = db.prepare(`
+    SELECT id, timestamp, variable_name, actor, host, action, password_source
+    FROM vault_audit_log ORDER BY timestamp DESC, rowid DESC LIMIT ?
+  `);
+  const stmtSelectVaultAuditByVariable = db.prepare(`
+    SELECT id, timestamp, variable_name, actor, host, action, password_source
+    FROM vault_audit_log WHERE variable_name = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?
+  `);
+  const stmtSelectVaultAuditByHost = db.prepare(`
+    SELECT id, timestamp, variable_name, actor, host, action, password_source
+    FROM vault_audit_log WHERE host = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?
+  `);
+  const stmtSelectVaultAuditByVariableAndHost = db.prepare(`
+    SELECT id, timestamp, variable_name, actor, host, action, password_source
+    FROM vault_audit_log WHERE variable_name = ? AND host = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?
+  `);
+  const stmtCountVaultAudit = db.prepare('SELECT COUNT(*) as cnt FROM vault_audit_log');
+
+  // Note: the list statement deliberately does not select vault_block.
+  const stmtListVaultVariables = db.prepare(`
+    SELECT name, created_at, updated_at FROM vault_variables ORDER BY name ASC
+  `);
+  const stmtSelectVaultVariableBlock = db.prepare('SELECT vault_block FROM vault_variables WHERE name = ?');
+  const stmtUpsertVaultVariable = db.prepare(`
+    INSERT INTO vault_variables (name, vault_block, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(name) DO UPDATE SET
+      vault_block = excluded.vault_block,
+      updated_at = excluded.updated_at
+  `);
+  const stmtDeleteVaultVariable = db.prepare('DELETE FROM vault_variables WHERE name = ?');
+
+  const mapVaultAuditRow = (r: any): VaultAuditEvent => ({
+    id: String(r.id),
+    timestamp: Number(r.timestamp),
+    variableName: String(r.variable_name),
+    actor: String(r.actor),
+    host: String(r.host),
+    action: String(r.action),
+    passwordSource: String(r.password_source),
+  });
+
+  type RcloneRemoteRow = {
+    id: string;
+    name: string;
+    provider: string;
+    type: string;
+    config_json: string;
+    created_at: number;
+    updated_at: number;
+  };
+  type RcloneMountRow = {
+    node_id: string;
+    remote_id: string;
+    remote_name: string;
+    mount_target: string;
+    policy: string;
+    status: string;
+    error: string | null;
+    installed_at: number;
+    updated_at: number;
+  };
+  const mapRemote = (r: RcloneRemoteRow): RcloneRemoteRecord => ({
+    id: r.id,
+    name: r.name,
+    provider: r.provider,
+    type: r.type,
+    configJson: r.config_json,
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+  });
+  const mapMount = (r: RcloneMountRow): RcloneMountRecord => ({
+    nodeId: r.node_id,
+    remoteId: r.remote_id,
+    remoteName: r.remote_name,
+    mountTarget: r.mount_target,
+    policy: r.policy as RcloneMountRecord['policy'],
+    status: r.status as RcloneMountRecord['status'],
+    error: r.error || undefined,
+    installedAt: Number(r.installed_at),
+    updatedAt: Number(r.updated_at),
+  });
 
   function upsertSingleHost(node: NodeItem, sortOrder?: number): void {
     const existing = stmtSelectHostById.get(node.id) as { sort_order?: number } | undefined;
@@ -614,6 +818,143 @@ export function createHostCacheStore(dbPath = ':memory:'): HostCacheStore {
 
     deleteTagChunk(id: string): boolean {
       const res = stmtDeleteTagChunk.run(id);
+      return Number(res.changes) > 0;
+    },
+
+    upsertRcloneRemote(remote: RcloneRemoteRecord): void {
+      stmtUpsertRcloneRemote.run(
+        remote.id,
+        remote.name,
+        remote.provider,
+        remote.type,
+        remote.configJson,
+        remote.createdAt,
+        remote.updatedAt
+      );
+    },
+
+    getAllRcloneRemotes(): RcloneRemoteRecord[] {
+      const rows = stmtSelectAllRcloneRemotes.all() as RcloneRemoteRow[];
+      return rows.map(mapRemote);
+    },
+
+    getRcloneRemote(id: string): RcloneRemoteRecord | null {
+      const row = stmtSelectRcloneRemoteById.get(id) as RcloneRemoteRow | undefined;
+      return row ? mapRemote(row) : null;
+    },
+
+    getRcloneRemoteByName(name: string): RcloneRemoteRecord | null {
+      const row = stmtSelectRcloneRemoteByName.get(name) as RcloneRemoteRow | undefined;
+      return row ? mapRemote(row) : null;
+    },
+
+    deleteRcloneRemote(id: string): boolean {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        stmtDeleteRcloneMountsForRemote.run(id);
+        const res = stmtDeleteRcloneRemote.run(id);
+        db.exec('COMMIT');
+        return Number(res.changes) > 0;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    },
+
+    upsertRcloneMount(mount: RcloneMountRecord): void {
+      stmtUpsertRcloneMount.run(
+        mount.nodeId,
+        mount.remoteId,
+        mount.remoteName,
+        mount.mountTarget,
+        mount.policy,
+        mount.status,
+        mount.error || null,
+        mount.installedAt,
+        mount.updatedAt
+      );
+    },
+
+    getRcloneMounts(nodeId?: string): RcloneMountRecord[] {
+      const rows = nodeId
+        ? (stmtSelectRcloneMountsForNode.all(nodeId) as RcloneMountRow[])
+        : (stmtSelectRcloneMounts.all() as RcloneMountRow[]);
+      return rows.map(mapMount);
+    },
+
+    getRcloneMount(nodeId: string, remoteId: string): RcloneMountRecord | null {
+      const row = stmtSelectRcloneMount.get(nodeId, remoteId) as RcloneMountRow | undefined;
+      return row ? mapMount(row) : null;
+    },
+
+    deleteRcloneMount(nodeId: string, remoteId: string): boolean {
+      const res = stmtDeleteRcloneMount.run(nodeId, remoteId);
+      return Number(res.changes) > 0;
+    },
+
+    recordVaultAuditEvent(event: VaultAuditEvent): void {
+      stmtInsertVaultAudit.run(
+        event.id,
+        event.timestamp,
+        event.variableName,
+        event.actor,
+        event.host,
+        event.action,
+        event.passwordSource
+      );
+    },
+
+    getVaultAuditEvents(
+      filter?: { variableName?: string; host?: string; limit?: number }
+    ): VaultAuditEvent[] {
+      const rawLimit = Number(filter?.limit ?? 200);
+      const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 1000) : 200;
+      const variableName = filter?.variableName?.trim();
+      const host = filter?.host?.trim();
+
+      let rows: any[];
+      if (variableName && host) {
+        rows = stmtSelectVaultAuditByVariableAndHost.all(variableName, host, limit) as any[];
+      } else if (variableName) {
+        rows = stmtSelectVaultAuditByVariable.all(variableName, limit) as any[];
+      } else if (host) {
+        rows = stmtSelectVaultAuditByHost.all(host, limit) as any[];
+      } else {
+        rows = stmtSelectVaultAudit.all(limit) as any[];
+      }
+      return rows.map(mapVaultAuditRow);
+    },
+
+    countVaultAuditEvents(): number {
+      const row = stmtCountVaultAudit.get() as { cnt: number } | undefined;
+      return Number(row?.cnt ?? 0);
+    },
+
+    listVaultVariables(): VaultVariable[] {
+      const rows = stmtListVaultVariables.all() as Array<{
+        name: string;
+        created_at: number;
+        updated_at: number;
+      }>;
+      return rows.map(r => ({
+        name: String(r.name),
+        createdAt: Number(r.created_at),
+        updatedAt: Number(r.updated_at),
+      }));
+    },
+
+    getVaultVariableBlock(name: string): string | null {
+      const row = stmtSelectVaultVariableBlock.get(name) as { vault_block: string } | undefined;
+      return row ? String(row.vault_block) : null;
+    },
+
+    upsertVaultVariable(name: string, vaultBlock: string): void {
+      const now = Date.now();
+      stmtUpsertVaultVariable.run(name, vaultBlock, now, now);
+    },
+
+    deleteVaultVariable(name: string): boolean {
+      const res = stmtDeleteVaultVariable.run(name);
       return Number(res.changes) > 0;
     },
 

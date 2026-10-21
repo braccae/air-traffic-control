@@ -105,11 +105,38 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
   // Group plugins by Section Title (excluding raw connection and elevation plugins)
   const groupedSections: Record<string, NodePluginItem[]> = {};
 
+  // Package manager precedence: bootc > rpmostree/ostree > traditional (dnf/rpm/pacman/apt/apk)
+  const packageOrder = ['bootc', 'rpmostree', 'ostree', 'dnf', 'rpm', 'pacman', 'apt', 'apk'];
+  let chosenPackagePlugin: NodePluginItem | null = null;
+  const nonPackagePlugins: NodePluginItem[] = [];
+
   for (const p of activePlugins) {
     if (!p.detection?.detected) continue;
     // Connection transports and elevation methods belong in Modules / Edit Node modal
     if (p.kind === 'connection' || p.kind === 'elevation') continue;
 
+    if (p.kind === 'package') {
+      if (!chosenPackagePlugin) {
+        chosenPackagePlugin = p;
+      } else {
+        const currentIdx = packageOrder.indexOf(chosenPackagePlugin.name.toLowerCase());
+        const candidateIdx = packageOrder.indexOf(p.name.toLowerCase());
+        const effectiveCurrent = currentIdx === -1 ? 999 : currentIdx;
+        const effectiveCandidate = candidateIdx === -1 ? 999 : candidateIdx;
+        if (effectiveCandidate < effectiveCurrent) {
+          chosenPackagePlugin = p;
+        }
+      }
+    } else {
+      nonPackagePlugins.push(p);
+    }
+  }
+
+  const filteredPlugins = chosenPackagePlugin
+    ? [...nonPackagePlugins, chosenPackagePlugin]
+    : nonPackagePlugins;
+
+  for (const p of filteredPlugins) {
     const kindKey = (p.section || p.kind || '').toLowerCase();
     const sectionTitle = SECTION_TITLES[kindKey] || kindKey.toUpperCase() || 'OTHER';
     if (!groupedSections[sectionTitle]) {
@@ -123,18 +150,22 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
     groupedSections[key].sort((a, b) => (a.order || 0) - (b.order || 0));
   }
 
-  // Sections order
-  const distinctSections = Object.keys(groupedSections).sort((a, b) => {
-    const aOrder = SECTION_ORDER.findIndex(k => SECTION_TITLES[k] === a);
-    const bOrder = SECTION_ORDER.findIndex(k => SECTION_TITLES[k] === b);
-    return (aOrder === -1 ? 99 : aOrder) - (bOrder === -1 ? 99 : bOrder);
-  });
+  const systemPlugins = groupedSections['SYSTEM'] || [];
+
+  // Sections order (excluding SYSTEM since it is merged into the top base SYSTEM group)
+  const distinctSections = Object.keys(groupedSections)
+    .filter(sectionTitle => sectionTitle !== 'SYSTEM')
+    .sort((a, b) => {
+      const aOrder = SECTION_ORDER.findIndex(k => SECTION_TITLES[k] === a);
+      const bOrder = SECTION_ORDER.findIndex(k => SECTION_TITLES[k] === b);
+      return (aOrder === -1 ? 99 : aOrder) - (bOrder === -1 ? 99 : bOrder);
+    });
 
   return (
     <aside className={`flex flex-col gap-2 w-full overflow-x-hidden scrollbar-thin ${className}`.trim()}>
       {/* Cockpit Tree Groupings */}
       <div className="bg-[#171a2d] rounded p-1.5 flex flex-col gap-1.5 border border-[#26293c]">
-        {/* HARDCODED BASE SYSTEM GROUP: Overview & Terminal */}
+        {/* HARDCODED BASE SYSTEM GROUP: Overview + detected SYSTEM plugins */}
         <div>
           <span className="font-mono text-[9px] uppercase tracking-wider text-[#8d909b] px-1 font-bold">
             SYSTEM
@@ -156,21 +187,28 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
               <span className="w-1.5 h-1.5 rounded-full bg-[#8cd6cb]"></span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => onSelectItem('terminal')}
-              className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-[11px] leading-tight cursor-pointer transition-colors ${
-                activeItem === 'terminal'
-                  ? 'bg-[#21263d] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff] shadow-[inset_0_0_12px_rgba(176,201,255,0.08)]'
-                  : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
-              }`}
-            >
-              <span className="flex items-center gap-1.5">
-                <span className="material-symbols-outlined text-[13px] text-[#b0c9ff]">terminal</span>
-                <span>Terminal</span>
-              </span>
-              <span className="font-mono text-[9px] text-[#8cd6cb] bg-[#121528] px-1 py-0.2 rounded border border-[#26293c]">SSH</span>
-            </button>
+            {systemPlugins.map(p => {
+              const isSelected = activeItem === p.id || activeItem === p.name;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => onSelectItem(p.id)}
+                  className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-[11px] leading-tight cursor-pointer transition-colors ${
+                    isSelected
+                      ? 'bg-[#21263d] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff] shadow-[inset_0_0_12px_rgba(176,201,255,0.08)]'
+                      : 'text-[#c3c6d2] hover:bg-[#1b1e31] hover:text-[#dfe1fa]'
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5 truncate pr-1">
+                    <span className="material-symbols-outlined text-[13px] text-[#8d909b] shrink-0">
+                      {resolvePluginIcon(p.icon)}
+                    </span>
+                    <span className="truncate">{p.label || p.name}</span>
+                  </span>
+                </button>
+              );
+            })}
           </nav>
         </div>
 
@@ -210,11 +248,6 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
                         </span>
                         <span className="truncate">{p.label || p.name}</span>
                       </span>
-                      {p.detection?.status && (
-                        <span className="font-mono text-[9px] text-[#8cd6cb] bg-[#121528] px-1 py-0.2 rounded border border-[#26293c] shrink-0">
-                          {p.detection.status}
-                        </span>
-                      )}
                     </button>
                   );
                 })}
@@ -267,27 +300,27 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
           <span className="material-symbols-outlined text-[#b0c9ff] text-[16px]">developer_board</span>
           <div className="flex flex-col min-w-0">
             <span className="font-mono text-[11px] text-[#dfe1fa] font-semibold truncate">
-              {node.specs.motherboard}
+              {node.specs?.motherboard || 'Standard Server Platform'}
             </span>
-            <span className="font-mono text-[9px] text-[#8d909b]">BIOS: {node.specs.bios}</span>
+            <span className="font-mono text-[9px] text-[#8d909b]">BIOS: {node.specs?.bios || 'UEFI'}</span>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-1 mt-0.5 bg-[#0a0d1f]/60 p-1.5 rounded font-mono text-[9px] border border-[#26293c]/50">
           <div>
             <span className="text-[#8d909b]">IPMI/BMC:</span>{' '}
-            <span className="text-[#8cd6cb]">{node.specs.ipmi}</span>
+            <span className="text-[#8cd6cb]">{node.specs?.ipmi || 'N/A'}</span>
           </div>
           <div>
             <span className="text-[#8d909b]">ECC:</span>{' '}
-            <span className="text-[#8cd6cb]">{node.specs.ecc}</span>
+            <span className="text-[#8cd6cb]">{node.specs?.ecc || 'N/A'}</span>
           </div>
           <div>
             <span className="text-[#8d909b]">SecureBoot:</span>{' '}
-            <span className="text-[#dfe1fa]">{node.specs.secureBoot}</span>
+            <span className="text-[#dfe1fa]">{node.specs?.secureBoot || 'N/A'}</span>
           </div>
           <div>
             <span className="text-[#8d909b]">IOMMU:</span>{' '}
-            <span className="text-[#8cd6cb]">{node.specs.iommu}</span>
+            <span className="text-[#8cd6cb]">{node.specs?.iommu || 'N/A'}</span>
           </div>
         </div>
       </div>

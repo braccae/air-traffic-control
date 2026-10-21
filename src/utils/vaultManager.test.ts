@@ -10,8 +10,10 @@ import {
   encryptVaultString,
   decryptVaultString,
   registerVaultRoutes,
+  getVaultExecutionEnv,
   type VaultPasswordSource,
 } from './vaultManager.ts';
+import { createHostCacheStore } from './hostCacheDb.ts';
 
 describe('Tiered Ansible Vault Credential Engine', () => {
   let tmpDir: string;
@@ -24,6 +26,7 @@ describe('Tiered Ansible Vault Credential Engine', () => {
     originalEnv = { ...process.env };
     delete process.env.ANSIBLE_VAULT_PASSWORD;
     delete process.env.ANSIBLE_VAULT_PASSWORD_FILE;
+    delete process.env.ANSIBLE_VAULT_IDENTITY_LIST;
   });
 
   afterEach(() => {
@@ -33,6 +36,27 @@ describe('Tiered Ansible Vault Credential Engine', () => {
     } catch {
       // ignore cleanup error
     }
+  });
+
+  describe('getVaultExecutionEnv', () => {
+    it('strips ANSIBLE_VAULT_PASSWORD_FILE, ANSIBLE_VAULT_IDENTITY_LIST, DEFAULT_VAULT_PASSWORD_FILE, and ANSIBLE_CONFIG', () => {
+      const mockEnv: NodeJS.ProcessEnv = {
+        PATH: '/usr/bin',
+        FOO: 'bar',
+        ANSIBLE_VAULT_PASSWORD_FILE: '/tmp/passfile',
+        ANSIBLE_VAULT_IDENTITY_LIST: 'id@/tmp/idfile',
+        DEFAULT_VAULT_PASSWORD_FILE: '/tmp/defaultpass',
+        ANSIBLE_CONFIG: '/path/to/ansible.cfg',
+      };
+      const cleaned = getVaultExecutionEnv(mockEnv);
+      assert.equal(cleaned.FOO, 'bar');
+      assert.equal(cleaned.ANSIBLE_VAULT_PASSWORD_FILE, undefined);
+      assert.equal(cleaned.ANSIBLE_VAULT_IDENTITY_LIST, undefined);
+      assert.equal(cleaned.DEFAULT_VAULT_PASSWORD_FILE, undefined);
+      assert.equal(cleaned.ANSIBLE_CONFIG, undefined);
+      assert.ok('PATH' in cleaned);
+      assert.ok('VIRTUAL_ENV' in cleaned);
+    });
   });
 
   describe('resolveVaultPasswordSource', () => {
@@ -192,6 +216,34 @@ describe('Tiered Ansible Vault Credential Engine', () => {
       assert.equal(decrypted, 'auto-secret');
     });
 
+    it('encrypts and decrypts when ANSIBLE_VAULT_PASSWORD_FILE is set to a real file without options.password', async () => {
+      fs.writeFileSync(tmpPassFile, 'tier2-file-secret\n', 'utf8');
+      process.env.ANSIBLE_VAULT_PASSWORD_FILE = tmpPassFile;
+
+      const plaintext = 'secret-from-vault-password-file';
+      const encrypted = await encryptVaultString(plaintext, 'file_var');
+      assert.ok(encrypted.includes('file_var: !vault |'));
+      assert.ok(encrypted.includes('$ANSIBLE_VAULT;1.1;AES256'));
+
+      const decrypted = await decryptVaultString(encrypted);
+      assert.equal(decrypted, plaintext);
+    });
+
+    it('encrypts and decrypts with explicit options.password when ANSIBLE_VAULT_PASSWORD_FILE and ANSIBLE_VAULT_IDENTITY_LIST are set', async () => {
+      fs.writeFileSync(tmpPassFile, 'other-file-secret\n', 'utf8');
+      process.env.ANSIBLE_VAULT_PASSWORD_FILE = tmpPassFile;
+      process.env.ANSIBLE_VAULT_IDENTITY_LIST = 'other@/tmp/dummy-identity';
+
+      const plaintext = 'explicit-secret-value';
+      const explicitPassword = 'custom-explicit-password';
+      const encrypted = await encryptVaultString(plaintext, 'explicit_var', { password: explicitPassword });
+      assert.ok(encrypted.includes('explicit_var: !vault |'));
+      assert.ok(encrypted.includes('$ANSIBLE_VAULT;1.1;AES256'));
+
+      const decrypted = await decryptVaultString(encrypted, { password: explicitPassword });
+      assert.equal(decrypted, plaintext);
+    });
+
     it('fails when decrypting with incorrect password', async () => {
       const encrypted = await encryptVaultString('my-secret', 'k', { password: 'correct-password' });
       await assert.rejects(
@@ -302,5 +354,155 @@ describe('Tiered Ansible Vault Credential Engine', () => {
       assert.equal(noPassData.success, false);
       assert.ok(noPassData.error.includes('PASSWORD_REQUIRED'));
     });
+  });
+});
+
+describe('Vault decryption audit trail', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-audit-test-'));
+  });
+
+  afterEach(() => {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup error
+    }
+  });
+
+  const listen = async (app: express.Express): Promise<{ server: http.Server; baseUrl: string }> => {
+    const server = await new Promise<http.Server>(resolve => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const addr = server.address() as { port: number };
+    return { server, baseUrl: `http://127.0.0.1:${addr.port}` };
+  };
+
+  it('writes exactly one plaintext-free row per decryption and survives a store restart', async () => {
+    const dbPath = path.join(tmpDir, 'hosts-cache.sqlite');
+    const store = createHostCacheStore(dbPath);
+
+    const app = express();
+    app.use(express.json());
+    registerVaultRoutes(app, { auditStore: store, actor: 'atc-coordinator', action: 'default-action' });
+    const { server, baseUrl } = await listen(app);
+
+    try {
+      const plaintextValue = 'super-secret-db-password-do-not-log';
+
+      // Encrypt a real entry with the real ansible-vault binary.
+      const encRes = await fetch(`${baseUrl}/api/vault/encrypt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plaintext: plaintextValue, varName: 'db_password', password: 'audit-pass' }),
+      });
+      const encData = await encRes.json();
+      assert.equal(encRes.status, 200);
+      assert.ok(encData.vaultBlock.includes('db_password: !vault |'));
+
+      // Decrypt it, naming the actor / host / action that triggered it.
+      const decRes = await fetch(`${baseUrl}/api/vault/decrypt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vaultBlock: encData.vaultBlock,
+          password: 'audit-pass',
+          varName: 'db_password',
+          host: 'db-01.leo-banjo.ts.net',
+          actor: 'mike@atc',
+          action: 'playbook: postgres-backup',
+        }),
+      });
+      const decData = await decRes.json();
+      assert.equal(decRes.status, 200);
+      assert.equal(decData.plaintext, plaintextValue);
+
+      const auditRes = await fetch(`${baseUrl}/api/vault/audit`);
+      const auditData = await auditRes.json();
+      assert.equal(auditRes.status, 200);
+      assert.equal(auditData.success, true);
+      assert.equal(auditData.total, 1);
+      const row = auditData.events[0];
+      assert.equal(row.variableName, 'db_password');
+      assert.equal(row.host, 'db-01.leo-banjo.ts.net');
+      assert.equal(row.actor, 'mike@atc');
+      assert.equal(row.action, 'playbook: postgres-backup');
+      assert.equal(row.passwordSource, 'inline');
+      assert.ok(row.timestamp > 0);
+
+      // Secret Protection Invariant: no plaintext anywhere in the audit payload.
+      const serialized = JSON.stringify(auditData);
+      assert.ok(!serialized.includes(plaintextValue));
+      assert.ok(!serialized.includes('super-secret'));
+
+      // Filtering by variable and by host.
+      const byVar = await (await fetch(`${baseUrl}/api/vault/audit?variable=db_password`)).json();
+      assert.equal(byVar.total, 1);
+      const byOtherVar = await (await fetch(`${baseUrl}/api/vault/audit?variable=other_var`)).json();
+      assert.equal(byOtherVar.total, 0);
+      const byHost = await (await fetch(`${baseUrl}/api/vault/audit?host=db-01.leo-banjo.ts.net`)).json();
+      assert.equal(byHost.total, 1);
+      const byOtherHost = await (await fetch(`${baseUrl}/api/vault/audit?host=nope`)).json();
+      assert.equal(byOtherHost.total, 0);
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+
+    store.close();
+
+    // Persistence: a fresh store over the same file still sees the row.
+    const reopened = createHostCacheStore(dbPath);
+    try {
+      assert.equal(reopened.countVaultAuditEvents(), 1);
+      const persisted = reopened.getVaultAuditEvents();
+      assert.equal(persisted.length, 1);
+      assert.equal(persisted[0].variableName, 'db_password');
+      assert.equal(persisted[0].host, 'db-01.leo-banjo.ts.net');
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it('returns newest events first and defaults metadata when the request is bare', async () => {
+    const store = createHostCacheStore(path.join(tmpDir, 'audit.sqlite'));
+    const app = express();
+    app.use(express.json());
+    registerVaultRoutes(app, { auditStore: store });
+    const { server, baseUrl } = await listen(app);
+
+    try {
+      const encRes = await fetch(`${baseUrl}/api/vault/encrypt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plaintext: 'one', varName: 'first_secret', password: 'p' }),
+      });
+      const encData = await encRes.json();
+
+      // First decryption: no metadata in the body -> name derived from the block.
+      await fetch(`${baseUrl}/api/vault/decrypt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vaultBlock: encData.vaultBlock, password: 'p' }),
+      });
+      await new Promise(r => setTimeout(r, 5));
+      await fetch(`${baseUrl}/api/vault/decrypt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vaultBlock: encData.vaultBlock, password: 'p', varName: 'second_secret', host: 'h2' }),
+      });
+
+      const data = await (await fetch(`${baseUrl}/api/vault/audit`)).json();
+      assert.equal(data.total, 2);
+      assert.equal(data.events[0].variableName, 'second_secret');
+      assert.equal(data.events[1].variableName, 'first_secret');
+      assert.equal(data.events[1].host, 'n/a');
+      assert.ok(String(data.events[1].actor).length > 0);
+      assert.equal(data.events[1].action, 'POST /api/vault/decrypt');
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      store.close();
+    }
   });
 });

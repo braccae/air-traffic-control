@@ -36,7 +36,7 @@ const mockNode: NodeItem = {
   },
 };
 
-test('CockpitSubSidebar always renders Overview and Terminal tabs', () => {
+test('CockpitSubSidebar always renders Overview tab', () => {
   const html = renderToString(
     React.createElement(CockpitSubSidebar, {
       node: mockNode,
@@ -46,7 +46,6 @@ test('CockpitSubSidebar always renders Overview and Terminal tabs', () => {
   );
 
   assert.ok(html.includes('Overview'), 'Must always include Overview tab');
-  assert.ok(html.includes('Terminal'), 'Must always include Terminal tab');
 });
 
 test('CockpitSubSidebar always pins Modules tab at the bottom', () => {
@@ -79,7 +78,7 @@ test('CockpitSubSidebar does NOT render undetected plugins or default to zfs whe
   assert.strictEqual(html.includes('Restic Snapshots'), false, 'Undetected Restic must NOT render');
 });
 
-test('CockpitSubSidebar renders detected plugins grouped dynamically by section/kind with badges', () => {
+test('CockpitSubSidebar renders detected plugins grouped dynamically by section/kind', () => {
   const mockPlugins = [
     {
       id: 'storage/zfs',
@@ -127,11 +126,89 @@ test('CockpitSubSidebar renders detected plugins grouped dynamically by section/
   assert.ok(html.includes('SHARES') || html.includes('SHARE'), 'Must display Shares section');
   assert.ok(html.includes('CONTAINERS') || html.includes('CONTAINER'), 'Must display Container section');
 
-  // Plugin labels and badges
+  // Plugin labels
   assert.ok(html.includes('ZFS Storage'), 'Must render ZFS Storage tab');
-  assert.ok(html.includes('3 pools'), 'Must render 3 pools status badge');
   assert.ok(html.includes('NFS Exports'), 'Must render NFS Exports tab');
-  assert.ok(html.includes('ACTIVE'), 'Must render ACTIVE status badge');
   assert.ok(html.includes('Podman Containers'), 'Must render Podman Containers tab');
-  assert.ok(html.includes('4 running'), 'Must render 4 running status badge');
+});
+
+test('CockpitSubSidebar merges system plugins into the top SYSTEM group and filters package managers by precedence', () => {
+  const mockPlugins = [
+    {
+      id: 'system/service',
+      kind: 'system',
+      name: 'service',
+      label: 'System Services & Power',
+      icon: 'settings_power',
+      section: 'system',
+      order: 10,
+      detection: { detected: true, status: 'ONLINE' },
+    },
+    {
+      id: 'package/dnf',
+      kind: 'package',
+      name: 'dnf',
+      label: 'DNF / RPM',
+      icon: 'package_2',
+      section: 'package',
+      order: 30,
+      detection: { detected: true, status: 'ONLINE' },
+    },
+    {
+      id: 'package/bootc',
+      kind: 'package',
+      name: 'bootc',
+      label: 'bootc (Bootable Containers)',
+      icon: 'deployed_code',
+      section: 'package',
+      order: 10,
+      detection: { detected: true, status: 'ONLINE' },
+    },
+    {
+      id: 'package/rpmostree',
+      kind: 'package',
+      name: 'rpmostree',
+      label: 'rpm-ostree (Atomic)',
+      icon: 'layers',
+      section: 'package',
+      order: 20,
+      detection: { detected: true, status: 'ONLINE' },
+    },
+  ];
+
+  const html = renderToString(
+    React.createElement(CockpitSubSidebar, {
+      node: mockNode,
+      activeItem: 'overview',
+      plugins: mockPlugins,
+      onSelectItem: () => {},
+    })
+  );
+
+  // SYSTEM header must only appear once
+  const systemHeaderMatches = html.match(/>SYSTEM<\/span>/g) || [];
+  assert.strictEqual(systemHeaderMatches.length, 1, 'Must render SYSTEM header only once');
+  assert.ok(html.includes('System Services &amp; Power'), 'Must render System Services & Power under SYSTEM');
+
+  // Only highest precedence package manager (bootc) should render
+  assert.ok(html.includes('bootc (Bootable Containers)'), 'Must render highest-precedence package manager (bootc)');
+  assert.strictEqual(html.includes('rpm-ostree (Atomic)'), false, 'Must NOT render lower-precedence rpm-ostree');
+  assert.strictEqual(html.includes('DNF / RPM'), false, 'Must NOT render lower-precedence DNF / RPM');
+
+  // Must not render status badges (e.g. ONLINE) on plugin items
+  assert.strictEqual(html.includes('>ONLINE</span>'), false, 'Must NOT render status badges on plugin items');
+});
+
+test('CockpitSubSidebar renders safely without throwing when node.specs is undefined', () => {
+  const nodeWithoutSpecs = { ...mockNode, specs: undefined as any };
+  assert.doesNotThrow(() => {
+    const html = renderToString(
+      React.createElement(CockpitSubSidebar, {
+        node: nodeWithoutSpecs,
+        activeItem: 'overview',
+        onSelectItem: () => {},
+      })
+    );
+    assert.ok(html.includes('Standard Server Platform') && html.includes('UEFI'));
+  });
 });

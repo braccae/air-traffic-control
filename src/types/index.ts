@@ -261,6 +261,114 @@ export interface AnsibleTaskStep {
   parameters: Record<string, any>;
 }
 
+/** rclone mount strategies. The chosen strategy is what actually gets installed. */
+export type RcloneMountPolicy = 'systemd-mount' | 'systemd-automount' | 'fstab' | 'script';
+
+/** A remote stored in the ATC database. Secret field values in `configJson` are encrypted at rest. */
+export interface RcloneRemoteRecord {
+  id: string;
+  name: string;
+  provider: string;
+  type: string;
+  configJson: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** An installed (or pending) remote mount on a specific client. */
+export interface RcloneMountRecord {
+  nodeId: string;
+  remoteId: string;
+  remoteName: string;
+  mountTarget: string;
+  policy: RcloneMountPolicy;
+  status: 'pending' | 'installed' | 'failed';
+  error?: string;
+  installedAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Metadata for one stored vault variable. Deliberately has no value/ciphertext
+ * field: the list API never exposes secret material (Secret Protection Invariant).
+ */
+export interface VaultVariable {
+  /** Variable name as it would appear in Ansible, e.g. `restic_password`. */
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * One audit line for a vault decryption. Records the variable NAME and metadata
+ * only — never the decrypted plaintext (see the Secret Protection Invariant).
+ */
+export interface VaultAuditEvent {
+  id: string;
+  /** Epoch milliseconds when the decryption completed. */
+  timestamp: number;
+  /** Vault variable name (e.g. `api_key`). Never the value. */
+  variableName: string;
+  /** Acting user / request context (OS user, API client label, or 'system'). */
+  actor: string;
+  /** Target host the secret was destined for, or 'n/a'. */
+  host: string;
+  /** Task / action that triggered the decryption (route or playbook step). */
+  action: string;
+  /** Which password source resolved the decryption. */
+  passwordSource: 'file' | 'env' | 'ask_password' | 'inline' | string;
+}
+
+/**
+ * A global ("datacenter-wide") settings page contributed by an addon module.
+ * Mirrors backend-go/pkg/plugin.SettingsPage plus the current persisted values.
+ */
+export type GlobalSettingsFieldType = 'string' | 'text' | 'int' | 'bool' | 'select' | 'secret';
+
+export interface GlobalSettingsFieldOption {
+  value: string;
+  label: string;
+}
+
+export interface GlobalSettingsField {
+  name: string;
+  label: string;
+  type: GlobalSettingsFieldType;
+  description?: string;
+  placeholder?: string;
+  default?: unknown;
+  required?: boolean;
+  secret?: boolean;
+  options?: GlobalSettingsFieldOption[];
+  min?: number;
+  max?: number;
+}
+
+export interface GlobalSettingsPage {
+  id: string;
+  title: string;
+  icon: string;
+  description: string;
+  order: number;
+  fields: GlobalSettingsField[];
+  values: Record<string, unknown>;
+}
+
+/**
+ * Runs an existing playbook file (ansible/playbooks/<playbook>) as a queue task
+ * instead of compiling an ephemeral playbook from `steps`. The queue runner
+ * still executes it with ANSIBLE_STDOUT_CALLBACK=json.
+ */
+export interface QueuedPlaybookRun {
+  /** File name inside ansible/playbooks, e.g. `site.yml`. */
+  playbook: string;
+  /** Inventory limit — `all` or a tag/group/host pattern. */
+  target: string;
+  checkMode?: boolean;
+  tags?: string;
+  extraVars?: string | Record<string, unknown>;
+}
+
 export interface QueuedAnsibleTask {
   id: string;
   title: string;
@@ -281,6 +389,8 @@ export interface QueuedAnsibleTask {
   category: AnsibleModuleCategory;
   primaryModule: string;
   steps: AnsibleTaskStep[];
+  /** Present when this task runs a playbook file rather than compiled steps. */
+  playbookRun?: QueuedPlaybookRun;
   secretsMasked?: Record<string, string>;
   become: boolean;
   becomeMethod?: 'run0' | 'sudo' | 'doas' | string;

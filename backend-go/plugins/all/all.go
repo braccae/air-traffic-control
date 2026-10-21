@@ -38,14 +38,19 @@ import (
 	// Backup plugin
 	_ "air-traffic-control/backend/plugins/backup/restic"
 
+	// Mount plugin
+	_ "air-traffic-control/backend/plugins/mount/rclone"
+
 	// Logs plugin
 	_ "air-traffic-control/backend/plugins/logs/journald"
 
 	// Disk & SMART plugin
 	_ "air-traffic-control/backend/plugins/disk/smart"
 
-	// Virtual machine plugin
+	// Virtual machine plugins
 	_ "air-traffic-control/backend/plugins/vm/libvirt"
+	_ "air-traffic-control/backend/plugins/vm/lxc"
+	_ "air-traffic-control/backend/plugins/vm/proxmox"
 
 	// Telemetry plugin
 	_ "air-traffic-control/backend/plugins/telemetry/glances"

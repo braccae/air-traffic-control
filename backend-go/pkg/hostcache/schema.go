@@ -81,6 +81,25 @@ CREATE TABLE IF NOT EXISTS tag_inventory_chunks (
   created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ansible_queue_tasks (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  target_node_id TEXT NOT NULL,
+  target_node_name TEXT NOT NULL,
+  target_host_route TEXT NOT NULL,
+  target_ssh_user TEXT NOT NULL,
+  target_ssh_port INTEGER NOT NULL,
+  category TEXT NOT NULL,
+  primary_module TEXT NOT NULL,
+  become INTEGER NOT NULL DEFAULT 1,
+  become_method TEXT NOT NULL DEFAULT 'run0',
+  status TEXT NOT NULL DEFAULT 'staged',
+  created_at INTEGER NOT NULL,
+  task_json TEXT NOT NULL,
+  error TEXT,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_hosts_sort ON hosts(sort_order ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_hosts_tailscale ON hosts(tailscale_host, tailscale_ip);
 CREATE INDEX IF NOT EXISTS idx_sections_host ON host_section_cache(host_id, section);
@@ -88,6 +107,7 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_updated ON host_telemetry_cache(updated
 CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_folders_name ON inventory_folders(name ASC);
 CREATE INDEX IF NOT EXISTS idx_chunks_created ON tag_inventory_chunks(created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_ansible_queue_status ON ansible_queue_tasks(status, created_at ASC);
 `
 
 // schemaEvolve mirrors the TS ALTER TABLE block: later versions of the cache

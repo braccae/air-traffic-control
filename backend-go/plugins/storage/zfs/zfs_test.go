@@ -64,6 +64,21 @@ func TestZFSPlugin_Probe(t *testing.T) {
 	if !strings.Contains(det.Status, "2 pool") {
 		t.Errorf("unexpected status: %s", det.Status)
 	}
+
+	// Test no pools found
+	emptyRunner := &mockRunner{
+		responses: map[string]string{
+			"command -v zfs": "zfs\nzpool",
+			"zpool list -H":  "no pools available",
+		},
+	}
+	emptyDet, err := p.Probe(context.Background(), emptyRunner, plugin.HostFacts{OSFamily: "linux"})
+	if err != nil {
+		t.Fatalf("probe error: %v", err)
+	}
+	if emptyDet.Detected {
+		t.Errorf("expected detected=false when no pools are available")
+	}
 }
 
 func TestZFSPlugin_Read(t *testing.T) {

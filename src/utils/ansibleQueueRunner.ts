@@ -1,9 +1,18 @@
+/**
+ * OWNERSHIP NOTE (Ansible mutation queue migration)
+ *
+ * The Go engine `backend-go/pkg/ansqueue` is now authoritative for queue
+ * storage, execution and checkpoint halting. This module remains as the
+ * Express fallback until the coordinator is retired (Phase 3): it is kept
+ * behaviourally unchanged and is not the source of truth for new work.
+ */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { QueuedAnsibleTask } from '../types/index.ts';
 import { compileOnTheFlyPlaybook, generateTaskInventory } from './ansibleQueueCompiler.ts';
+import { beginConnection } from './connectionRegistry.ts';
 
 export interface QueueExecutionResult {
   success: boolean;
@@ -20,6 +29,11 @@ export interface ExecuteQueueOptions {
   env?: Record<string, string>;
   cwd?: string;
   taskId?: string;
+  /**
+   * Ephemeral YAML vars file (ansible-vault ciphertext) built from the vault
+   * store. Passed as `--extra-vars @path`; the caller owns its cleanup.
+   */
+  vaultVarsFile?: string;
   execCommand?: (
     command: string,
     args: string[],
@@ -374,6 +388,10 @@ export async function executeQueueTaskOneByOne(
     }
     args.push(ephemeralFile);
 
+    if (options?.vaultVarsFile) {
+      args.push('--extra-vars', `@${options.vaultVarsFile}`);
+    }
+
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       ANSIBLE_STDOUT_CALLBACK: 'json',
@@ -397,32 +415,42 @@ export async function executeQueueTaskOneByOne(
     let stderr = '';
     let exitCode = 0;
 
-    if (options?.execCommand) {
-      const res = await options.execCommand(ansibleBin, args, { cwd, env });
-      stdout = res.stdout;
-      stderr = res.stderr;
-      exitCode = res.exitCode;
-    } else {
-      const procResult = await new Promise<{ stdout: string; stderr: string; exitCode: number }>(resolve => {
-        const proc = spawn(ansibleBin, args, { cwd, env });
-        let out = '';
-        let err = '';
-        proc.stdout?.on('data', chunk => {
-          out += chunk.toString();
+    // WinRM tasks hold a real WinRM session for the lifetime of the playbook run.
+    const releaseWinrm =
+      task.connection?.plugin === 'connection/winrm'
+        ? beginConnection('winrm', task.targetNodeName || task.targetNodeId || task.targetHostRoute || 'winrm')
+        : null;
+
+    try {
+      if (options?.execCommand) {
+        const res = await options.execCommand(ansibleBin, args, { cwd, env });
+        stdout = res.stdout;
+        stderr = res.stderr;
+        exitCode = res.exitCode;
+      } else {
+        const procResult = await new Promise<{ stdout: string; stderr: string; exitCode: number }>(resolve => {
+          const proc = spawn(ansibleBin, args, { cwd, env });
+          let out = '';
+          let err = '';
+          proc.stdout?.on('data', chunk => {
+            out += chunk.toString();
+          });
+          proc.stderr?.on('data', chunk => {
+            err += chunk.toString();
+          });
+          proc.on('error', spawnErr => {
+            resolve({ stdout: out, stderr: spawnErr.message || String(spawnErr), exitCode: 1 });
+          });
+          proc.on('close', code => {
+            resolve({ stdout: out, stderr: err, exitCode: code ?? 0 });
+          });
         });
-        proc.stderr?.on('data', chunk => {
-          err += chunk.toString();
-        });
-        proc.on('error', spawnErr => {
-          resolve({ stdout: out, stderr: spawnErr.message || String(spawnErr), exitCode: 1 });
-        });
-        proc.on('close', code => {
-          resolve({ stdout: out, stderr: err, exitCode: code ?? 0 });
-        });
-      });
-      stdout = procResult.stdout;
-      stderr = procResult.stderr;
-      exitCode = procResult.exitCode;
+        stdout = procResult.stdout;
+        stderr = procResult.stderr;
+        exitCode = procResult.exitCode;
+      }
+    } finally {
+      releaseWinrm?.();
     }
 
     let jsonOutput: any = null;

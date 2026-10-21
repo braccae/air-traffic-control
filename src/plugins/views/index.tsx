@@ -19,7 +19,10 @@ import { FirewallView } from '../../components/FirewallView.tsx';
 import { TailscaleExplorerView } from '../../components/TailscaleExplorerView.tsx';
 import { TailscaleMeshCard } from '../../components/TailscaleMeshCard.tsx';
 import { VirtualMachinesKVM } from '../../components/VirtualMachinesKVM.tsx';
+import { LxcContainers } from '../../components/LxcContainers.tsx';
+import { ProxmoxView } from '../../components/ProxmoxView.tsx';
 import { ResticBackupPolicy } from '../../components/ResticBackupPolicy.tsx';
+import { RcloneRemotesView } from '../../components/RcloneRemotesView.tsx';
 import { SystemHealthTelemetry } from '../../components/SystemHealthTelemetry.tsx';
 import { SystemServicesView } from '../../components/SystemServicesView.tsx';
 import { PackageUpdatesView } from '../../components/PackageUpdatesView.tsx';
@@ -349,6 +352,14 @@ const VirtualMachinesKVMAdapter: React.FC<PluginViewProps> = ({ node, onOpenExec
   />
 );
 
+const LxcContainersAdapter: React.FC<PluginViewProps> = ({ node }) => (
+  <LxcContainers node={node} />
+);
+
+const ProxmoxViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
+  <ProxmoxView node={node} pluginId="vm/proxmox" />
+);
+
 const ResticBackupPolicyAdapter: React.FC<PluginViewProps> = ({ node }) => (
   <ResticBackupPolicy
     nodeName={node.name}
@@ -357,6 +368,10 @@ const ResticBackupPolicyAdapter: React.FC<PluginViewProps> = ({ node }) => (
     onBrowseFiles={() => {}}
     onSnapshot={() => {}}
   />
+);
+
+const RcloneRemotesViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
+  <RcloneRemotesView node={node} />
 );
 
 const SystemHealthTelemetryAdapter: React.FC<PluginViewProps> = ({ telemetry }) => {
@@ -423,12 +438,18 @@ export const PLUGIN_VIEW_REGISTRY: Record<string, PluginViewComponent> = {
   'firewall': FirewallViewAdapter,
 
   // VMs
+  'vm/proxmox': ProxmoxViewAdapter,
   'vm/libvirt': VirtualMachinesKVMAdapter,
+  'vm/lxc': LxcContainersAdapter,
   'vm': VirtualMachinesKVMAdapter,
 
   // Backups
   'backup/restic': ResticBackupPolicyAdapter,
   'backup': ResticBackupPolicyAdapter,
+
+  // Remote storage mounts
+  'mount/rclone': RcloneRemotesViewAdapter,
+  'mount': RcloneRemotesViewAdapter,
 
   // Telemetry
   'telemetry/glances': SystemHealthTelemetryAdapter,
@@ -461,6 +482,7 @@ export {
   TailscaleExplorerViewAdapter as TailscaleExplorerView,
   TailscaleMeshCardAdapter as TailscaleMeshCard,
   VirtualMachinesKVMAdapter as VirtualMachinesKVM,
+  LxcContainersAdapter as LxcContainers,
   ResticBackupPolicyAdapter as ResticBackupPolicy,
   SystemHealthTelemetryAdapter as SystemHealthTelemetry,
   SystemServicesViewAdapter as SystemServicesView,

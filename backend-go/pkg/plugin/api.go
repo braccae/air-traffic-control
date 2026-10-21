@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -192,6 +193,8 @@ type sqliteNodeRecord struct {
 	TailscaleHost   string            `json:"tailscaleHost"`
 	NodeType        string            `json:"nodeType"`
 	PrivilegeMethod string            `json:"privilegeMethod"`
+	APIPort         int               `json:"apiPort"`
+	APIUser         string            `json:"apiUser"`
 	PluginOverrides map[string]string `json:"pluginOverrides"`
 }
 
@@ -276,6 +279,13 @@ func (r *SQLiteNodeResolver) ResolveNode(nodeID string) (HostFacts, bool, error)
 	}
 	if parsed.Port > 0 {
 		overrides["port"] = fmt.Sprintf("%d", parsed.Port)
+	}
+	// Surface Proxmox/API connection hints (used by the vm/proxmox plugin).
+	if parsed.APIPort > 0 {
+		overrides["api_port"] = fmt.Sprintf("%d", parsed.APIPort)
+	}
+	if parsed.APIUser != "" {
+		overrides["api_user"] = parsed.APIUser
 	}
 
 	facts := HostFacts{
@@ -379,6 +389,7 @@ type API struct {
 	nodeResolver   NodeResolver
 	runnerResolver RunnerResolver
 	cache          *ProbeCache
+	settingsStore  *SettingsStore
 }
 
 // APIOptions holds dependencies for initializing API
@@ -387,10 +398,13 @@ type APIOptions struct {
 	NodeResolver   NodeResolver
 	RunnerResolver RunnerResolver
 	Cache          *ProbeCache
+	// SettingsStore backs the global settings pages endpoint. When nil, the
+	// store is auto-wired against hosts-cache.sqlite.
+	SettingsStore *SettingsStore
 	// DBPath optionally overrides the hosts-cache.sqlite location used to
-	// auto-wire the default SQLite-backed NodeResolver. When empty, ATC_DB_PATH
-	// is consulted, then the path is resolved relative to the current working
-	// directory by walking upward.
+	// auto-wire the default SQLite-backed NodeResolver and settings store. When
+	// empty, ATC_DB_PATH is consulted, then the path is resolved relative to the
+	// current working directory by walking upward.
 	DBPath string
 }
 
@@ -424,11 +438,24 @@ func NewAPI(opts APIOptions) *API {
 		cache = NewProbeCache()
 	}
 
+	settingsStore := opts.SettingsStore
+	if settingsStore == nil {
+		if st, err := NewSettingsStore(ResolveDBPath(opts.DBPath)); err == nil {
+			settingsStore = st
+		} else {
+			log.Printf("plugin: settings store unavailable (%v); global settings endpoints disabled", err)
+		}
+	}
+	// Publish the store process-wide so resident plugins can read their own
+	// persisted global settings during Read/Compile.
+	SetGlobalSettingsStore(settingsStore)
+
 	return &API{
 		registry:       reg,
 		nodeResolver:   nodeRes,
 		runnerResolver: runnerRes,
 		cache:          cache,
+		settingsStore:  settingsStore,
 	}
 }
 
@@ -436,6 +463,18 @@ func NewAPI(opts APIOptions) *API {
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/plugins", a.handleListPlugins)
 	mux.HandleFunc("/api/nodes/", a.handleNodeRoutes)
+	mux.HandleFunc("/api/settings/pages", a.handleSettingsPages)
+	mux.HandleFunc("/api/settings/pages/", a.handleSettingsPageRoutes)
+}
+
+// HandleListPlugins implements GET /api/plugins
+func (a *API) HandleListPlugins(w http.ResponseWriter, r *http.Request) {
+	a.handleListPlugins(w, r)
+}
+
+// NodeRoutesHandler returns an http.Handler that handles /api/nodes/ plugin routes.
+func (a *API) NodeRoutesHandler() http.Handler {
+	return http.HandlerFunc(a.handleNodeRoutes)
 }
 
 // handleListPlugins implements GET /api/plugins
@@ -842,4 +881,252 @@ func (a *API) handlePluginAction(w http.ResponseWriter, r *http.Request, nodeID 
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(task)
+}
+
+// -------------------------------------------------------------
+// Global (datacenter-wide) settings pages contributed by addon modules
+// -------------------------------------------------------------
+
+// GlobalSettingsPageView is a settings page schema paired with the current
+// persisted values, as returned by GET /api/settings/pages[/:id].
+type GlobalSettingsPageView struct {
+	SettingsPage
+	Values map[string]any `json:"values"`
+}
+
+// SettingsValuesBody is the request payload for PUT /api/settings/pages/:id.
+type SettingsValuesBody struct {
+	Values map[string]any `json:"values"`
+}
+
+// handleSettingsPages implements GET /api/settings/pages: it lists every global
+// settings page contributed by an addon module, each with its current values.
+func (a *API) handleSettingsPages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	pages := a.registry.ListSettingsPages()
+	views := make([]GlobalSettingsPageView, 0, len(pages))
+	for _, page := range pages {
+		view, err := a.settingsView(page)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to load settings for %s: %v", page.ID, err), http.StatusInternalServerError)
+			return
+		}
+		views = append(views, view)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(views)
+}
+
+// handleSettingsPageRoutes implements GET and PUT on /api/settings/pages/:id.
+// The id may itself contain a slash (for IDs of the form "<kind>/<name>").
+func (a *API) handleSettingsPageRoutes(w http.ResponseWriter, r *http.Request) {
+	pageID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/settings/pages/"), "/")
+	if pageID == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	provider, ok := a.registry.GetSettingsPage(pageID)
+	if !ok {
+		http.Error(w, fmt.Sprintf("settings page %q not found", pageID), http.StatusNotFound)
+		return
+	}
+	page := provider.SettingsPage()
+
+	switch r.Method {
+	case http.MethodGet:
+		view, err := a.settingsView(page)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to load settings for %s: %v", pageID, err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(view)
+
+	case http.MethodPut:
+		if a.settingsStore == nil {
+			http.Error(w, "settings store unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		var body SettingsValuesBody
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+				return
+			}
+		}
+		if body.Values == nil {
+			body.Values = map[string]any{}
+		}
+		coerced, err := coerceSettingsValues(page, body.Values)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := a.settingsStore.Save(pageID, coerced); err != nil {
+			http.Error(w, fmt.Sprintf("failed to persist settings for %s: %v", pageID, err), http.StatusInternalServerError)
+			return
+		}
+		view, err := a.settingsView(page)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to reload settings for %s: %v", pageID, err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(view)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// settingsView merges persisted values over the schema defaults for a page.
+func (a *API) settingsView(page SettingsPage) (GlobalSettingsPageView, error) {
+	stored := map[string]any{}
+	if a.settingsStore != nil {
+		loaded, err := a.settingsStore.Load(page.ID)
+		if err != nil {
+			return GlobalSettingsPageView{}, err
+		}
+		stored = loaded
+	}
+
+	values := make(map[string]any, len(page.Fields))
+	for _, f := range page.Fields {
+		if IsSecretField(f) {
+			// Secret Protection Invariant: a write-only secret never leaves the
+			// process in plaintext. Clients receive only the mask, which they
+			// echo back unchanged when they have not replaced the value.
+			if v, ok := stored[f.Name]; ok {
+				if s, isString := v.(string); isString && strings.TrimSpace(s) != "" {
+					values[f.Name] = MaskedSecretValue(f.Name)
+					continue
+				}
+			}
+			values[f.Name] = ""
+			continue
+		}
+		if v, ok := stored[f.Name]; ok {
+			values[f.Name] = v
+			continue
+		}
+		if f.Default != nil {
+			values[f.Name] = f.Default
+			continue
+		}
+		values[f.Name] = zeroSettingValue(f.Type)
+	}
+
+	return GlobalSettingsPageView{SettingsPage: page, Values: values}, nil
+}
+
+func zeroSettingValue(t SettingsFieldType) any {
+	switch t {
+	case SettingsFieldInt:
+		return 0
+	case SettingsFieldBool:
+		return false
+	default:
+		return ""
+	}
+}
+
+// coerceSettingsValues validates an inbound values map against the page schema
+// and returns the strongly typed, ready-to-persist values.
+func coerceSettingsValues(page SettingsPage, input map[string]any) (map[string]any, error) {
+	known := make(map[string]SettingsField, len(page.Fields))
+	for _, f := range page.Fields {
+		known[f.Name] = f
+	}
+	for k := range input {
+		if _, ok := known[k]; !ok {
+			return nil, fmt.Errorf("unknown settings field %q for page %s", k, page.ID)
+		}
+	}
+
+	out := make(map[string]any, len(page.Fields))
+	for _, f := range page.Fields {
+		raw, present := input[f.Name]
+		if IsSecretField(f) {
+			// A secret field is write-only. An omitted, empty, or mask value
+			// means "leave the stored secret alone"; only real new material is
+			// persisted, so re-saving an unrelated field can never blank or
+			// overwrite the secret with its own mask.
+			if !present || raw == nil {
+				continue
+			}
+			s, isString := raw.(string)
+			if !isString || strings.TrimSpace(s) == "" || IsMaskedSecretValue(s) {
+				continue
+			}
+			out[f.Name] = strings.TrimSpace(s)
+			continue
+		}
+		if !present || raw == nil || raw == "" {
+			if f.Required {
+				return nil, fmt.Errorf("missing required settings field %q", f.Name)
+			}
+			continue
+		}
+		v, err := coerceSettingField(f, raw)
+		if err != nil {
+			return nil, err
+		}
+		out[f.Name] = v
+	}
+	return out, nil
+}
+
+func coerceSettingField(f SettingsField, raw any) (any, error) {
+	switch f.Type {
+	case SettingsFieldInt:
+		switch n := raw.(type) {
+		case float64:
+			return int(n), nil
+		case int:
+			return n, nil
+		case string:
+			parsed, err := strconv.Atoi(strings.TrimSpace(n))
+			if err != nil {
+				return nil, fmt.Errorf("settings field %q expects an integer", f.Name)
+			}
+			return parsed, nil
+		default:
+			return nil, fmt.Errorf("settings field %q expects an integer", f.Name)
+		}
+
+	case SettingsFieldBool:
+		switch b := raw.(type) {
+		case bool:
+			return b, nil
+		case string:
+			parsed, err := strconv.ParseBool(strings.TrimSpace(b))
+			if err != nil {
+				return nil, fmt.Errorf("settings field %q expects a boolean", f.Name)
+			}
+			return parsed, nil
+		default:
+			return nil, fmt.Errorf("settings field %q expects a boolean", f.Name)
+		}
+
+	case SettingsFieldSelect:
+		s := fmt.Sprint(raw)
+		for _, opt := range f.Options {
+			if opt.Value == s {
+				return s, nil
+			}
+		}
+		return nil, fmt.Errorf("settings field %q value %q is not an allowed option", f.Name, s)
+
+	default: // string, text, secret
+		if _, ok := raw.(string); !ok {
+			return nil, fmt.Errorf("settings field %q expects a string", f.Name)
+		}
+		return raw.(string), nil
+	}
 }

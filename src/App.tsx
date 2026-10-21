@@ -39,12 +39,17 @@ import { SearchModal } from './components/modals/SearchModal.tsx';
 import { GroupVarsModal } from './components/modals/GroupVarsModal.tsx';
 import { ClientSettingsModal } from './components/modals/ClientSettingsModal.tsx';
 import { DatacenterGlobalView } from './components/DatacenterGlobalView.tsx';
+import { DatacenterSettingsView } from './components/DatacenterSettingsView.tsx';
 import {
   updateNodeSettings,
   getSubSidebarWrapperClasses,
   getWorkspaceWrapperClasses,
+  DEFAULT_DATACENTER_ROUTE,
+  formatDatacenterRoute,
+  parseDatacenterRoute,
   type SidebarViewMode,
   type DatacenterSection,
+  type DatacenterRoute,
   type ConsoleDrawerTab,
 } from './utils/navigationViewModel.ts';
 import {
@@ -426,8 +431,63 @@ export default function App() {
   const [activeTopTab, setActiveTopTab] = useState('summary');
   const [activeOpTab, setActiveOpTab] = useState('overview');
   const [activeCockpitItem, setActiveCockpitItem] = useState('overview');
-  const [selectedViewMode, setSelectedViewMode] = useState<SidebarViewMode>('nodes');
-  const [datacenterSection, setDatacenterSection] = useState<DatacenterSection>('overview');
+  // Deep-linkable datacenter routes (#/datacenter/<section> and
+  // #/datacenter/settings/<category>/<setting>) — the hash is the source of
+  // truth on load and on back/forward navigation.
+  const [selectedViewMode, setSelectedViewMode] = useState<SidebarViewMode>(() =>
+    parseDatacenterRoute(typeof window !== 'undefined' ? window.location.hash : '') ? 'datacenter' : 'nodes'
+  );
+  const [datacenterRoute, setDatacenterRoute] = useState<DatacenterRoute>(
+    () => parseDatacenterRoute(typeof window !== 'undefined' ? window.location.hash : '') ?? DEFAULT_DATACENTER_ROUTE
+  );
+  const datacenterSection: DatacenterSection =
+    datacenterRoute.kind === 'section' ? datacenterRoute.section : 'overview';
+  const activeDatacenterSetting = datacenterRoute.kind === 'setting' ? datacenterRoute.setting : null;
+
+  const writeDatacenterHash = (route: DatacenterRoute | null) => {
+    if (typeof window === 'undefined') return;
+    const nextHash = route ? formatDatacenterRoute(route) : '';
+    const current = window.location.hash;
+    if (route) {
+      if (current !== nextHash) window.history.pushState(null, '', nextHash);
+    } else if (current) {
+      window.history.pushState(null, '', window.location.pathname + window.location.search);
+    }
+  };
+
+  const navigateDatacenterRoute = (route: DatacenterRoute) => {
+    setDatacenterRoute(route);
+    setSelectedViewMode('datacenter');
+    writeDatacenterHash(route);
+  };
+
+  const handleSelectViewMode = (mode: SidebarViewMode) => {
+    setSelectedViewMode(mode);
+    if (mode === 'datacenter') {
+      setDatacenterRoute(DEFAULT_DATACENTER_ROUTE);
+      writeDatacenterHash(DEFAULT_DATACENTER_ROUTE);
+    } else {
+      writeDatacenterHash(null);
+    }
+  };
+
+  useEffect(() => {
+    const syncRouteFromHash = () => {
+      const route = parseDatacenterRoute(window.location.hash);
+      if (route) {
+        setDatacenterRoute(route);
+        setSelectedViewMode('datacenter');
+      } else {
+        setSelectedViewMode('nodes');
+      }
+    };
+    window.addEventListener('hashchange', syncRouteFromHash);
+    window.addEventListener('popstate', syncRouteFromHash);
+    return () => {
+      window.removeEventListener('hashchange', syncRouteFromHash);
+      window.removeEventListener('popstate', syncRouteFromHash);
+    };
+  }, []);
 
   const [telemetry, setTelemetry] = useState<TelemetryData>(initialTelemetry);
   const [tasks, setTasks] = useState<GlobalTaskItem[]>(initialTasks);
@@ -1317,14 +1377,19 @@ export default function App() {
         selectedNodeId={selectedNode.id}
         onSelectNode={handleSelectNode}
         onEditNode={node => setEditNodeTarget(node)}
+        onOpenTerminal={node => handleOpenTerminal(node.id)}
+        onOpenLogs={node => handleOpenLogs(node.tailscaleHost || node.ip, node.sshUser)}
+        onDeleteNode={handleDeleteNode}
         selectedHostGroup={selectedHostGroup}
         onSelectHostGroup={setSelectedHostGroup}
         isOpenMobile={mobileSidebarOpen}
         onCloseMobile={() => setMobileSidebarOpen(false)}
         viewMode={selectedViewMode}
-        onSelectViewMode={setSelectedViewMode}
+        onSelectViewMode={handleSelectViewMode}
         selectedDatacenterSection={datacenterSection}
-        onSelectDatacenterSection={setDatacenterSection}
+        onSelectDatacenterSection={section => navigateDatacenterRoute({ kind: 'section', section })}
+        selectedDatacenterSetting={activeDatacenterSetting}
+        onSelectDatacenterSetting={setting => navigateDatacenterRoute({ kind: 'setting', setting })}
         chunks={chunks}
         folders={folders}
         onCreateFolder={handleCreateFolder}
@@ -1337,6 +1402,9 @@ export default function App() {
           highContrast ? 'bg-[#080a16]' : 'bg-[#0f1224]'
         }`}>
           {selectedViewMode === 'datacenter' ? (
+            activeDatacenterSetting ? (
+              <DatacenterSettingsView page={activeDatacenterSetting} />
+            ) : (
             <DatacenterGlobalView
               datacenterName={selectedNode?.datacenter || 'leo-banjo.ts.net'}
               nodes={nodesList}
@@ -1355,6 +1423,7 @@ export default function App() {
               }}
               onRunPlaybookQuick={(playbook, target) => handleRunPlaybook(playbook, target || 'tag:host')}
             />
+            )
           ) : (
             <div className="flex flex-col w-full">
             {/* Secondary Context Bar & System Breadcrumb */}
@@ -1369,38 +1438,6 @@ export default function App() {
                 onPowerOff={() => setRebootModalOpen(true)}
                 onEditNode={() => setEditNodeTarget(selectedNode)}
               />
-
-              <div className="flex items-center justify-between border-t border-[#26293c] px-3 py-1.5 bg-[#121528] text-xs font-mono">
-                <div className="flex items-center gap-2 text-[#dfe1fa]">
-                  <span className="material-symbols-outlined text-[#8cd6cb] text-[16px]">tune</span>
-                  <span className="font-bold text-[#b0c9ff]">ACTIVE COCKPIT SECTION:</span>
-                  <span className="px-2 py-0.5 rounded bg-[#26293c] text-[#8cd6cb] font-bold border border-[#8cd6cb]/30 uppercase tracking-wider text-[11px]">
-                    {activeCockpitItem}
-                  </span>
-                </div>
-
-                {/* UX Controls: High Contrast & Sidebar Resizing */}
-                <div className="flex items-center gap-1.5 font-mono text-[10px] text-[#8d909b] shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setHighContrast(!highContrast)}
-                    className="px-2 py-0.5 rounded bg-[#1f2238] hover:bg-[#2c304d] text-[#b0c9ff] cursor-pointer border border-[#3b405e]"
-                    title="Toggle high contrast UI"
-                  >
-                    Contrast: {highContrast ? 'HIGH' : 'STANDARD'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSubSidebarWidth(w => (w === 'normal' ? 'wide' : w === 'wide' ? 'compact' : 'normal'));
-                    }}
-                    className="px-2 py-0.5 rounded bg-[#1f2238] hover:bg-[#2c304d] text-[#8cd6cb] cursor-pointer border border-[#3b405e]"
-                    title="Resize Sub-sidebar panel"
-                  >
-                    Sidebar: {subSidebarWidth.toUpperCase()}
-                  </button>
-                </div>
-              </div>
             </div>
 
             {/* Cockpit Nested Split Layout: Sub-Sidebar + Main Control Workspace */}
@@ -1961,6 +1998,8 @@ export default function App() {
         onSelectAccentColor={setAccentColor}
         highContrast={highContrast}
         onToggleHighContrast={() => setHighContrast(prev => !prev)}
+        subSidebarWidth={subSidebarWidth}
+        onSelectSubSidebarWidth={setSubSidebarWidth}
         reducedMotion={reducedMotion}
         onToggleReducedMotion={() => setReducedMotion(prev => !prev)}
       />
