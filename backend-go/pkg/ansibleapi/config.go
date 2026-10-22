@@ -81,8 +81,12 @@ func parseStdoutCallback(val string) string {
 func parseBecomeMethod(val string) string {
 	v := strings.ToLower(strings.TrimSpace(val))
 	switch v {
-	case "run0", "sudo", "doas":
-		return v
+	case "run0", "community.general.run0":
+		return "run0"
+	case "sudo", "ansible.builtin.sudo":
+		return "sudo"
+	case "doas", "community.general.doas":
+		return "doas"
 	default:
 		return "run0"
 	}

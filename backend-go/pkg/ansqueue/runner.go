@@ -253,7 +253,16 @@ func ExecuteTaskOneByOne(ctx context.Context, task Task, opts Options) (Executio
 	env := buildEnv(workdir, opts)
 	ansibleBin := opts.AnsibleBinary
 	if ansibleBin == "" {
-		ansibleBin = "ansible-playbook"
+		venvDir := os.Getenv("ANSIBLE_VENV_PATH")
+		if venvDir == "" {
+			venvDir = filepath.Join(workdir, "data", "ansible-venv")
+		}
+		candidate := filepath.Join(venvDir, "bin", "ansible-playbook")
+		if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+			ansibleBin = candidate
+		} else {
+			ansibleBin = "ansible-playbook"
+		}
 	}
 
 	timeout := opts.Timeout

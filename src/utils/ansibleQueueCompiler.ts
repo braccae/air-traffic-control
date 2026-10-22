@@ -378,7 +378,8 @@ export function generateTaskInventory(task: QueuedAnsibleTask): string {
     }
   }
 
-  const becomeMethod = conn.becomeMethod || task.becomeMethod;
+	const qualifyBecome = (m?: string) => (m === 'run0' ? 'community.general.run0' : m);
+  const becomeMethod = qualifyBecome(conn.becomeMethod || task.becomeMethod);
   if (becomeMethod) {
     hostvars.ansible_become_method = becomeMethod;
   }
@@ -414,7 +415,8 @@ export function compileOnTheFlyPlaybook(task: QueuedAnsibleTask): string {
   const host = conn.host || task.targetHostRoute || '127.0.0.1';
   const user = conn.user || task.targetSshUser || 'core';
   const port = conn.port || task.targetSshPort || 22;
-  const becomeMethod = conn.becomeMethod || task.becomeMethod || 'run0';
+  const rawBecomeMethod = conn.becomeMethod || task.becomeMethod || 'run0';
+  const becomeMethod = rawBecomeMethod === 'run0' ? 'community.general.run0' : rawBecomeMethod;
 
   const lines: string[] = [
     '---',

@@ -97,7 +97,10 @@ func (a *API) Register(mux *http.ServeMux) {
 
 	// 3. Inventory & Galaxy
 	mux.HandleFunc("/api/ansible/inventory", a.handleAnsibleInventory)
+	mux.HandleFunc("/api/ansible/collections", a.handleGalaxyCollections)
+	mux.HandleFunc("/api/ansible/collections/", a.handleGalaxyCollectionsSubtree)
 	mux.HandleFunc("/api/ansible/collections/install", a.handleGalaxyInstall)
+	mux.HandleFunc("/api/ansible/collections/remove", a.handleGalaxyRemove)
 
 	// 4. Module specs
 	mux.HandleFunc("/api/ansible/modules", a.handleAnsibleModules)
@@ -349,11 +352,125 @@ func (a *API) handleGalaxyInstall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	items, _ := ListGalaxyCollections(a.repoRoot)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"success":    true,
-		"collection": req.Collection,
-		"message":    fmt.Sprintf("Collection %s installed successfully", req.Collection),
-		"output":     out,
+		"success":     true,
+		"collection":  req.Collection,
+		"message":     fmt.Sprintf("Collection %s installed successfully", req.Collection),
+		"output":      out,
+		"collections": items,
+	})
+}
+
+// GET & DELETE /api/ansible/collections
+func (a *API) handleGalaxyCollections(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		items, err := ListGalaxyCollections(a.repoRoot)
+		if err != nil && len(items) == 0 {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"success":     true,
+				"collections": []GalaxyCollectionItem{},
+				"warning":     err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success":     true,
+			"collections": items,
+		})
+	case http.MethodDelete:
+		a.handleGalaxyRemove(w, r)
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+	}
+}
+
+// DELETE /api/ansible/collections/:name
+func (a *API) handleGalaxyCollectionsSubtree(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/api/ansible/collections/")
+	if trimmed == "install" {
+		a.handleGalaxyInstall(w, r)
+		return
+	}
+	if trimmed == "remove" {
+		a.handleGalaxyRemove(w, r)
+		return
+	}
+	if r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+		return
+	}
+	a.removeCollectionByName(w, strings.TrimSpace(trimmed))
+}
+
+// POST /api/ansible/collections/remove
+func (a *API) handleGalaxyRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+		return
+	}
+	var req struct {
+		Collection string `json:"collection"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Collection) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "Invalid collection name. Format must be <namespace>.<collection> (e.g. community.general)",
+		})
+		return
+	}
+	a.removeCollectionByName(w, strings.TrimSpace(req.Collection))
+}
+
+func (a *API) removeCollectionByName(w http.ResponseWriter, collection string) {
+	if !CollectionNameRegex.MatchString(collection) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "Invalid collection name. Format must be <namespace>.<collection> (e.g. community.general)",
+		})
+		return
+	}
+	out, err := RemoveGalaxyCollection(a.repoRoot, collection)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "not installed") {
+			status = http.StatusNotFound
+		} else if strings.Contains(err.Error(), "cannot remove") {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]any{
+			"success":    false,
+			"collection": collection,
+			"error":      err.Error(),
+		})
+		return
+	}
+	if a.store != nil {
+		t := hostcache.Task{
+			ID:          fmt.Sprintf("task-galaxy-rm-%d", time.Now().UnixMilli()),
+			StartTime:   time.Now().Format("2006-01-02 15:04:05"),
+			NodeTarget:  "localhost",
+			User:        "core@ansible",
+			Description: fmt.Sprintf("Remove Ansible Galaxy collection %s", collection),
+			Progress:    100,
+			ProgressEta: "Removed",
+			Status:      "OK",
+			Category:    "ansible",
+			UpdatedAt:   time.Now().UnixMilli(),
+		}
+		_ = a.store.SaveTask(t)
+		if a.broadcast != nil {
+			a.broadcast(map[string]any{"type": "task_started", "task": t})
+		}
+	}
+	items, _ := ListGalaxyCollections(a.repoRoot)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":     true,
+		"collection":  collection,
+		"message":     fmt.Sprintf("Collection %s removed successfully", collection),
+		"output":      out,
+		"collections": items,
 	})
 }
 
