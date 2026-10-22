@@ -17,6 +17,21 @@ import (
 	"tailscale.com/tsnet"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Dialer                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func resolveAgentSocketPath() string {
@@ -75,60 +90,60 @@ const (
 	FieldEphemeral  = "ephemeral"
 )
 
+// CategorizedSettingsPage implements newapi.CategorizedSettingsProvider so ATC's
+// own Tailscale node settings render in the categorized Datacenter Settings
+// sidebar using settingsframework.NewPageBuilder.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	return settingsframework.NewPageBuilder(SettingsPageID, "ATC Tailscale").
+		WithIcon("hub").
+		WithCategory(string(p.Meta().Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(15).
+		WithDescription("ATC's own Tailscale node (embedded tsnet) — the identity ATC uses to reach the mesh. " +
+			"The auth key is write-only and masked in every API response.").
+		SecretField(
+			FieldAuthKey,
+			"Tailscale Auth Key",
+			settingsframework.WithPlaceholder("tskey-auth-..."),
+			settingsframework.WithDescription("Auth key used to register ATC's own node. Saving a new key re-registers ATC: "+
+				"the previous tsnet state is discarded so the new key is the one that takes effect."),
+		).
+		StringField(
+			FieldHostname,
+			"Node Hostname",
+			DefaultHostname,
+			settingsframework.WithPlaceholder(DefaultHostname),
+			settingsframework.WithDescription("Hostname ATC advertises to the tailnet."),
+		).
+		StringField(
+			FieldStateDir,
+			"tsnet State Directory",
+			DefaultStateDir,
+			settingsframework.WithPlaceholder(DefaultStateDir),
+			settingsframework.WithDescription("Directory holding ATC's tsnet node state (file store + logs)."),
+		).
+		StringField(
+			FieldControlURL,
+			"Control Server URL",
+			"",
+			settingsframework.WithPlaceholder("https://controlplane.tailscale.com"),
+			settingsframework.WithDescription("Leave blank for the Tailscale-hosted control plane; set it for Headscale or a self-hosted control server."),
+		).
+		BoolField(
+			FieldEphemeral,
+			"Ephemeral Node",
+			true,
+			settingsframework.WithDescription("Register ATC as an ephemeral node so the tailnet drops it when ATC goes offline."),
+		).
+		BuildCategorized()
+}
+
 // SettingsPage implements plugin.SettingsPageProvider so ATC's own Tailscale
 // node settings render in the Datacenter Settings sidebar with no bespoke
 // frontend code. The auth key is a write-only secret: the framework masks it in
 // every response and only ever persists genuinely new material.
 func (p *Plugin) SettingsPage() plugin.SettingsPage {
-	return plugin.SettingsPage{
-		ID:    SettingsPageID,
-		Title: "ATC Tailscale",
-		Icon:  "hub",
-		Description: "ATC's own Tailscale node (embedded tsnet) — the identity ATC uses to reach the mesh. " +
-			"The auth key is write-only and masked in every API response.",
-		Order: 15,
-		Fields: []plugin.SettingsField{
-			{
-				Name:        FieldAuthKey,
-				Label:       "Tailscale Auth Key",
-				Type:        plugin.SettingsFieldSecret,
-				Secret:      true,
-				Placeholder: "tskey-auth-...",
-				Description: "Auth key used to register ATC's own node. Saving a new key re-registers ATC: " +
-					"the previous tsnet state is discarded so the new key is the one that takes effect.",
-			},
-			{
-				Name:        FieldHostname,
-				Label:       "Node Hostname",
-				Type:        plugin.SettingsFieldString,
-				Default:     DefaultHostname,
-				Placeholder: DefaultHostname,
-				Description: "Hostname ATC advertises to the tailnet.",
-			},
-			{
-				Name:        FieldStateDir,
-				Label:       "tsnet State Directory",
-				Type:        plugin.SettingsFieldString,
-				Default:     DefaultStateDir,
-				Placeholder: DefaultStateDir,
-				Description: "Directory holding ATC's tsnet node state (file store + logs).",
-			},
-			{
-				Name:        FieldControlURL,
-				Label:       "Control Server URL",
-				Type:        plugin.SettingsFieldString,
-				Placeholder: "https://controlplane.tailscale.com",
-				Description: "Leave blank for the Tailscale-hosted control plane; set it for Headscale or a self-hosted control server.",
-			},
-			{
-				Name:        FieldEphemeral,
-				Label:       "Ephemeral Node",
-				Type:        plugin.SettingsFieldBool,
-				Default:     true,
-				Description: "Register ATC as an ephemeral node so the tailnet drops it when ATC goes offline.",
-			},
-		},
-	}
+	return p.CategorizedSettingsPage().SettingsPage
 }
 
 // tsnetSettings is the effective configuration for ATC's own tsnet node,
@@ -148,47 +163,28 @@ func (c tsnetSettings) fingerprint() string {
 	return strings.Join([]string{c.Hostname, c.StateDir, c.ControlURL, c.AuthKey, strconv.FormatBool(c.Ephemeral)}, "\x00")
 }
 
-// persistedSetting reads a string setting written through the settings page.
+// persistedSetting reads a string setting written through the settings page
+// via the v2 settingsframework StoreAdapter.
 func persistedSetting(field string) string {
-	store := plugin.GlobalSettingsStore()
-	if store == nil {
-		return ""
-	}
-	v, ok := store.Value(SettingsPageID, field)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(v)
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault(SettingsPageID, field, "")
 }
 
 // effectiveSettings resolves the configuration for ATC's own tsnet node.
 // Precedence per field: explicit plugin option, then the persisted settings
 // page value, then environment variables (TS_AUTHKEY, TS_CONTROL_URL).
 func (p *Plugin) effectiveSettings() tsnetSettings {
+	adapter := settingsframework.NewStoreAdapter(nil)
 	cfg := tsnetSettings{
-		AuthKey:   strings.TrimSpace(p.authKey),
-		Hostname:  p.hostname,
-		StateDir:  p.stateDir,
-		Ephemeral: p.ephemeral,
+		AuthKey:    strings.TrimSpace(p.authKey),
+		Hostname:   adapter.StringOrDefault(SettingsPageID, FieldHostname, p.hostname),
+		StateDir:   adapter.StringOrDefault(SettingsPageID, FieldStateDir, p.stateDir),
+		ControlURL: adapter.StringOrDefault(SettingsPageID, FieldControlURL, ""),
+		Ephemeral:  adapter.BoolOrDefault(SettingsPageID, FieldEphemeral, p.ephemeral),
 	}
 
-	if v := persistedSetting(FieldHostname); v != "" {
-		cfg.Hostname = v
-	}
-	if v := persistedSetting(FieldStateDir); v != "" {
-		cfg.StateDir = v
-	}
-	if v := persistedSetting(FieldControlURL); v != "" {
-		cfg.ControlURL = v
-	}
-	if v := persistedSetting(FieldEphemeral); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.Ephemeral = b
-		}
-	}
 	if cfg.AuthKey == "" {
-		if v := persistedSetting(FieldAuthKey); v != "" && !plugin.IsMaskedSecretValue(v) {
-			cfg.AuthKey = v
+		if secret, ok := adapter.SecretValue(SettingsPageID, FieldAuthKey); ok {
+			cfg.AuthKey = secret
 		}
 	}
 	if cfg.AuthKey == "" {
@@ -316,10 +312,271 @@ func (p *Plugin) Compatible(h plugin.HostFacts) bool {
 // Requirements specifies required packages.
 func (p *Plugin) Requirements() plugin.Requirements {
 	return plugin.Requirements{
+		HostPackages: map[string][]string{
+			"dnf": {"tailscale"},
+			"apt": {"tailscale"},
+			"apk": {"tailscale"},
+		},
 		ControllerCollections: []string{
 			"ansible.builtin",
 		},
 	}
+}
+
+// CollectionSchedule returns the standard connection polling and cache TTL schedule (60s).
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema documents the v2 payload structure emitted by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "connection",
+		Description: p.Meta().Description,
+	}
+}
+
+// Read inspects live Tailscale SSH transport state for the target node without
+// ever exposing the controller's tsnet auth key.
+func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (any, error) {
+	if r == nil {
+		var err error
+		r, err = p.NewRunner(h)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	out, err := r.RunCommand(ctx, "uname -s -r")
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := p.effectiveSettings()
+	port := 22
+	if pStr, ok := h.Overrides["port"]; ok && pStr != "" {
+		if pVal, perr := strconv.Atoi(pStr); perr == nil && pVal > 0 {
+			port = pVal
+		}
+	}
+	user := "root"
+	if u, ok := h.Overrides["user"]; ok && u != "" {
+		user = u
+	}
+
+	return map[string]any{
+		"connection": map[string]any{
+			"plugin":      p.Meta().ID,
+			"hostRoute":   h.HostRoute,
+			"port":        port,
+			"user":        user,
+			"hostname":    cfg.Hostname,
+			"stateDir":    cfg.StateDir,
+			"controlURL":  cfg.ControlURL,
+			"ephemeral":   cfg.Ephemeral,
+			"probeOutput": strings.TrimSpace(out),
+		},
+	}, nil
+}
+
+// ContextMenuEntries provides node context menu actions for Tailscale-connected hosts.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	meta := p.Meta()
+	return newapi.NewContextMenuBuilder(meta.ID).
+		WithTarget(newapi.TargetNode).
+		WithGroup(string(meta.Kind)).
+		AddAction("verify_connection", "Verify Tailscale Connection", "network_check", "verify_connection", 10).
+		AddAction("enable_tailscale_ssh", "Enable Tailscale SSH", "vpn_key", "enable_tailscale_ssh", 20).
+		AddAction("restart_tailscaled", "Restart Tailscale Daemon", "restart_alt", "restart_tailscaled", 30).
+		Build()
+}
+
+// ManagementActions returns rich v2 action specifications for Tailscale transport management.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "verify_connection",
+				Label:       "Verify Tailscale Connection",
+				Description: "Verify Ansible connectivity over the Tailscale mesh transport",
+				Options:     []plugin.OptionSchema{},
+			},
+			Category:         newapi.ActionCategoryDiagnostic,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindConnection},
+		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "enable_tailscale_ssh",
+				Label:       "Enable Tailscale SSH",
+				Description: "Enable or disable keyless Tailscale SSH on the remote node (tailscale set --ssh)",
+				Options: []plugin.OptionSchema{
+					{
+						Name:        "enabled",
+						Type:        "bool",
+						Required:    false,
+						Default:     true,
+						Description: "Enable or disable the Tailscale SSH server on the node",
+					},
+				},
+			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindConnection, plugin.KindNetwork},
+		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "restart_tailscaled",
+				Label:       "Restart Tailscale Daemon",
+				Description: "Restart the tailscaled systemd service on the remote node",
+				Options: []plugin.OptionSchema{
+					{
+						Name:        "service",
+						Type:        "string",
+						Required:    false,
+						Default:     "tailscaled.service",
+						Description: "Systemd unit name for the Tailscale daemon",
+					},
+				},
+			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindConnection, plugin.KindNetwork},
+		},
+	}
+}
+
+// Actions derives legacy plugin.ActionSpec items from ManagementActions().
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+// ValidateAction validates options against the declared ManagementActionSpec.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	norm := strings.TrimSpace(action)
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, norm) {
+			if err := newapi.ValidateManagementOptions(spec, opts); err != nil {
+				return err
+			}
+			if strings.EqualFold(spec.Name, "enable_tailscale_ssh") && opts != nil {
+				if raw, exists := opts["enabled"]; exists && raw != nil {
+					if _, ok := raw.(bool); !ok {
+						return fmt.Errorf("option \"enabled\" must be a boolean for action %s", spec.Name)
+					}
+				}
+			}
+			if strings.EqualFold(spec.Name, "restart_tailscaled") && opts != nil {
+				if rawSvc, ok := opts["service"].(string); ok && strings.TrimSpace(rawSvc) != "" {
+					if err := validateServiceName(strings.TrimSpace(rawSvc)); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported tailscale connection action: %s", action)
+}
+
+// CompileTask adapts a typed v2 TaskRequest to the plugin's declarative Ansible TaskSpec compiler.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
+}
+
+// Compile turns a Tailscale connection management action into a declarative Ansible TaskSpec.
+func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
+	if err := p.ValidateAction(h, action, opts); err != nil {
+		return plugin.TaskSpec{}, err
+	}
+
+	norm := strings.ToLower(strings.TrimSpace(action))
+	switch norm {
+	case "verify_connection":
+		return plugin.TaskSpec{
+			Name: "Verify Tailscale connection",
+			Steps: []plugin.TaskStep{
+				{
+					Name:   "Verify Tailscale connection via ansible.builtin.ping",
+					Module: "ansible.builtin.ping",
+					Params: map[string]any{},
+				},
+			},
+		}, nil
+	case "enable_tailscale_ssh":
+		enabled := true
+		if opts != nil {
+			if b, ok := opts["enabled"].(bool); ok {
+				enabled = b
+			}
+		}
+		cmd := fmt.Sprintf("tailscale set --ssh=%t", enabled)
+		return plugin.TaskSpec{
+			Name: cmd,
+			Steps: []plugin.TaskStep{
+				{
+					Name:   cmd,
+					Module: "ansible.builtin.command",
+					Params: map[string]any{
+						"cmd":    cmd,
+						"become": true,
+					},
+				},
+			},
+		}, nil
+	case "restart_tailscaled":
+		svc := "tailscaled.service"
+		if opts != nil {
+			if raw, ok := opts["service"].(string); ok && strings.TrimSpace(raw) != "" {
+				svc = strings.TrimSpace(raw)
+			}
+		}
+		label := fmt.Sprintf("Restart %s", svc)
+		return plugin.TaskSpec{
+			Name: label,
+			Steps: []plugin.TaskStep{
+				{
+					Name:   label,
+					Module: "ansible.builtin.systemd_service",
+					Params: map[string]any{
+						"name":   svc,
+						"state":  "restarted",
+						"become": true,
+					},
+				},
+			},
+		}, nil
+	default:
+		return plugin.TaskSpec{}, fmt.Errorf("unsupported tailscale connection action: %s", action)
+	}
+}
+
+func validateServiceName(name string) error {
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("service name must not start with '-'")
+	}
+	if strings.ContainsAny(name, " \t\r\n;|&$`\"'\\/") {
+		return fmt.Errorf("service name contains disallowed characters")
+	}
+	return nil
 }
 
 func isSystemTailscaledActive() bool {
