@@ -1,6 +1,6 @@
 // Package docker implements the container/docker plugin. It wraps pkg/docker
 // (the Docker Engine socket access layer) to expose it as a compile-time ATC
-// plugin: Plugin + Reader + Actor.
+// plugin: Plugin + Reader + Actor + v2 newapi extensions.
 //
 // Action path documentation (per task requirement):
 //
@@ -28,14 +28,38 @@ import (
 
 	pkgdocker "air-traffic-control/backend/pkg/docker"
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 	"air-traffic-control/backend/pkg/ssh"
+)
+
+// SettingsPageID is the route slug of the datacenter-wide Docker settings page.
+const SettingsPageID = "container/docker"
+
+// DefaultRegistryURL is the fallback container registry used when pulling images.
+const DefaultRegistryURL = "docker.io"
+
+// DefaultSocketPath is the default rootful Docker Engine socket path.
+const DefaultSocketPath = "/var/run/docker.sock"
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func init() {
 	_ = plugin.Register(New())
 }
 
-// Plugin wraps pkg/docker to implement plugin.Plugin, plugin.Reader and plugin.Actor.
+// Plugin wraps pkg/docker to implement plugin.Plugin, plugin.Reader, plugin.Actor,
+// and the v2 newapi extension interfaces.
 type Plugin struct{}
 
 // New returns a new Docker plugin.
@@ -46,7 +70,7 @@ func New() *Plugin {
 // Meta returns metadata for the Docker plugin.
 func (p *Plugin) Meta() plugin.Meta {
 	return plugin.Meta{
-		ID:          "container/docker",
+		ID:          SettingsPageID,
 		Kind:        plugin.KindContainer,
 		Name:        "docker",
 		Label:       "Docker Engine & Rootless Containers",
@@ -73,6 +97,81 @@ func (p *Plugin) Requirements() plugin.Requirements {
 			"community.docker",
 		},
 	}
+}
+
+// CollectionSchedule returns the polling and cache TTL schedule for Docker container telemetry.
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema documents the payload structure returned by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "containers",
+		Description: p.Meta().Description,
+	}
+}
+
+// CategorizedSettingsPage declares datacenter-wide Docker Engine defaults via settingsframework.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	meta := p.Meta()
+	return settingsframework.NewPageBuilder(meta.ID, "Docker Engine Defaults").
+		WithIcon(meta.Icon).
+		WithCategory(string(meta.Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(meta.Order).
+		WithDescription("Datacenter-wide Docker Engine socket, registry, rootless discovery, and image pull defaults.").
+		StringField(
+			"defaultRegistry",
+			"Default Container Registry",
+			DefaultRegistryURL,
+			settingsframework.WithPlaceholder(DefaultRegistryURL),
+			settingsframework.WithDescription("Default registry hostname prepended when pulling unqualified image references."),
+		).
+		StringField(
+			"socketPath",
+			"System Docker Socket Path",
+			DefaultSocketPath,
+			settingsframework.WithPlaceholder(DefaultSocketPath),
+			settingsframework.WithDescription("Default unix socket path for the rootful Docker daemon."),
+		).
+		BoolField(
+			"probeRootlessUsers",
+			"Discover Rootless User Daemons",
+			true,
+			settingsframework.WithDescription("Automatically scan /run/user/*/docker.sock and user sessions for rootless Docker containers."),
+		).
+		SelectField(
+			"pullPolicy",
+			"Default Image Pull Policy",
+			"always",
+			[]plugin.SettingsFieldOption{
+				{Value: "always", Label: "Always Pull"},
+				{Value: "missing", Label: "Pull If Missing"},
+				{Value: "never", Label: "Never Pull"},
+			},
+			settingsframework.WithDescription("Default pull policy when staging container image pulls via Ansible."),
+		).
+		IntField(
+			"stopTimeoutSeconds",
+			"Stop Timeout (Seconds)",
+			10,
+			settingsframework.WithMinMax(1, 300),
+			settingsframework.WithDescription("Grace period in seconds before SIGKILL when stopping a container."),
+		).
+		SecretField(
+			"registryAuthTokenVaultVar",
+			"Registry Auth Token Vault Variable",
+			settingsframework.WithPlaceholder("vault_docker_registry_token"),
+			settingsframework.WithDescription("Ansible Vault variable or secret token used for private container registry authentication."),
+		).
+		BuildCategorized()
+}
+
+// SettingsPage implements plugin.SettingsPageProvider.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
 }
 
 // Probe determines whether Docker is present and reachable on the host.
@@ -160,57 +259,164 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}, nil
 }
 
-// Actions enumerates the mutation actions the Docker plugin supports. Every
-// action below is staged as a declarative community.docker task through the
-// Ansible mutation queue.
-func (p *Plugin) Actions() []plugin.ActionSpec {
-	return []plugin.ActionSpec{
+// ManagementActions returns rich action specifications for Docker Engine mutations.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "start",
-			Label:       "Start Container",
-			Description: "Start a stopped Docker container",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Container name or ID"},
-				{Name: "user", Type: "string", Required: false, Description: "Rootless user (blank/root for the system daemon)"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "start",
+				Label:       "Start Container",
+				Description: "Start a stopped Docker container",
+				Options: []plugin.OptionSchema{
+					{Name: "name", Type: "string", Required: true, Description: "Container name or ID"},
+					{Name: "user", Type: "string", Required: false, Description: "Rootless user (blank/root for the system daemon)"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindContainer},
 		},
 		{
-			Name:        "stop",
-			Label:       "Stop Container",
-			Description: "Stop a running Docker container",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Container name or ID"},
-				{Name: "user", Type: "string", Required: false, Description: "Rootless user (blank/root for the system daemon)"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "stop",
+				Label:       "Stop Container",
+				Description: "Stop a running Docker container",
+				Options: []plugin.OptionSchema{
+					{Name: "name", Type: "string", Required: true, Description: "Container name or ID"},
+					{Name: "user", Type: "string", Required: false, Description: "Rootless user (blank/root for the system daemon)"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindContainer},
 		},
 		{
-			Name:        "restart",
-			Label:       "Restart Container",
-			Description: "Restart a Docker container",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Container name or ID"},
-				{Name: "user", Type: "string", Required: false, Description: "Rootless user (blank/root for the system daemon)"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "restart",
+				Label:       "Restart Container",
+				Description: "Restart a Docker container",
+				Options: []plugin.OptionSchema{
+					{Name: "name", Type: "string", Required: true, Description: "Container name or ID"},
+					{Name: "user", Type: "string", Required: false, Description: "Rootless user (blank/root for the system daemon)"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       false,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindContainer},
 		},
 		{
-			Name:        "remove",
-			Label:       "Remove Container",
-			Description: "Remove a Docker container",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Container name or ID"},
-				{Name: "user", Type: "string", Required: false, Description: "Rootless user (blank/root for the system daemon)"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "remove",
+				Label:       "Remove Container",
+				Description: "Remove a Docker container",
+				Options: []plugin.OptionSchema{
+					{Name: "name", Type: "string", Required: true, Description: "Container name or ID"},
+					{Name: "user", Type: "string", Required: false, Description: "Rootless user (blank/root for the system daemon)"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Remove this Docker container?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindContainer},
 		},
 		{
-			Name:        "pull",
-			Label:       "Pull Image",
-			Description: "Pull an image into the Docker Engine",
-			Options: []plugin.OptionSchema{
-				{Name: "image", Type: "string", Required: true, Description: "Image reference, e.g. docker.io/library/alpine:latest"},
-				{Name: "user", Type: "string", Required: false, Description: "Rootless user (blank/root for the system daemon)"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "pull",
+				Label:       "Pull Image",
+				Description: "Pull an image into the Docker Engine",
+				Options: []plugin.OptionSchema{
+					{Name: "image", Type: "string", Required: true, Description: "Image reference, e.g. docker.io/library/alpine:latest"},
+					{Name: "user", Type: "string", Required: false, Description: "Rootless user (blank/root for the system daemon)"},
+				},
 			},
+			Category:         newapi.ActionCategoryMaintenance,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindContainer},
 		},
 	}
+}
+
+// Actions enumerates the mutation actions the Docker plugin supports. Every
+// action is projected from ManagementActions() and staged as a declarative
+// community.docker task through the Ansible mutation queue.
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+// ValidateAction validates options against the declared ManagementActionSpec.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	norm := strings.ToLower(strings.TrimSpace(action))
+	switch norm {
+	case "delete", "rm":
+		norm = "remove"
+	case "pull_image":
+		norm = "pull"
+	}
+
+	normalizedOpts := make(map[string]any, len(opts)+1)
+	for k, v := range opts {
+		normalizedOpts[k] = v
+	}
+	if norm != "pull" {
+		if name, _ := normalizedOpts["name"].(string); strings.TrimSpace(name) == "" {
+			if c, ok := normalizedOpts["container"].(string); ok && strings.TrimSpace(c) != "" {
+				normalizedOpts["name"] = strings.TrimSpace(c)
+			}
+		} else {
+			normalizedOpts["name"] = strings.TrimSpace(name)
+		}
+	} else {
+		if img, ok := normalizedOpts["image"].(string); ok {
+			normalizedOpts["image"] = strings.TrimSpace(img)
+		}
+	}
+
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, norm) {
+			return newapi.ValidateManagementOptions(spec, normalizedOpts)
+		}
+	}
+	return fmt.Errorf("unsupported docker action: %s", action)
+}
+
+// ContextMenuEntries provides container context menu items for compatible hosts.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	return newapi.NewContextMenuBuilder(p.Meta().ID).
+		WithTarget(newapi.TargetContainer).
+		WithGroup(string(p.Meta().Kind)).
+		AddAction("docker-start", "Start Container", "play_arrow", "start", 10).
+		AddAction("docker-stop", "Stop Container", "stop", "stop", 20).
+		AddAction("docker-restart", "Restart Container", "refresh", "restart", 30).
+		AddAction("docker-pull", "Pull Image", "download", "pull", 40).
+		AddDangerAction("docker-remove", "Remove Container", "delete", "remove", "Remove this Docker container?", 90).
+		Build()
+}
+
+// CompileTask compiles a typed TaskRequest into a declarative Ansible TaskSpec.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
 
 // Compile transforms a Docker action into a declarative Ansible TaskSpec.
