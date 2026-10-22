@@ -349,7 +349,7 @@ func main() {
 	}
 
 	port := flag.Int("port", 8080, "HTTP and WebSocket server port")
-	dbFlag := flag.String("db", "", "Path to hosts-cache.sqlite (defaults to ATC_DB_PATH or auto-detected from the repo root). Use :memory: for in-memory mode; note the read-only API still needs a real file, so :memory: disables the /api/nodes/{id}/* read routes.")
+	dbFlag := flag.String("db", ":memory:", "Path to hosts-cache.sqlite (use :memory: for in-memory mode). Empty = ATC_DB_PATH or auto-detected from the repo root.")
 	flag.Parse()
 
 	log.Printf("Starting Air Traffic Control Go Core Daemon on port %d...", *port)
@@ -378,7 +378,10 @@ func main() {
 		}
 	}()
 
-	hostStore, err := hostcache.Open(*dbFlag)
+	// ResolveDBPath special-cases ":memory:" and otherwise finds the real
+	// hosts-cache.sqlite, so both the in-memory and file modes open correctly
+	// (hostcache.Open("") would fail with an empty-path error).
+	hostStore, err := hostcache.Open(plugin.ResolveDBPath(*dbFlag))
 	if err != nil {
 		log.Fatalf("Failed to open host cache: %v", err)
 	}

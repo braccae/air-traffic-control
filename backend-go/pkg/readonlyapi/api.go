@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -28,7 +29,7 @@ type Options struct {
 // API serves the ported read-only routes.
 type API struct {
 	store          *hostcache.Store
-	resolver       *plugin.SQLiteNodeResolver
+	resolver       plugin.NodeResolver
 	runnerResolver plugin.RunnerResolver
 }
 
@@ -39,14 +40,21 @@ func New(opts Options) (*API, error) {
 		return nil, fmt.Errorf("readonlyapi: store is required")
 	}
 
-	res, err := plugin.NewSQLiteNodeResolver(plugin.ResolveDBPath(opts.DBPath))
-	if err != nil {
-		return nil, fmt.Errorf("readonlyapi: node resolver unavailable: %w", err)
+	var resolver plugin.NodeResolver
+	if res, err := plugin.NewSQLiteNodeResolver(plugin.ResolveDBPath(opts.DBPath)); err == nil {
+		resolver = res
+	} else {
+		// In-memory (":memory:") and other non-file stores have no SQLite path
+		// to open a second handle against, so the SQLite resolver cannot be
+		// built. Fall back to resolving nodes directly from the shared store
+		// rather than disabling the whole read-only API.
+		resolver = plugin.NewStoreNodeResolver(opts.Store)
+		log.Printf("readonlyapi: SQLite resolver unavailable (%v); using shared-store resolver", err)
 	}
 
 	return &API{
 		store:          opts.Store,
-		resolver:       res,
+		resolver:       resolver,
 		runnerResolver: &plugin.DefaultRunnerResolver{},
 	}, nil
 }

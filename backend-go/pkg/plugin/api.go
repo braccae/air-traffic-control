@@ -72,6 +72,13 @@ type storeNodeResolver struct {
 	Store *hostcache.Store
 }
 
+// NewStoreNodeResolver returns a NodeResolver backed by an already-open host
+// store. Use this instead of the SQLite-backed resolver when the store is
+// in-memory (path ":memory:") and has no file to open a second handle against.
+func NewStoreNodeResolver(store *hostcache.Store) NodeResolver {
+	return &storeNodeResolver{Store: store}
+}
+
 func (r *storeNodeResolver) ResolveNode(nodeID string) (HostFacts, bool, error) {
 	record, ok, err := r.Store.GetHostByID(nodeID)
 	if err != nil {
