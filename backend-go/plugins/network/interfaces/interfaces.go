@@ -7,6 +7,20 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func init() {
@@ -47,6 +61,65 @@ func (p *Plugin) Requirements() plugin.Requirements {
 			"ansible.builtin",
 		},
 	}
+}
+
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "interfaces",
+		Description: p.Meta().Description,
+	}
+}
+
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	return settingsframework.NewPageBuilder(p.Meta().ID, "Network Interfaces Defaults").
+		WithIcon(p.Meta().Icon).
+		WithCategory(string(p.Meta().Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(p.Meta().Order).
+		WithDescription("Datacenter-wide network interface configuration, MTU, and DNS defaults.").
+		StringField("defaultInterface", "Default Interface", "eth0",
+			settingsframework.WithDescription("Fallback network interface device name when none is specified.")).
+		StringField("defaultInterfaceType", "Default Interface Type", "wireguard",
+			settingsframework.WithDescription("Default interface type when configuring an interface.")).
+		IntField("defaultMTU", "Default MTU", 1500,
+			settingsframework.WithMinMax(576, 9216),
+			settingsframework.WithDescription("Default MTU applied when link MTU is unreported.")).
+		StringField("defaultDNS", "Default DNS Nameserver", "",
+			settingsframework.WithDescription("Optional default DNS nameserver IP for configured interfaces.")).
+		BuildCategorized()
+}
+
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
+}
+
+func defaultInterfaceName() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault("network/interfaces", "defaultInterface", "eth0")
+}
+
+func defaultInterfaceType() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault("network/interfaces", "defaultInterfaceType", "wireguard")
+}
+
+func defaultMTU() int {
+	return settingsframework.NewStoreAdapter(nil).IntOrDefault("network/interfaces", "defaultMTU", 1500)
+}
+
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	return newapi.NewContextMenuBuilder(p.Meta().ID).
+		WithTarget(newapi.TargetNetwork).
+		WithGroup(string(p.Meta().Kind)).
+		AddAction("connect_interface", "Configure Interface", "settings_ethernet", "connect_interface", 10).
+		AddAction("toggle_interface", "Toggle Interface State", "swap_horiz", "toggle_interface", 20).
+		Build()
 }
 
 func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (plugin.Detection, error) {
@@ -220,7 +293,7 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 
 		mtu := link.MTU
 		if mtu == 0 {
-			mtu = 1500
+			mtu = defaultMTU()
 		}
 
 		ifaces = append(ifaces, map[string]any{
@@ -241,30 +314,94 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}, nil
 }
 
-func (p *Plugin) Actions() []plugin.ActionSpec {
-	return []plugin.ActionSpec{
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "connect_interface",
-			Label:       "Configure Interface",
-			Description: "Configure network interface settings",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Interface device name (e.g. eth0, wg0)"},
-				{Name: "type", Type: "string", Required: false, Default: "wireguard", Description: "Interface type"},
-				{Name: "cidr", Type: "string", Required: false, Description: "IPv4 CIDR address"},
-				{Name: "gateway", Type: "string", Required: false, Description: "Default gateway IPv4"},
-				{Name: "dns", Type: "string", Required: false, Description: "DNS nameserver"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "connect_interface",
+				Label:       "Configure Interface",
+				Description: "Configure network interface settings",
+				Options: []plugin.OptionSchema{
+					{Name: "name", Type: "string", Required: true, Description: "Interface device name (e.g. eth0, wg0)"},
+					{Name: "type", Type: "string", Required: false, Default: "wireguard", Description: "Interface type"},
+					{Name: "cidr", Type: "string", Required: false, Description: "IPv4 CIDR address"},
+					{Name: "gateway", Type: "string", Required: false, Description: "Default gateway IPv4"},
+					{Name: "dns", Type: "string", Required: false, Description: "DNS nameserver"},
+				},
 			},
+			Category:         newapi.ActionCategoryConfiguration,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindNetwork},
 		},
 		{
-			Name:        "toggle_interface",
-			Label:       "Toggle Interface State",
-			Description: "Set network interface up or down",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Interface device name (e.g. eth0)"},
-				{Name: "state", Type: "select", Enum: []string{"up", "down"}, Default: "up", Description: "Interface state"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "toggle_interface",
+				Label:       "Toggle Interface State",
+				Description: "Set network interface up or down",
+				Options: []plugin.OptionSchema{
+					{Name: "name", Type: "string", Required: true, Description: "Interface device name (e.g. eth0)"},
+					{Name: "state", Type: "select", Enum: []string{"up", "down"}, Default: "up", Description: "Interface state"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindNetwork},
 		},
 	}
+}
+
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+func normalizeActionName(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "connect_interface", "interface":
+		return "connect_interface"
+	case "toggle_interface", "toggle":
+		return "toggle_interface"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	canonical := normalizeActionName(action)
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, canonical) {
+			normalizedOpts := make(map[string]any, len(opts)+1)
+			for k, v := range opts {
+				normalizedOpts[k] = v
+			}
+			if name, _ := normalizedOpts["name"].(string); strings.TrimSpace(name) == "" {
+				if iface, ok := normalizedOpts["interface"].(string); ok && strings.TrimSpace(iface) != "" {
+					normalizedOpts["name"] = strings.TrimSpace(iface)
+				}
+			}
+			return newapi.ValidateManagementOptions(spec, normalizedOpts)
+		}
+	}
+	return fmt.Errorf("unsupported interfaces action: %s", action)
+}
+
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
 
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
@@ -305,12 +442,12 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		ifaceName, _ = opts["interface"].(string)
 	}
 	if ifaceName == "" {
-		ifaceName = "eth0"
+		ifaceName = defaultInterfaceName()
 	}
 
 	ifaceType, _ := opts["type"].(string)
 	if ifaceType == "" {
-		ifaceType = "wireguard"
+		ifaceType = defaultInterfaceType()
 	}
 
 	templateParams := map[string]any{
