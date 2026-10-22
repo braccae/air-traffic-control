@@ -7,6 +7,22 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+const SettingsPageID = "database/sql"
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func init() {
@@ -49,6 +65,68 @@ func (p *Plugin) Requirements() plugin.Requirements {
 			"community.general",
 		},
 	}
+}
+
+// CollectionSchedule returns the standard polling and cache TTL schedule for SQL database telemetry.
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema documents the payload returned by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "engines",
+		Description: p.Meta().Description,
+	}
+}
+
+// CategorizedSettingsPage declares datacenter-wide SQL database defaults via settingsframework.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	meta := p.Meta()
+	return settingsframework.NewPageBuilder(meta.ID, "SQL Database Defaults").
+		WithIcon(meta.Icon).
+		WithCategory(string(meta.Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(meta.Order).
+		WithDescription("Datacenter-wide PostgreSQL, MariaDB/MySQL, and MSSQL query workbench and administration defaults.").
+		SelectField(
+			"defaultEngine",
+			"Default SQL Engine",
+			"postgres",
+			[]plugin.SettingsFieldOption{
+				{Value: "postgres", Label: "PostgreSQL"},
+				{Value: "mariadb", Label: "MariaDB / MySQL"},
+				{Value: "mssql", Label: "Microsoft SQL Server"},
+			},
+			settingsframework.WithDescription("Default SQL engine when none is explicitly specified in an action."),
+		).
+		IntField(
+			"defaultQueryLimit",
+			"Default Query Row Limit",
+			50,
+			settingsframework.WithMinMax(1, 10000),
+			settingsframework.WithDescription("Default maximum number of rows returned by ad-hoc SQL queries."),
+		).
+		StringField(
+			"defaultEncoding",
+			"Default Database Encoding",
+			"UTF8",
+			settingsframework.WithPlaceholder("UTF8"),
+			settingsframework.WithDescription("Default character encoding used when creating new databases."),
+		).
+		SecretField(
+			"adminPasswordVaultVar",
+			"Default Admin Password Vault Variable",
+			settingsframework.WithPlaceholder("vault_sql_admin_password"),
+			settingsframework.WithDescription("Optional Ansible Vault variable name holding the default SQL administrator password."),
+		).
+		BuildCategorized()
+}
+
+// SettingsPage returns the underlying global SettingsPage schema.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
 }
 
 // Probe checks for active SQL database engines (PostgreSQL, MariaDB/MySQL, MSSQL) on the host.
@@ -518,62 +596,158 @@ func inspectMSSQL(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 	}
 }
 
-func (p *Plugin) Actions() []plugin.ActionSpec {
-	return []plugin.ActionSpec{
+// ManagementActions returns rich action specifications for SQL database mutations and queries.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "query",
-			Label:       "Execute SQL Query",
-			Description: "Run raw or parameterized SQL against a chosen database",
-			Options: []plugin.OptionSchema{
-				{Name: "engine", Type: "select", Required: true, Enum: []string{"postgres", "mariadb", "mssql"}, Description: "Target SQL engine"},
-				{Name: "database", Type: "string", Required: false, Description: "Target database"},
-				{Name: "query", Type: "string", Required: true, Description: "SQL statement(s) to execute"},
-				{Name: "limit", Type: "int", Required: false, Default: 50, Description: "Maximum rows to return"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "query",
+				Label:       "Execute SQL Query",
+				Description: "Run raw or parameterized SQL against a chosen database",
+				Options: []plugin.OptionSchema{
+					{Name: "engine", Type: "select", Required: true, Enum: []string{"postgres", "mariadb", "mssql"}, Description: "Target SQL engine"},
+					{Name: "database", Type: "string", Required: false, Description: "Target database"},
+					{Name: "query", Type: "string", Required: true, Description: "SQL statement(s) to execute"},
+					{Name: "limit", Type: "int", Required: false, Default: 50, Description: "Maximum rows to return"},
+				},
 			},
+			Category:   newapi.ActionCategoryDiagnostic,
+			Idempotent: true,
 		},
 		{
-			Name:        "database_create",
-			Label:       "Create Database",
-			Description: "Create a new database on the SQL server",
-			Options: []plugin.OptionSchema{
-				{Name: "engine", Type: "select", Required: true, Enum: []string{"postgres", "mariadb", "mssql"}, Description: "Target SQL engine"},
-				{Name: "name", Type: "string", Required: true, Description: "Database name"},
-				{Name: "owner", Type: "string", Required: false, Description: "Database owner user"},
-				{Name: "encoding", Type: "string", Required: false, Default: "UTF8", Description: "Character encoding"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "database_create",
+				Label:       "Create Database",
+				Description: "Create a new database on the SQL server",
+				Options: []plugin.OptionSchema{
+					{Name: "engine", Type: "select", Required: true, Enum: []string{"postgres", "mariadb", "mssql"}, Description: "Target SQL engine"},
+					{Name: "name", Type: "string", Required: true, Description: "Database name"},
+					{Name: "owner", Type: "string", Required: false, Description: "Database owner user"},
+					{Name: "encoding", Type: "string", Required: false, Default: "UTF8", Description: "Character encoding"},
+				},
 			},
+			Category:         newapi.ActionCategoryConfiguration,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindDatabase},
 		},
 		{
-			Name:        "database_drop",
-			Label:       "Drop Database",
-			Description: "Drop an existing database from the SQL server",
-			Options: []plugin.OptionSchema{
-				{Name: "engine", Type: "select", Required: true, Enum: []string{"postgres", "mariadb", "mssql"}, Description: "Target SQL engine"},
-				{Name: "name", Type: "string", Required: true, Description: "Database name to drop"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "database_drop",
+				Label:       "Drop Database",
+				Description: "Drop an existing database from the SQL server",
+				Options: []plugin.OptionSchema{
+					{Name: "engine", Type: "select", Required: true, Enum: []string{"postgres", "mariadb", "mssql"}, Description: "Target SQL engine"},
+					{Name: "name", Type: "string", Required: true, Description: "Database name to drop"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Permanently drop this SQL database and all its data?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindDatabase},
 		},
 		{
-			Name:        "user_create",
-			Label:       "Create / Alter User",
-			Description: "Create or alter a database user and assign roles/privileges",
-			Options: []plugin.OptionSchema{
-				{Name: "engine", Type: "select", Required: true, Enum: []string{"postgres", "mariadb", "mssql"}, Description: "Target SQL engine"},
-				{Name: "username", Type: "string", Required: true, Description: "Database username"},
-				{Name: "password", Type: "string", Required: false, Secret: true, Description: "User password (secret, vault-masked)"},
-				{Name: "passwordVaultKey", Type: "string", Required: false, Description: "Ansible Vault variable name for the password"},
-				{Name: "roles", Type: "string", Required: false, Description: "Roles, privileges, or grants (comma-separated)"},
-				{Name: "database", Type: "string", Required: false, Description: "Database on which to grant privileges"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "user_create",
+				Label:       "Create / Alter User",
+				Description: "Create or alter a database user and assign roles/privileges",
+				Options: []plugin.OptionSchema{
+					{Name: "engine", Type: "select", Required: true, Enum: []string{"postgres", "mariadb", "mssql"}, Description: "Target SQL engine"},
+					{Name: "username", Type: "string", Required: true, Description: "Database username"},
+					{Name: "password", Type: "string", Required: false, Secret: true, Description: "User password (secret, vault-masked)"},
+					{Name: "passwordVaultKey", Type: "string", Required: false, Description: "Ansible Vault variable name for the password"},
+					{Name: "roles", Type: "string", Required: false, Description: "Roles, privileges, or grants (comma-separated)"},
+					{Name: "database", Type: "string", Required: false, Description: "Database on which to grant privileges"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindDatabase},
 		},
 		{
-			Name:        "user_drop",
-			Label:       "Drop User",
-			Description: "Drop a database user from the SQL server",
-			Options: []plugin.OptionSchema{
-				{Name: "engine", Type: "select", Required: true, Enum: []string{"postgres", "mariadb", "mssql"}, Description: "Target SQL engine"},
-				{Name: "username", Type: "string", Required: true, Description: "Database username to drop"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "user_drop",
+				Label:       "Drop User",
+				Description: "Drop a database user from the SQL server",
+				Options: []plugin.OptionSchema{
+					{Name: "engine", Type: "select", Required: true, Enum: []string{"postgres", "mariadb", "mssql"}, Description: "Target SQL engine"},
+					{Name: "username", Type: "string", Required: true, Description: "Database username to drop"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Permanently drop this database user account?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindDatabase},
 		},
 	}
+}
+
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+// ValidateAction validates options against the declared ManagementActionSpec.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	norm := strings.ToLower(strings.TrimSpace(action))
+	if norm == "user_delete" {
+		norm = "user_drop"
+	}
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, norm) {
+			return newapi.ValidateManagementOptions(spec, opts)
+		}
+	}
+	return fmt.Errorf("unsupported sql action: %s", action)
+}
+
+// ContextMenuEntries provides database context menu items for compatible hosts.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	return newapi.NewContextMenuBuilder(p.Meta().ID).
+		WithTarget(newapi.TargetDatabase).
+		WithGroup(string(p.Meta().Kind)).
+		AddAction("sql-query", "Execute SQL Query", "terminal", "query", 10).
+		AddAction("sql-database-create", "Create Database", "add_circle", "database_create", 20).
+		AddAction("sql-user-create", "Create / Alter User", "person_add", "user_create", 30).
+		AddDangerAction(
+			"sql-user-drop",
+			"Drop User",
+			"person_remove",
+			"user_drop",
+			"Permanently drop this database user account?",
+			80,
+		).
+		AddDangerAction(
+			"sql-database-drop",
+			"Drop Database",
+			"delete_forever",
+			"database_drop",
+			"Permanently drop this SQL database and all its data?",
+			90,
+		).
+		Build()
+}
+
+// CompileTask compiles a typed TaskRequest into a declarative Ansible TaskSpec.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
 
 // Compile converts a declarative SQL action into a TaskSpec.
