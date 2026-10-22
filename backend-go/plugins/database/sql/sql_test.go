@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 	_ "air-traffic-control/backend/plugins/all"
 )
 
@@ -151,5 +153,130 @@ func TestSQLPlugin_Actor_Compile(t *testing.T) {
 	}
 	if !strings.Contains(task.SecretsMasked["db_password"], "vault_pg_pw") {
 		t.Errorf("expected vault key in masked secrets, got: %+v", task.SecretsMasked)
+	}
+}
+
+func TestSQLPlugin_V2InterfacesAndCapabilities(t *testing.T) {
+	p, ok := plugin.Get("database/sql")
+	if !ok {
+		t.Fatalf("database/sql not registered")
+	}
+
+	// 1. Verify DataCollectionPlugin
+	dc, ok := p.(newapi.DataCollectionPlugin)
+	if !ok {
+		t.Fatal("expected database/sql to implement newapi.DataCollectionPlugin")
+	}
+	sched := dc.CollectionSchedule()
+	if sched.Interval <= 0 || sched.TTL <= 0 {
+		t.Errorf("expected positive collection schedule interval and TTL, got %+v", sched)
+	}
+	schema := dc.CollectionSchema()
+	if schema.Version != "v2" || schema.RootKey != "engines" {
+		t.Errorf("unexpected collection schema: %+v", schema)
+	}
+
+	// 2. Verify CategorizedSettingsProvider
+	csp, ok := p.(newapi.CategorizedSettingsProvider)
+	if !ok {
+		t.Fatal("expected database/sql to implement newapi.CategorizedSettingsProvider")
+	}
+	catPage := csp.CategorizedSettingsPage()
+	if catPage.ID != "database/sql" || catPage.Category != "database" || catPage.Scope != newapi.SettingsScopeDatacenter {
+		t.Errorf("unexpected categorized settings page: %+v", catPage)
+	}
+	if err := settingsframework.ValidateSchema(catPage.SettingsPage); err != nil {
+		t.Errorf("ValidateSchema failed: %v", err)
+	}
+	if err := newapi.ValidateCategorizedSettingsPage(catPage); err != nil {
+		t.Errorf("ValidateCategorizedSettingsPage failed: %v", err)
+	}
+	if _, ok := plugin.GetCategorizedSettingsPage("database/sql"); !ok {
+		t.Error("expected database/sql categorized settings page to be registered in global registry")
+	}
+
+	// 3. Verify ManagementPlugin
+	mgmt, ok := p.(newapi.ManagementPlugin)
+	if !ok {
+		t.Fatal("expected database/sql to implement newapi.ManagementPlugin")
+	}
+	mgmtActions := mgmt.ManagementActions()
+	if len(mgmtActions) != 5 {
+		t.Fatalf("expected 5 management actions, got %d", len(mgmtActions))
+	}
+	if len(mgmt.Actions()) != len(mgmtActions) {
+		t.Errorf("Actions() length %d does not match ManagementActions() length %d", len(mgmt.Actions()), len(mgmtActions))
+	}
+
+	linuxFacts := plugin.HostFacts{NodeID: "node-1", OSFamily: "linux"}
+	if err := mgmt.ValidateAction(linuxFacts, "query", map[string]any{
+		"engine": "postgres",
+		"query":  "SELECT 1;",
+	}); err != nil {
+		t.Errorf("expected valid query options to pass validation, got: %v", err)
+	}
+	if err := mgmt.ValidateAction(linuxFacts, "user_delete", map[string]any{
+		"engine":   "mariadb",
+		"username": "old_user",
+	}); err != nil {
+		t.Errorf("expected valid user_delete alias options to pass validation, got: %v", err)
+	}
+	if err := mgmt.ValidateAction(linuxFacts, "database_create", map[string]any{
+		"engine": "postgres",
+	}); err == nil {
+		t.Error("expected missing required name option to fail validation")
+	}
+	if err := mgmt.ValidateAction(linuxFacts, "database_create", map[string]any{
+		"engine": "sqlite",
+		"name":   "testdb",
+	}); err == nil {
+		t.Error("expected invalid engine enum to fail validation")
+	}
+	if err := mgmt.ValidateAction(linuxFacts, "unknown_action", map[string]any{}); err == nil {
+		t.Error("expected unknown action to fail validation")
+	}
+
+	// 4. Verify ContextMenuProvider
+	cmp, ok := p.(newapi.ContextMenuProvider)
+	if !ok {
+		t.Fatal("expected database/sql to implement newapi.ContextMenuProvider")
+	}
+	entries := cmp.ContextMenuEntries(context.Background(), linuxFacts)
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 context menu entries for compatible linux host, got %d", len(entries))
+	}
+	for _, entry := range entries {
+		if entry.PluginID != "database/sql" || entry.Target != newapi.TargetDatabase {
+			t.Errorf("unexpected context menu entry metadata: %+v", entry)
+		}
+	}
+	if !entries[len(entries)-1].Danger || entries[len(entries)-1].ConfirmPrompt == "" {
+		t.Errorf("expected last context menu entry to be a danger action with confirmation prompt, got %+v", entries[len(entries)-1])
+	}
+	if routerEntries := cmp.ContextMenuEntries(context.Background(), plugin.HostFacts{OSFamily: "router_switch"}); len(routerEntries) != 0 {
+		t.Errorf("expected no context menu entries for incompatible router_switch host, got %+v", routerEntries)
+	}
+
+	// 5. Verify TaskCompileProvider
+	tcp, ok := p.(newapi.TaskCompileProvider)
+	if !ok {
+		t.Fatal("expected database/sql to implement newapi.TaskCompileProvider")
+	}
+	compiled, err := tcp.CompileTask(context.Background(), linuxFacts, newapi.TaskRequest{
+		ID:       "req-sql-1",
+		Type:     newapi.TaskTypePluginAction,
+		NodeID:   "node-1",
+		PluginID: "database/sql",
+		Action:   "database_drop",
+		Params: map[string]any{
+			"engine": "postgres",
+			"name":   "legacy_db",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask failed: %v", err)
+	}
+	if len(compiled.Steps) != 1 || compiled.Steps[0].Module != "community.postgresql.postgresql_db" || compiled.Steps[0].Params["state"] != "absent" {
+		t.Errorf("unexpected compiled task steps: %+v", compiled.Steps)
 	}
 }
