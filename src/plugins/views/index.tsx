@@ -334,8 +334,8 @@ const NetworkInterfacesViewAdapter: React.FC<PluginViewProps> = ({ node, onRefre
   <NetworkInterfacesView node={node} onRefresh={onRefresh} />
 );
 
-const FirewallViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
-  <FirewallView node={node} />
+const FirewallViewAdapter: React.FC<PluginViewProps> = ({ node, pluginId }) => (
+  <FirewallView node={node} pluginId={pluginId} />
 );
 
 const TailscaleExplorerViewAdapter: React.FC<PluginViewProps> = ({ node, onOpenTerminal }) => (
@@ -446,6 +446,9 @@ export const PLUGIN_VIEW_REGISTRY: Record<string, PluginViewComponent> = {
 
   // Firewall
   'firewall/firewalld': FirewallViewAdapter,
+  'firewall/iptables': FirewallViewAdapter,
+  'firewall/nftables': FirewallViewAdapter,
+  'firewall/ufw': FirewallViewAdapter,
   'firewall': FirewallViewAdapter,
 
   // VMs
