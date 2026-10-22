@@ -15,13 +15,49 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+// SettingsPageID is the route slug of the datacenter-wide SSH transport settings page.
+const SettingsPageID = "connection/ssh"
+
+// Default SSH transport values when no per-host override or persisted setting is configured.
+const (
+	DefaultUser           = "core"
+	DefaultPort           = 22
+	DefaultTimeoutSeconds = 8
+)
+
+// Settings field names for connection/ssh.
+const (
+	FieldDefaultUser          = "defaultUser"
+	FieldDefaultPort          = "defaultPort"
+	FieldConnectTimeoutSecs   = "connectTimeoutSeconds"
+	FieldAgentForwarding      = "agentForwarding"
+	FieldHostKeyPolicy        = "hostKeyPolicy"
+	FieldPrivateKeyVaultVar   = "privateKeyVaultVar"
+)
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Dialer                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func init() {
 	_ = plugin.Register(New())
 }
 
-// Plugin implements plugin.Plugin and plugin.Dialer for standard SSH connections.
+// Plugin implements plugin.Plugin, plugin.Dialer, and the v2 newapi contracts
+// for standard SSH connections.
 type Plugin struct {
 	mu      sync.Mutex
 	clients map[string]*ssh.Client
@@ -37,7 +73,7 @@ func New() *Plugin {
 // Meta returns metadata for the SSH plugin.
 func (p *Plugin) Meta() plugin.Meta {
 	return plugin.Meta{
-		ID:          "connection/ssh",
+		ID:          SettingsPageID,
 		Kind:        plugin.KindConnection,
 		Name:        "ssh",
 		Label:       "Secure Shell (SSH)",
@@ -45,6 +81,124 @@ func (p *Plugin) Meta() plugin.Meta {
 		Description: "Pure-Go SSH connection provider with agent forwarding and known-hosts accept-new semantics",
 		Order:       10,
 	}
+}
+
+// CollectionSchedule returns the standard polling cadence and cache TTL
+// schedule for SSH transport status inspection.
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema documents the v2 payload structure emitted by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "ssh",
+		Description: p.Meta().Description,
+	}
+}
+
+// CategorizedSettingsPage declares datacenter-wide SSH transport defaults via
+// settingsframework.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	meta := p.Meta()
+	return settingsframework.NewPageBuilder(SettingsPageID, "SSH Connection Defaults").
+		WithIcon(meta.Icon).
+		WithCategory(string(meta.Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(meta.Order).
+		WithDescription("Datacenter-wide OpenSSH connection user, port, handshake timeout, agent forwarding, and Ansible Vault key defaults.").
+		StringField(
+			FieldDefaultUser,
+			"Default SSH User",
+			DefaultUser,
+			settingsframework.WithRequired(true),
+			settingsframework.WithPlaceholder(DefaultUser),
+			settingsframework.WithDescription("Default system username used when dialing SSH nodes without a per-host user override."),
+		).
+		IntField(
+			FieldDefaultPort,
+			"Default SSH Port",
+			DefaultPort,
+			settingsframework.WithMinMax(1, 65535),
+			settingsframework.WithDescription("Default TCP port used for SSH connections when no per-host port override is set."),
+		).
+		IntField(
+			FieldConnectTimeoutSecs,
+			"Connection Handshake Timeout (Seconds)",
+			DefaultTimeoutSeconds,
+			settingsframework.WithMinMax(1, 120),
+			settingsframework.WithDescription("TCP and SSH handshake timeout in seconds before marking a target host unreachable."),
+		).
+		BoolField(
+			FieldAgentForwarding,
+			"Enable SSH Agent Authentication",
+			true,
+			settingsframework.WithDescription("Authenticate via local SSH_AUTH_SOCK / systemd user ssh-agent socket when available."),
+		).
+		SelectField(
+			FieldHostKeyPolicy,
+			"Host Key Verification Policy",
+			"accept-new",
+			[]plugin.SettingsFieldOption{
+				{Value: "accept-new", Label: "Accept New (StrictHostKeyChecking=accept-new)"},
+				{Value: "strict", Label: "Strict Known Hosts"},
+				{Value: "ignore", Label: "Ignore Host Key Changes"},
+			},
+			settingsframework.WithDescription("Host key verification policy applied to non-interactive SSH connections."),
+		).
+		SecretField(
+			FieldPrivateKeyVaultVar,
+			"Default Private Key Vault Variable",
+			settingsframework.WithPlaceholder("vault_ssh_private_key"),
+			settingsframework.WithDescription("Optional Ansible Vault variable holding the fallback SSH private key. Never returned in plaintext."),
+		).
+		BuildCategorized()
+}
+
+// SettingsPage returns the underlying plugin.SettingsPage for legacy consumers.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
+}
+
+func defaultSSHUser() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault(SettingsPageID, FieldDefaultUser, DefaultUser)
+}
+
+func defaultSSHPort() int {
+	port := settingsframework.NewStoreAdapter(nil).IntOrDefault(SettingsPageID, FieldDefaultPort, DefaultPort)
+	if port <= 0 || port > 65535 {
+		return DefaultPort
+	}
+	return port
+}
+
+func defaultSSHTimeout() time.Duration {
+	secs := settingsframework.NewStoreAdapter(nil).IntOrDefault(SettingsPageID, FieldConnectTimeoutSecs, DefaultTimeoutSeconds)
+	if secs <= 0 {
+		secs = DefaultTimeoutSeconds
+	}
+	return time.Duration(secs) * time.Second
+}
+
+func defaultAgentForwarding() bool {
+	return settingsframework.NewStoreAdapter(nil).BoolOrDefault(SettingsPageID, FieldAgentForwarding, true)
+}
+
+// ContextMenuEntries provides node-level SSH context menu actions for compatible hosts.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	meta := p.Meta()
+	return newapi.NewContextMenuBuilder(meta.ID).
+		WithTarget(newapi.TargetNode).
+		WithGroup(string(meta.Kind)).
+		AddAction("test_connection", "Test SSH Connectivity", "network_check", "test_connection", 10).
+		AddAction("authorize_key", "Authorize SSH Public Key", "vpn_key", "authorize_key", 20).
+		AddDangerAction("restart_sshd", "Restart OpenSSH Daemon", "restart_alt", "restart_sshd",
+			"Restart the OpenSSH server daemon (sshd) on this host?", 90).
+		Build()
 }
 
 // Compatible checks if the host facts are compatible with SSH.
@@ -143,18 +297,33 @@ func getSSHAgentAuthMethod() (ssh.AuthMethod, io.Closer) {
 	return ssh.PublicKeysCallback(agentClient.Signers), conn
 }
 
+func resolveEffectiveUser(h plugin.HostFacts) string {
+	if u, ok := h.Overrides["user"]; ok && strings.TrimSpace(u) != "" {
+		return strings.TrimSpace(u)
+	}
+	return defaultSSHUser()
+}
+
+func resolveEffectivePort(h plugin.HostFacts) int {
+	if pStr, ok := h.Overrides["port"]; ok && strings.TrimSpace(pStr) != "" {
+		if pVal, err := strconv.Atoi(strings.TrimSpace(pStr)); err == nil && pVal > 0 && pVal <= 65535 {
+			return pVal
+		}
+	}
+	return defaultSSHPort()
+}
+
 // BuildClientConfig builds an ssh.ClientConfig from HostFacts.
 func BuildClientConfig(h plugin.HostFacts) (*ssh.ClientConfig, error) {
-	user := "core"
-	if u, ok := h.Overrides["user"]; ok && u != "" {
-		user = u
-	}
+	user := resolveEffectiveUser(h)
 
 	var authMethods []ssh.AuthMethod
 
 	// 1. Agent forwarding
-	if agentAuth, _ := getSSHAgentAuthMethod(); agentAuth != nil {
-		authMethods = append(authMethods, agentAuth)
+	if defaultAgentForwarding() {
+		if agentAuth, _ := getSSHAgentAuthMethod(); agentAuth != nil {
+			authMethods = append(authMethods, agentAuth)
+		}
 	}
 
 	// 2. Private Key
@@ -177,9 +346,9 @@ func BuildClientConfig(h plugin.HostFacts) (*ssh.ClientConfig, error) {
 		authMethods = append(authMethods, ssh.Password(pass))
 	}
 
-	timeout := 8 * time.Second
+	timeout := defaultSSHTimeout()
 	if tStr, ok := h.Overrides["timeout"]; ok && tStr != "" {
-		if d, err := time.ParseDuration(tStr); err == nil {
+		if d, err := time.ParseDuration(tStr); err == nil && d > 0 {
 			timeout = d
 		}
 	}
@@ -208,17 +377,8 @@ func (p *Plugin) GetClient(h plugin.HostFacts) (*ssh.Client, error) {
 		return nil, fmt.Errorf("hostRoute is required")
 	}
 
-	port := 22
-	if pStr, ok := h.Overrides["port"]; ok && pStr != "" {
-		if pVal, err := strconv.Atoi(pStr); err == nil && pVal > 0 {
-			port = pVal
-		}
-	}
-
-	user := "core"
-	if u, ok := h.Overrides["user"]; ok && u != "" {
-		user = u
-	}
+	port := resolveEffectivePort(h)
+	user := resolveEffectiveUser(h)
 
 	key := fmt.Sprintf("%s@%s:%d", user, host, port)
 
@@ -283,6 +443,253 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		Status:   "ONLINE",
 		Details:  strings.TrimSpace(out),
 	}, nil
+}
+
+// Read inspects live SSH transport and OpenSSH server status on the target host.
+func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (any, error) {
+	if r == nil {
+		return nil, fmt.Errorf("runner is nil")
+	}
+
+	out, err := r.RunCommand(ctx, "ssh -V 2>&1 || uname -n")
+	if err != nil {
+		return nil, fmt.Errorf("ssh status read failed: %w", err)
+	}
+
+	version := strings.TrimSpace(out)
+	user := resolveEffectiveUser(h)
+	port := resolveEffectivePort(h)
+
+	return map[string]any{
+		"ssh": map[string]any{
+			"status":         "ONLINE",
+			"host":           h.HostRoute,
+			"user":           user,
+			"port":           port,
+			"version":        version,
+			"agentAvailable": resolveAgentSocketPath() != "",
+		},
+	}, nil
+}
+
+// ManagementActions returns the v2 management action specifications for SSH transport and access management.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "test_connection",
+				Label:       "Test SSH Connectivity",
+				Description: "Verify non-interactive SSH connectivity and handshake against the target host",
+				Options: []plugin.OptionSchema{
+					{
+						Name:        "timeout",
+						Type:        "int",
+						Required:    false,
+						Default:     DefaultTimeoutSeconds,
+						Description: "Maximum seconds to wait for SSH connectivity verification",
+					},
+				},
+			},
+			Category:         newapi.ActionCategoryDiagnostic,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindConnection},
+		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "authorize_key",
+				Label:       "Authorize SSH Public Key",
+				Description: "Install or remove an SSH public key in the target user's authorized_keys file",
+				Options: []plugin.OptionSchema{
+					{
+						Name:        "user",
+						Type:        "string",
+						Required:    false,
+						Default:     DefaultUser,
+						Description: "Target system account username (defaults to host or datacenter SSH user)",
+					},
+					{
+						Name:        "public_key",
+						Type:        "string",
+						Required:    true,
+						Secret:      true,
+						Description: "OpenSSH public key string (e.g. ssh-ed25519 AAAA...)",
+					},
+					{
+						Name:        "state",
+						Type:        "select",
+						Required:    false,
+						Default:     "present",
+						Enum:        []string{"present", "absent"},
+						Description: "Whether the SSH public key should be present or absent",
+					},
+				},
+			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindConnection},
+		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "restart_sshd",
+				Label:       "Restart OpenSSH Daemon",
+				Description: "Restart the OpenSSH server daemon (sshd) on the target host",
+				Options: []plugin.OptionSchema{
+					{
+						Name:        "service",
+						Type:        "string",
+						Required:    false,
+						Default:     "sshd",
+						Description: "OpenSSH systemd service name (e.g. sshd or ssh)",
+					},
+				},
+			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Restart the OpenSSH server daemon (sshd) on this host?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindConnection},
+		},
+	}
+}
+
+// Actions enumerates mutation actions supported by the SSH plugin.
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+// ValidateAction validates options against the declared ManagementActionSpec.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	norm := strings.TrimSpace(action)
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, norm) {
+			return newapi.ValidateManagementOptions(spec, opts)
+		}
+	}
+	return fmt.Errorf("unsupported %s action: %s", p.Meta().Name, action)
+}
+
+// CompileTask adapts a typed v2 TaskRequest to the plugin's declarative Ansible TaskSpec compiler.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
+}
+
+// Compile compiles an SSH management action into a declarative Ansible TaskSpec.
+func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
+	if opts == nil {
+		opts = map[string]any{}
+	}
+	if err := p.ValidateAction(h, action, opts); err != nil {
+		return plugin.TaskSpec{}, err
+	}
+
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "test_connection":
+		timeout := DefaultTimeoutSeconds
+		switch v := opts["timeout"].(type) {
+		case int:
+			if v > 0 {
+				timeout = v
+			}
+		case float64:
+			if int(v) > 0 {
+				timeout = int(v)
+			}
+		case string:
+			if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && parsed > 0 {
+				timeout = parsed
+			}
+		}
+		return plugin.TaskSpec{
+			Name: "Verify SSH connectivity",
+			Steps: []plugin.TaskStep{
+				{
+					Name:   "Wait for SSH transport connection",
+					Module: "ansible.builtin.wait_for_connection",
+					Params: map[string]any{
+						"timeout": timeout,
+					},
+				},
+			},
+		}, nil
+
+	case "authorize_key":
+		user, _ := opts["user"].(string)
+		user = strings.TrimSpace(user)
+		if user == "" {
+			user = resolveEffectiveUser(h)
+		}
+		pubKey, _ := opts["public_key"].(string)
+		pubKey = strings.TrimSpace(pubKey)
+		if pubKey == "" {
+			return plugin.TaskSpec{}, fmt.Errorf("public_key is required for authorize_key")
+		}
+		state, _ := opts["state"].(string)
+		state = strings.TrimSpace(state)
+		if state == "" {
+			state = "present"
+		}
+
+		return plugin.TaskSpec{
+			Name: fmt.Sprintf("Authorize SSH key for %s", user),
+			Steps: []plugin.TaskStep{
+				{
+					Name:   fmt.Sprintf("Ensure authorized_keys entry for %s is %s", user, state),
+					Module: "ansible.builtin.lineinfile",
+					Params: map[string]any{
+						"path":   fmt.Sprintf("~%s/.ssh/authorized_keys", user),
+						"line":   pubKey,
+						"state":  state,
+						"create": true,
+						"mode":   "0600",
+						"become": true,
+					},
+				},
+			},
+			SecretsMasked: map[string]string{
+				"public_key": plugin.MaskedSecretValue("public_key"),
+			},
+		}, nil
+
+	case "restart_sshd":
+		service, _ := opts["service"].(string)
+		service = strings.TrimSpace(service)
+		if service == "" {
+			service = "sshd"
+		}
+		return plugin.TaskSpec{
+			Name: fmt.Sprintf("Restart %s service", service),
+			Steps: []plugin.TaskStep{
+				{
+					Name:   fmt.Sprintf("Restart OpenSSH daemon (%s)", service),
+					Module: "ansible.builtin.service",
+					Params: map[string]any{
+						"name":   service,
+						"state":  "restarted",
+						"become": true,
+					},
+				},
+			},
+		}, nil
+
+	default:
+		return plugin.TaskSpec{}, fmt.Errorf("unsupported ssh action: %s", action)
+	}
 }
 
 // Dial satisfies plugin.Dialer, opening a raw TCP connection through standard networking.
