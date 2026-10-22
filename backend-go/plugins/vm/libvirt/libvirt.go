@@ -7,6 +7,53 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+const (
+	// PluginID is the canonical identifier for the libvirt KVM/QEMU VM plugin.
+	PluginID = "vm/libvirt"
+	// SettingsPageID is the settings page identifier for datacenter libvirt defaults.
+	SettingsPageID = "vm/libvirt"
+
+	// DefaultConnectURI is the default libvirt hypervisor connection URI.
+	DefaultConnectURI = "qemu:///system"
+	// DefaultNetworkBridge is the default bridge interface for provisioned VMs.
+	DefaultNetworkBridge = "virbr0"
+	// DefaultVCPUs is the default vCPU count when provisioning a new VM.
+	DefaultVCPUs = 2
+	// DefaultRAMGiB is the default memory allocation in GiB when provisioning a new VM.
+	DefaultRAMGiB = 4
+	// DefaultDiskGiB is the default disk size in GiB when provisioning a new VM.
+	DefaultDiskGiB = 20
+	// DefaultStoragePool is the default libvirt storage pool name.
+	DefaultStoragePool = "default"
+)
+
+// Settings field keys for the libvirt datacenter settings page.
+const (
+	FieldConnectURI           = "connectUri"
+	FieldDefaultBridge        = "defaultBridge"
+	FieldDefaultStoragePool   = "defaultStoragePool"
+	FieldDefaultVCPUs         = "defaultVcpus"
+	FieldDefaultRAMGiB        = "defaultRamGiB"
+	FieldDefaultDiskGiB       = "defaultDiskGb"
+	FieldShutdownBehavior     = "shutdownBehavior"
+	FieldAutostartNewVMs      = "autostartNewVms"
+	FieldSpicePasswordVaultVar = "spicePasswordVaultVar"
+)
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func init() {
@@ -22,7 +69,7 @@ func New() *Plugin {
 
 func (p *Plugin) Meta() plugin.Meta {
 	return plugin.Meta{
-		ID:          "vm/libvirt",
+		ID:          PluginID,
 		Kind:        plugin.KindVM,
 		Name:        "libvirt",
 		Label:       "Virtual Machines (KVM)",
@@ -47,6 +94,112 @@ func (p *Plugin) Requirements() plugin.Requirements {
 			"community.general",
 		},
 	}
+}
+
+// CollectionSchedule returns the standard polling and cache TTL schedule for VM telemetry.
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema documents the payload structure returned by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "vms",
+		Description: p.Meta().Description,
+	}
+}
+
+// CategorizedSettingsPage declares datacenter-wide KVM/libvirt virtualization defaults.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	meta := p.Meta()
+	return settingsframework.NewPageBuilder(SettingsPageID, "KVM / libvirt Virtualization Defaults").
+		WithIcon(meta.Icon).
+		WithCategory(string(meta.Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(meta.Order).
+		WithDescription("Datacenter-wide libvirt connection URI, default VM resource sizing, network bridge, and console security defaults.").
+		StringField(
+			FieldConnectURI,
+			"Default Connection URI",
+			DefaultConnectURI,
+			settingsframework.WithPlaceholder(DefaultConnectURI),
+			settingsframework.WithDescription("Default libvirt hypervisor connection URI (e.g. qemu:///system or qemu:///session)."),
+		).
+		StringField(
+			FieldDefaultBridge,
+			"Default Network Bridge",
+			DefaultNetworkBridge,
+			settingsframework.WithPlaceholder(DefaultNetworkBridge),
+			settingsframework.WithDescription("Default host bridge interface attached to newly provisioned virtual machines."),
+		).
+		StringField(
+			FieldDefaultStoragePool,
+			"Default Storage Pool",
+			DefaultStoragePool,
+			settingsframework.WithPlaceholder(DefaultStoragePool),
+			settingsframework.WithDescription("Default libvirt storage pool used for VM disk allocation."),
+		).
+		IntField(
+			FieldDefaultVCPUs,
+			"Default vCPUs",
+			DefaultVCPUs,
+			settingsframework.WithMinMax(1, 128),
+			settingsframework.WithDescription("Default virtual CPU count when provisioning a new VM without explicit vCPUs."),
+		).
+		IntField(
+			FieldDefaultRAMGiB,
+			"Default Memory (GiB)",
+			DefaultRAMGiB,
+			settingsframework.WithMinMax(1, 1024),
+			settingsframework.WithDescription("Default memory in GiB when provisioning a new VM without explicit RAM."),
+		).
+		IntField(
+			FieldDefaultDiskGiB,
+			"Default Disk Size (GiB)",
+			DefaultDiskGiB,
+			settingsframework.WithMinMax(1, 16384),
+			settingsframework.WithDescription("Default disk capacity in GiB when provisioning a new VM."),
+		).
+		SelectField(
+			FieldShutdownBehavior,
+			"Default Host Shutdown Guest Action",
+			"shutdown",
+			[]plugin.SettingsFieldOption{
+				{Value: "shutdown", Label: "Graceful ACPI Shutdown"},
+				{Value: "suspend", Label: "Managed Save / Suspend"},
+				{Value: "destroy", Label: "Force Power Off"},
+			},
+			settingsframework.WithDescription("Default action taken on running guests when the hypervisor host shuts down."),
+		).
+		BoolField(
+			FieldAutostartNewVMs,
+			"Autostart Newly Created VMs",
+			false,
+			settingsframework.WithDescription("Enable libvirt domain autostart by default when provisioning new virtual machines."),
+		).
+		SecretField(
+			FieldSpicePasswordVaultVar,
+			"SPICE / VNC Console Password Vault Variable",
+			settingsframework.WithPlaceholder("vault_libvirt_spice_password"),
+			settingsframework.WithDescription("Ansible Vault variable name holding the default SPICE/VNC console password."),
+		).
+		BuildCategorized()
+}
+
+// SettingsPage returns the underlying plugin.SettingsPage for legacy settings consumers.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
+}
+
+// ConnectURI returns the persisted datacenter default libvirt URI or DefaultConnectURI.
+func ConnectURI() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault(SettingsPageID, FieldConnectURI, DefaultConnectURI)
+}
+
+// DefaultBridge returns the persisted datacenter default network bridge or DefaultNetworkBridge.
+func DefaultBridge() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault(SettingsPageID, FieldDefaultBridge, DefaultNetworkBridge)
 }
 
 func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (plugin.Detection, error) {
@@ -157,109 +310,222 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}
 
 	return map[string]any{
-		"hasVirsh":       hasVirsh,
-		"hasKvm":         hasKvm,
-		"serviceStatus":  serviceStatus,
-		"kvmModule":      kvmModule,
-		"hypervisor":     fmt.Sprintf("KVM / QEMU (%s)", kvmModule),
-		"vms":            vms,
+		"hasVirsh":      hasVirsh,
+		"hasKvm":        hasKvm,
+		"serviceStatus": serviceStatus,
+		"kvmModule":     kvmModule,
+		"hypervisor":    fmt.Sprintf("KVM / QEMU (%s)", kvmModule),
+		"vms":           vms,
 	}, nil
 }
 
-func (p *Plugin) Actions() []plugin.ActionSpec {
-	return []plugin.ActionSpec{
+// ManagementActions returns structured v2 action specifications for libvirt VM lifecycle and provisioning.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	domainOpt := []plugin.OptionSchema{
+		{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+	}
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "start",
-			Label:       "Start Virtual Machine",
-			Description: "Powers on a virtual machine guest",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "start",
+				Label:       "Start Virtual Machine",
+				Description: "Powers on a virtual machine guest",
+				Options:     domainOpt,
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
 		},
 		{
-			Name:        "shutdown",
-			Label:       "Shutdown Virtual Machine",
-			Description: "Sends ACPI graceful shutdown signal to domain",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "shutdown",
+				Label:       "Shutdown Virtual Machine",
+				Description: "Sends ACPI graceful shutdown signal to domain",
+				Options:     domainOpt,
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
 		},
 		{
-			Name:        "destroy",
-			Label:       "Force Stop Virtual Machine",
-			Description: "Immediately cuts power to domain (equivalent to pulling power cable)",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "destroy",
+				Label:       "Force Stop Virtual Machine",
+				Description: "Immediately cuts power to domain (equivalent to pulling power cable)",
+				Options:     domainOpt,
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Force stop this virtual machine immediately? Unsaved guest data may be lost.",
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
 		},
 		{
-			Name:        "reboot",
-			Label:       "Reboot Virtual Machine",
-			Description: "Reboots a virtual machine guest",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "reboot",
+				Label:       "Reboot Virtual Machine",
+				Description: "Reboots a virtual machine guest",
+				Options:     domainOpt,
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
 		},
 		{
-			Name:        "reset",
-			Label:       "Reset Virtual Machine",
-			Description: "Force resets a virtual machine guest",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "reset",
+				Label:       "Reset Virtual Machine",
+				Description: "Force resets a virtual machine guest",
+				Options:     domainOpt,
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       false,
+			Dangerous:        true,
+			ConfirmPrompt:    "Force reset this virtual machine? Unsaved guest state will be lost.",
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
 		},
 		{
-			Name:        "suspend",
-			Label:       "Suspend Virtual Machine",
-			Description: "Suspends (pauses) a running virtual machine",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "suspend",
+				Label:       "Suspend Virtual Machine",
+				Description: "Suspends (pauses) a running virtual machine",
+				Options:     domainOpt,
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
 		},
 		{
-			Name:        "resume",
-			Label:       "Resume Virtual Machine",
-			Description: "Resumes a suspended (paused) virtual machine",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "resume",
+				Label:       "Resume Virtual Machine",
+				Description: "Resumes a suspended (paused) virtual machine",
+				Options:     domainOpt,
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
 		},
 		{
-			Name:        "create",
-			Label:       "Create Virtual Machine",
-			Description: "Provisions a new KVM/QEMU virtual machine",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "Virtual machine domain name"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "create",
+				Label:       "Create Virtual Machine",
+				Description: "Provisions a new KVM/QEMU virtual machine",
+				Options:     domainOpt,
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
 		},
 	}
 }
 
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+// ValidateAction validates options for a libvirt management action against its schema.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	norm := strings.ToLower(strings.TrimSpace(action))
+
+	normalizedOpts := make(map[string]any, len(opts)+1)
+	for k, v := range opts {
+		normalizedOpts[k] = v
+	}
+	if name, _ := normalizedOpts["name"].(string); strings.TrimSpace(name) == "" {
+		if vmid, ok := normalizedOpts["vmid"].(string); ok && strings.TrimSpace(vmid) != "" {
+			normalizedOpts["name"] = strings.TrimSpace(vmid)
+		}
+	} else {
+		normalizedOpts["name"] = strings.TrimSpace(name)
+	}
+
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, norm) {
+			return newapi.ValidateManagementOptions(spec, normalizedOpts)
+		}
+	}
+	return fmt.Errorf("unsupported libvirt action: %s", action)
+}
+
+// ContextMenuEntries provides virtual machine context menu items for compatible hosts.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	return newapi.NewContextMenuBuilder(PluginID).
+		WithTarget(newapi.TargetVM).
+		WithGroup(string(plugin.KindVM)).
+		AddAction("libvirt-start", "Start Virtual Machine", "play_arrow", "start", 10).
+		AddAction("libvirt-shutdown", "Shutdown Virtual Machine", "power_settings_new", "shutdown", 20).
+		AddAction("libvirt-reboot", "Reboot Virtual Machine", "restart_alt", "reboot", 30).
+		AddAction("libvirt-suspend", "Suspend Virtual Machine", "pause_circle", "suspend", 40).
+		AddAction("libvirt-resume", "Resume Virtual Machine", "play_circle", "resume", 50).
+		AddAction("libvirt-create", "Create Virtual Machine", "add_to_queue", "create", 60).
+		AddDangerAction(
+			"libvirt-reset",
+			"Reset Virtual Machine",
+			"replay",
+			"reset",
+			"Force reset this virtual machine? Unsaved guest state will be lost.",
+			80,
+		).
+		AddDangerAction(
+			"libvirt-destroy",
+			"Force Stop Virtual Machine",
+			"power_off",
+			"destroy",
+			"Force stop this virtual machine immediately? Unsaved guest data may be lost.",
+			90,
+		).
+		Build()
+}
+
+// CompileTask implements newapi.TaskCompileProvider to compile typed TaskRequests into Ansible TaskSpecs.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", PluginID)
+	}
+	return p.Compile(h, action, req.Params)
+}
+
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
-	norm := strings.ToLower(action)
+	norm := strings.ToLower(strings.TrimSpace(action))
 	name, _ := opts["name"].(string)
 	if name == "" {
 		name, _ = opts["vmid"].(string)
 	}
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return plugin.TaskSpec{}, fmt.Errorf("vm domain name is required")
 	}
 
 	if norm == "create" {
-		vcpus := 2
+		vcpus := DefaultVCPUs
 		if v, ok := opts["vcpus"].(int); ok && v > 0 {
 			vcpus = v
 		} else if vf, ok := opts["vcpus"].(float64); ok && vf > 0 {
 			vcpus = int(vf)
 		}
-		ramGiB := 4
+		ramGiB := DefaultRAMGiB
 		if r, ok := opts["ramGiB"].(int); ok && r > 0 {
 			ramGiB = r
 		} else if rf, ok := opts["ramGiB"].(float64); ok && rf > 0 {
 			ramGiB = int(rf)
 		}
 		ramMb := ramGiB * 1024
-		diskGb := 20
+		diskGb := DefaultDiskGiB
 		if d, ok := opts["diskGb"].(int); ok && d > 0 {
 			diskGb = d
 		} else if df, ok := opts["diskGb"].(float64); ok && df > 0 {
@@ -267,7 +533,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		}
 		bridge, _ := opts["bridge"].(string)
 		if bridge == "" {
-			bridge = "virbr0"
+			bridge = DefaultBridge()
 		}
 		cmd := fmt.Sprintf("virt-install --name %q --vcpus %d --memory %d --disk size=%d --network bridge=%s --noautoconsole --import --check path_in_use=off 2>&1 || virsh define /dev/stdin << 'EOF'\n<domain type='kvm'><name>%s</name><memory unit='MiB'>%d</memory><vcpu>%d</vcpu><os><type arch='x86_64'>hvm</type></os></domain>\nEOF 2>&1", name, vcpus, ramMb, diskGb, bridge, name, ramMb, vcpus)
 		return plugin.TaskSpec{
