@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 )
 
 // fakeRunner records the command it received and returns canned output.
@@ -138,5 +141,200 @@ func TestProbe_Unavailable(t *testing.T) {
 	}
 	if d.Detected || d.Status != "UNAVAILABLE" {
 		t.Errorf("expected UNAVAILABLE detection, got %+v", d)
+	}
+}
+
+func TestProbe_NilRunner(t *testing.T) {
+	d, err := New().Probe(context.Background(), nil, plugin.HostFacts{})
+	if err != nil {
+		t.Fatalf("Probe returned error: %v", err)
+	}
+	if d.Detected || d.Status != "OFFLINE" {
+		t.Errorf("expected OFFLINE detection for nil runner, got %+v", d)
+	}
+}
+
+func TestCompatible_HostFacts(t *testing.T) {
+	p := New()
+	if !p.Compatible(plugin.HostFacts{OSFamily: "linux"}) {
+		t.Error("expected compatible with linux")
+	}
+	if !p.Compatible(plugin.HostFacts{OSFamily: "linux", ActivePackage: "package/bootc"}) {
+		t.Error("expected compatible when ActivePackage is package/bootc")
+	}
+	if p.Compatible(plugin.HostFacts{OSFamily: "windows"}) {
+		t.Error("expected incompatible with windows")
+	}
+	if p.Compatible(plugin.HostFacts{OSFamily: "linux", ActivePackage: "package/dnf"}) {
+		t.Error("expected incompatible when ActivePackage is package/dnf")
+	}
+}
+
+func TestCompile_UpdateAndSwitch(t *testing.T) {
+	p := New()
+	facts := plugin.HostFacts{OSFamily: "linux"}
+
+	updateSpec, err := p.Compile(facts, "update", map[string]any{})
+	if err != nil {
+		t.Fatalf("Compile update failed: %v", err)
+	}
+	if updateSpec.Name != "bootc update" || len(updateSpec.Steps) != 1 {
+		t.Fatalf("unexpected update spec: %+v", updateSpec)
+	}
+	if updateSpec.Steps[0].Module != "ansible.builtin.command" || updateSpec.Steps[0].Params["cmd"] != "bootc upgrade" {
+		t.Errorf("unexpected update step: %+v", updateSpec.Steps[0])
+	}
+
+	switchSpec, err := p.Compile(facts, "switch", map[string]any{"image": "quay.io/org/os:latest"})
+	if err != nil {
+		t.Fatalf("Compile switch failed: %v", err)
+	}
+	if switchSpec.Name != "bootc switch" || len(switchSpec.Steps) != 1 {
+		t.Fatalf("unexpected switch spec: %+v", switchSpec)
+	}
+	if switchSpec.Steps[0].Module != "ansible.builtin.command" || switchSpec.Steps[0].Params["cmd"] != "bootc switch quay.io/org/os:latest" {
+		t.Errorf("unexpected switch step: %+v", switchSpec.Steps[0])
+	}
+
+	if _, err := p.Compile(facts, "switch", map[string]any{}); err == nil {
+		t.Error("expected error when image is missing for switch")
+	}
+	if _, err := p.Compile(facts, "unknown", map[string]any{}); err == nil {
+		t.Error("expected error for unsupported action")
+	}
+}
+
+func TestBootcPlugin_NewAPIInterfacesAndSchemas(t *testing.T) {
+	p, ok := plugin.Get("package/bootc")
+	if !ok {
+		t.Fatalf("package/bootc not registered in DefaultRegistry")
+	}
+
+	// 1. DataCollectionPlugin
+	dc, ok := p.(newapi.DataCollectionPlugin)
+	if !ok {
+		t.Fatalf("package/bootc does not implement newapi.DataCollectionPlugin")
+	}
+	sched := dc.CollectionSchedule()
+	if sched.Interval != 60*time.Second || sched.TTL != 60*time.Second {
+		t.Errorf("unexpected collection schedule for package/bootc: %+v", sched)
+	}
+	schema := dc.CollectionSchema()
+	if schema.Version != "v2" || schema.RootKey != "currentImage" {
+		t.Errorf("unexpected collection schema: %+v", schema)
+	}
+
+	// 2. ManagementPlugin & action parity
+	mgmt, ok := p.(newapi.ManagementPlugin)
+	if !ok {
+		t.Fatalf("package/bootc does not implement newapi.ManagementPlugin")
+	}
+	mgmtActions := mgmt.ManagementActions()
+	legacyActions := p.(plugin.Actor).Actions()
+	if len(mgmtActions) != 2 || len(legacyActions) != len(mgmtActions) {
+		t.Fatalf("expected 2 management actions matching legacy Actions(), got mgmt=%d legacy=%d", len(mgmtActions), len(legacyActions))
+	}
+	for i, ma := range mgmtActions {
+		if ma.Name != legacyActions[i].Name {
+			t.Errorf("action[%d] name mismatch: %q vs %q", i, ma.Name, legacyActions[i].Name)
+		}
+		if !ma.Idempotent || len(ma.InvalidatesKinds) == 0 || ma.InvalidatesKinds[0] != plugin.KindPackage {
+			t.Errorf("unexpected management metadata for %q: %+v", ma.Name, ma)
+		}
+		if ma.Name == "switch" && (!ma.Dangerous || ma.ConfirmPrompt == "") {
+			t.Errorf("expected switch to be marked dangerous with a confirmation prompt: %+v", ma)
+		}
+	}
+
+	facts := plugin.HostFacts{NodeID: "node-bootc-1", OSFamily: "linux"}
+	if err := mgmt.ValidateAction(facts, "update", map[string]any{}); err != nil {
+		t.Errorf("expected valid update options to pass ValidateAction, got %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "switch", map[string]any{"image": "quay.io/org/os:latest"}); err != nil {
+		t.Errorf("expected valid switch options to pass ValidateAction, got %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "switch", map[string]any{}); err == nil {
+		t.Errorf("expected missing required image option for switch to fail ValidateAction")
+	}
+	if err := mgmt.ValidateAction(facts, "unknown_action", nil); err == nil {
+		t.Errorf("expected unknown action to fail ValidateAction")
+	}
+
+	// 3. CategorizedSettingsProvider & settingsframework validation
+	csp, ok := p.(newapi.CategorizedSettingsProvider)
+	if !ok {
+		t.Fatalf("package/bootc does not implement newapi.CategorizedSettingsProvider")
+	}
+	catPage := csp.CategorizedSettingsPage()
+	if err := settingsframework.ValidateSchema(catPage.SettingsPage); err != nil {
+		t.Fatalf("ValidateSchema failed for package/bootc settings page: %v", err)
+	}
+	if err := newapi.ValidateCategorizedSettingsPage(catPage); err != nil {
+		t.Fatalf("ValidateCategorizedSettingsPage failed for package/bootc: %v", err)
+	}
+	if catPage.ID != "package/bootc" || catPage.Scope != newapi.SettingsScopeDatacenter || catPage.Category != "package" {
+		t.Errorf("unexpected categorized settings page metadata: %+v", catPage)
+	}
+	if _, ok := plugin.GetCategorizedSettingsPage("package/bootc"); !ok {
+		t.Errorf("expected package/bootc categorized settings page to be indexed in DefaultRegistry")
+	}
+
+	// 4. ContextMenuProvider
+	cmp, ok := p.(newapi.ContextMenuProvider)
+	if !ok {
+		t.Fatalf("package/bootc does not implement newapi.ContextMenuProvider")
+	}
+	entries := cmp.ContextMenuEntries(context.Background(), facts)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 context menu entries for compatible linux host, got %d (%+v)", len(entries), entries)
+	}
+	for _, entry := range entries {
+		if entry.PluginID != "package/bootc" || entry.Target != newapi.TargetNode || entry.Action == "" {
+			t.Errorf("unexpected context menu entry metadata: %+v", entry)
+		}
+	}
+	if winEntries := cmp.ContextMenuEntries(context.Background(), plugin.HostFacts{OSFamily: "windows"}); len(winEntries) != 0 {
+		t.Errorf("expected nil/empty context menu entries for incompatible windows host, got %+v", winEntries)
+	}
+	if dnfEntries := cmp.ContextMenuEntries(context.Background(), plugin.HostFacts{OSFamily: "linux", ActivePackage: "package/dnf"}); len(dnfEntries) != 0 {
+		t.Errorf("expected nil/empty context menu entries when ActivePackage is package/dnf, got %+v", dnfEntries)
+	}
+
+	// 5. TaskCompileProvider
+	tcp, ok := p.(newapi.TaskCompileProvider)
+	if !ok {
+		t.Fatalf("package/bootc does not implement newapi.TaskCompileProvider")
+	}
+	compiledUpdate, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypePluginAction,
+		PluginID: "package/bootc",
+		Action:   "update",
+		NodeID:   "node-bootc-1",
+	})
+	if err != nil {
+		t.Fatalf("CompileTask update failed: %v", err)
+	}
+	if len(compiledUpdate.Steps) != 1 || compiledUpdate.Name != "bootc update" || compiledUpdate.Steps[0].Params["cmd"] != "bootc upgrade" {
+		t.Errorf("unexpected CompileTask update result: %+v", compiledUpdate)
+	}
+
+	compiledSwitch, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypePluginAction,
+		PluginID: "package/bootc",
+		NodeID:   "node-bootc-1",
+		Params: map[string]any{
+			"action": "switch",
+			"image":  "quay.io/acme/os:latest",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask switch failed: %v", err)
+	}
+	if len(compiledSwitch.Steps) != 1 || compiledSwitch.Name != "bootc switch" || compiledSwitch.Steps[0].Params["cmd"] != "bootc switch quay.io/acme/os:latest" {
+		t.Errorf("unexpected CompileTask switch result: %+v", compiledSwitch)
+	}
+
+	if _, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{NodeID: "node-bootc-1"}); err == nil {
+		t.Errorf("expected error when CompileTask is called without an action")
 	}
 }
