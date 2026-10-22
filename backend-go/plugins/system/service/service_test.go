@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+	_ "air-traffic-control/backend/plugins/all"
 	"air-traffic-control/backend/plugins/system/service"
 )
 
@@ -51,6 +55,16 @@ func TestServicePlugin_RegistrationAndMeta(t *testing.T) {
 		t.Errorf("expected Kind 'system', got %q", meta.Kind)
 	}
 
+	if !p.Compatible(plugin.HostFacts{OSFamily: "linux"}) {
+		t.Error("expected system/service to be compatible with linux")
+	}
+	if p.Compatible(plugin.HostFacts{OSFamily: "windows"}) {
+		t.Error("expected system/service to be incompatible with windows")
+	}
+	if p.Compatible(plugin.HostFacts{OSFamily: "router_switch"}) {
+		t.Error("expected system/service to be incompatible with router_switch")
+	}
+
 	actor, ok := p.(plugin.Actor)
 	if !ok {
 		t.Fatalf("expected system/service to implement plugin.Actor")
@@ -68,6 +82,16 @@ func TestServicePlugin_Probe(t *testing.T) {
 	if !ok {
 		t.Fatal("plugin system/service not registered")
 	}
+
+	t.Run("nil runner offline", func(t *testing.T) {
+		det, err := p.Probe(ctx, nil, plugin.HostFacts{OSFamily: "linux"})
+		if err != nil {
+			t.Fatalf("Probe error: %v", err)
+		}
+		if det.Detected || det.Status != "OFFLINE" {
+			t.Errorf("expected OFFLINE for nil runner, got %+v", det)
+		}
+	})
 
 	t.Run("systemd detected", func(t *testing.T) {
 		runner := &mockRunner{
@@ -99,6 +123,22 @@ func TestServicePlugin_Probe(t *testing.T) {
 		}
 		if !det.Detected {
 			t.Errorf("expected service to be detected")
+		}
+	})
+
+	t.Run("neither detected unavailable", func(t *testing.T) {
+		runner := &mockRunner{
+			errs: map[string]error{
+				"systemctl": fmt.Errorf("not found"),
+				"service":   fmt.Errorf("not found"),
+			},
+		}
+		det, err := p.Probe(ctx, runner, plugin.HostFacts{OSFamily: "linux"})
+		if err != nil {
+			t.Fatalf("Probe error: %v", err)
+		}
+		if det.Detected || det.Status != "UNAVAILABLE" {
+			t.Errorf("expected UNAVAILABLE, got %+v", det)
 		}
 	})
 }
@@ -364,4 +404,169 @@ func TestServicePlugin_Read(t *testing.T) {
 			t.Fatalf("expected non-nil response")
 		}
 	})
+}
+
+func TestServicePlugin_NewAPICompliance(t *testing.T) {
+	p, ok := plugin.Get("system/service")
+	if !ok {
+		t.Fatalf("system/service not registered in DefaultRegistry")
+	}
+
+	// 1. DataCollectionPlugin
+	dc, ok := p.(newapi.DataCollectionPlugin)
+	if !ok {
+		t.Fatalf("system/service does not implement newapi.DataCollectionPlugin")
+	}
+	sched := dc.CollectionSchedule()
+	if sched.Interval != 60*time.Second || sched.TTL != 60*time.Second {
+		t.Errorf("unexpected collection schedule for system/service: %+v", sched)
+	}
+	schema := dc.CollectionSchema()
+	if schema.Version != "v2" || schema.RootKey != "services" {
+		t.Errorf("unexpected collection schema: %+v", schema)
+	}
+
+	// 2. ManagementPlugin & action parity
+	mgmt, ok := p.(newapi.ManagementPlugin)
+	if !ok {
+		t.Fatalf("system/service does not implement newapi.ManagementPlugin")
+	}
+	mgmtActions := mgmt.ManagementActions()
+	legacyActions := p.(plugin.Actor).Actions()
+	if len(mgmtActions) != 9 || len(legacyActions) != len(mgmtActions) {
+		t.Fatalf("expected 9 management actions matching legacy Actions(), got mgmt=%d legacy=%d", len(mgmtActions), len(legacyActions))
+	}
+	for i := range mgmtActions {
+		if mgmtActions[i].Name != legacyActions[i].Name {
+			t.Errorf("action mismatch at %d: mgmt=%q legacy=%q", i, mgmtActions[i].Name, legacyActions[i].Name)
+		}
+		if len(mgmtActions[i].InvalidatesKinds) == 0 || mgmtActions[i].InvalidatesKinds[0] != plugin.KindSystem {
+			t.Errorf("expected action %q to invalidate KindSystem, got %+v", mgmtActions[i].Name, mgmtActions[i].InvalidatesKinds)
+		}
+	}
+
+	facts := plugin.HostFacts{NodeID: "node1", OSFamily: "linux"}
+	if err := mgmt.ValidateAction(facts, "restart", map[string]any{
+		"name":  "sshd.service",
+		"scope": "system",
+	}); err != nil {
+		t.Errorf("expected valid restart options to pass ValidateAction, got %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "restart", map[string]any{
+		"service": "sshd.service",
+	}); err != nil {
+		t.Errorf("expected 'service' alias for unit name to pass ValidateAction, got %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "daemon_reload", map[string]any{
+		"scope": "user",
+	}); err != nil {
+		t.Errorf("expected daemon_reload alias to pass ValidateAction, got %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "restart", map[string]any{}); err == nil {
+		t.Errorf("expected missing required 'name' option to fail ValidateAction")
+	}
+	if err := mgmt.ValidateAction(facts, "restart", map[string]any{
+		"name":  "sshd.service",
+		"scope": "invalid_scope",
+	}); err == nil {
+		t.Errorf("expected invalid enum 'scope' option to fail ValidateAction")
+	}
+	if err := mgmt.ValidateAction(facts, "unknown_action", nil); err == nil {
+		t.Errorf("expected unknown action to fail ValidateAction")
+	}
+
+	// 3. CategorizedSettingsProvider & settingsframework validation
+	csp, ok := p.(newapi.CategorizedSettingsProvider)
+	if !ok {
+		t.Fatalf("system/service does not implement newapi.CategorizedSettingsProvider")
+	}
+	catPage := csp.CategorizedSettingsPage()
+	if err := settingsframework.ValidateSchema(catPage.SettingsPage); err != nil {
+		t.Fatalf("ValidateSchema failed for system/service settings page: %v", err)
+	}
+	if err := newapi.ValidateCategorizedSettingsPage(catPage); err != nil {
+		t.Fatalf("ValidateCategorizedSettingsPage failed for system/service: %v", err)
+	}
+	if catPage.ID != "system/service" || catPage.Scope != newapi.SettingsScopeDatacenter || catPage.Category != "system" {
+		t.Errorf("unexpected categorized settings page metadata: %+v", catPage)
+	}
+	if _, ok := plugin.DefaultRegistry().GetSettingsPage("system/service"); !ok {
+		t.Errorf("expected system/service settings page to be indexed in DefaultRegistry")
+	}
+
+	// 4. ContextMenuProvider
+	cmp, ok := p.(newapi.ContextMenuProvider)
+	if !ok {
+		t.Fatalf("system/service does not implement newapi.ContextMenuProvider")
+	}
+	entries := cmp.ContextMenuEntries(context.Background(), facts)
+	if len(entries) != 8 {
+		t.Fatalf("expected 8 context menu entries for compatible linux host, got %d (%+v)", len(entries), entries)
+	}
+	if entries[0].PluginID != "system/service" || entries[0].Target != newapi.TargetService || entries[0].Action != "start" {
+		t.Errorf("unexpected first context menu entry: %+v", entries[0])
+	}
+	if entries[len(entries)-1].Action != "reboot" || !entries[len(entries)-1].Danger {
+		t.Errorf("expected last context menu entry to be danger reboot action, got %+v", entries[len(entries)-1])
+	}
+	if winEntries := cmp.ContextMenuEntries(context.Background(), plugin.HostFacts{OSFamily: "windows"}); len(winEntries) != 0 {
+		t.Errorf("expected nil/empty context menu entries for incompatible windows host, got %+v", winEntries)
+	}
+	if routerEntries := cmp.ContextMenuEntries(context.Background(), plugin.HostFacts{OSFamily: "router_switch"}); len(routerEntries) != 0 {
+		t.Errorf("expected nil/empty context menu entries for incompatible router_switch host, got %+v", routerEntries)
+	}
+
+	// 5. TaskTypeProvider & TaskCompileProvider
+	ttp, ok := p.(newapi.TaskTypeProvider)
+	if !ok {
+		t.Fatalf("system/service does not implement newapi.TaskTypeProvider")
+	}
+	taskTypes := ttp.TaskTypes()
+	if len(taskTypes) != 1 || taskTypes[0].Type != newapi.TaskTypeServiceControl || taskTypes[0].PluginID != "system/service" {
+		t.Errorf("unexpected TaskTypes(): %+v", taskTypes)
+	}
+
+	tcp, ok := p.(newapi.TaskCompileProvider)
+	if !ok {
+		t.Fatalf("system/service does not implement newapi.TaskCompileProvider")
+	}
+	compiled, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypePluginAction,
+		PluginID: "system/service",
+		Action:   "restart",
+		NodeID:   "node1",
+		Params: map[string]any{
+			"name": "nginx",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask failed: %v", err)
+	}
+	if len(compiled.Steps) != 1 || compiled.Steps[0].Params["name"] != "nginx.service" || compiled.Steps[0].Params["state"] != "restarted" {
+		t.Errorf("unexpected CompileTask steps: %+v", compiled.Steps)
+	}
+
+	compiledServiceControl, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypeServiceControl,
+		PluginID: "system/service",
+		NodeID:   "node1",
+		Params: map[string]any{
+			"service": "sshd",
+			"state":   "reloaded",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask for TaskTypeServiceControl failed: %v", err)
+	}
+	if len(compiledServiceControl.Steps) != 1 || compiledServiceControl.Steps[0].Params["name"] != "sshd.service" || compiledServiceControl.Steps[0].Params["state"] != "reloaded" {
+		t.Errorf("unexpected CompileTask service_control steps: %+v", compiledServiceControl.Steps)
+	}
+
+	if _, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypePluginAction,
+		PluginID: "system/service",
+		NodeID:   "node1",
+	}); err == nil {
+		t.Errorf("expected CompileTask with empty action to return an error")
+	}
 }
