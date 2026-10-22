@@ -9,6 +9,23 @@ import (
 	"time"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+// SettingsPageID is the canonical settings page route slug for the NoSQL plugin.
+const SettingsPageID = "database/nosql"
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func init() {
@@ -50,6 +67,86 @@ func (p *Plugin) Requirements() plugin.Requirements {
 			"community.mongodb",
 		},
 	}
+}
+
+// CollectionSchedule returns the standard polling and cache TTL schedule for NoSQL database inspection.
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema documents the v2 payload structure emitted by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "engines",
+		Description: p.Meta().Description,
+	}
+}
+
+// CategorizedSettingsPage declares datacenter-wide NoSQL database defaults via settingsframework.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	meta := p.Meta()
+	return settingsframework.NewPageBuilder(meta.ID, "NoSQL Database Defaults").
+		WithIcon(meta.Icon).
+		WithCategory(string(meta.Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(meta.Order).
+		WithDescription("Datacenter-wide NoSQL engine ports, query limits, and Ansible Vault credential defaults for Redis/Valkey, MongoDB, CouchDB, and RocksDB.").
+		SelectField("defaultEngine", "Default NoSQL Engine", "redis", []plugin.SettingsFieldOption{
+			{Value: "redis", Label: "Redis"},
+			{Value: "valkey", Label: "Valkey"},
+			{Value: "mongodb", Label: "MongoDB"},
+			{Value: "couchdb", Label: "CouchDB"},
+			{Value: "rocksdb", Label: "RocksDB"},
+		}, settingsframework.WithDescription("Default NoSQL engine targeted when compiling database actions without an explicit engine.")).
+		IntField("redisDefaultPort", "Default Redis / Valkey Port", 6379,
+			settingsframework.WithMinMax(1, 65535),
+			settingsframework.WithDescription("Default TCP port used when probing or inspecting Redis and Valkey instances.")).
+		IntField("mongoDefaultPort", "Default MongoDB Port", 27017,
+			settingsframework.WithMinMax(1, 65535),
+			settingsframework.WithDescription("Default TCP port used when probing or inspecting MongoDB instances.")).
+		IntField("couchDefaultPort", "Default CouchDB Port", 5984,
+			settingsframework.WithMinMax(1, 65535),
+			settingsframework.WithDescription("Default HTTP port used when probing or inspecting CouchDB instances.")).
+		IntField("defaultQueryLimit", "Default Query Row / Key Limit", 50,
+			settingsframework.WithMinMax(1, 10000),
+			settingsframework.WithDescription("Default maximum number of rows or keys returned by raw NoSQL queries.")).
+		SecretField("defaultPasswordVaultVar", "Default Password Vault Variable",
+			settingsframework.WithPlaceholder("vault_nosql_password"),
+			settingsframework.WithDescription("Default Ansible Vault variable name used for NoSQL user and ACL credentials.")).
+		BuildCategorized()
+}
+
+// SettingsPage returns the underlying plugin.SettingsPage for legacy consumers.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
+}
+
+func defaultNoSQLEngine() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault(SettingsPageID, "defaultEngine", "redis")
+}
+
+func defaultNoSQLQueryLimit() int {
+	return settingsframework.NewStoreAdapter(nil).IntOrDefault(SettingsPageID, "defaultQueryLimit", 50)
+}
+
+// ContextMenuEntries provides database context menu actions for compatible hosts.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	meta := p.Meta()
+	return newapi.NewContextMenuBuilder(meta.ID).
+		WithTarget(newapi.TargetDatabase).
+		WithGroup(string(meta.Kind)).
+		AddAction("query", "Run Query / Command", "terminal", "query", 10).
+		AddAction("database_create", "Create Database / Collection", "add_box", "database_create", 20).
+		AddAction("user_create", "Create / Update User", "person_add", "user_create", 30).
+		AddDangerAction("database_drop", "Drop Database / Collection", "delete_forever", "database_drop",
+			"Permanently drop this NoSQL database, collection, or keyspace?", 80).
+		AddDangerAction("user_delete", "Delete User / ACL", "person_remove", "user_delete",
+			"Permanently delete this NoSQL database user or ACL rule?", 90).
+		Build()
 }
 
 // Probe checks for active NoSQL engines (Redis/Valkey, MongoDB, CouchDB, RocksDB) on the host.
@@ -576,61 +673,128 @@ func inspectRocksDB(ctx context.Context, r plugin.Runner, cli string, h plugin.H
 	}
 }
 
-func (p *Plugin) Actions() []plugin.ActionSpec {
-	return []plugin.ActionSpec{
+// ManagementActions returns the v2 management action specifications for NoSQL databases.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "query",
-			Label:       "Run Query / Command",
-			Description: "Execute a raw query, command, or scan on the chosen NoSQL engine (Mongo find/eval, Redis commands, CouchDB REST, RocksDB scan)",
-			Options: []plugin.OptionSchema{
-				{Name: "engine", Type: "select", Required: true, Enum: []string{"redis", "mongodb", "couchdb", "rocksdb"}, Description: "Target engine"},
-				{Name: "database", Type: "string", Required: false, Description: "Database, keyspace, or collection name"},
-				{Name: "command", Type: "string", Required: true, Description: "Query or command string (e.g. 'GET key1', 'db.users.find().limit(5)', 'GET /_all_dbs', 'scan')"},
-				{Name: "limit", Type: "int", Required: false, Default: 50, Description: "Maximum rows/keys to return"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "query",
+				Label:       "Run Query / Command",
+				Description: "Execute a raw query, command, or scan on the chosen NoSQL engine (Mongo find/eval, Redis commands, CouchDB REST, RocksDB scan)",
+				Options: []plugin.OptionSchema{
+					{Name: "engine", Type: "select", Required: true, Enum: []string{"redis", "valkey", "mongodb", "couchdb", "rocksdb"}, Description: "Target engine"},
+					{Name: "database", Type: "string", Required: false, Description: "Database, keyspace, or collection name"},
+					{Name: "command", Type: "string", Required: true, Description: "Query or command string (e.g. 'GET key1', 'db.users.find().limit(5)', 'GET /_all_dbs', 'scan')"},
+					{Name: "limit", Type: "int", Required: false, Default: 50, Description: "Maximum rows/keys to return"},
+				},
 			},
+			Category:         newapi.ActionCategoryDiagnostic,
+			Idempotent:       false,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindDatabase},
 		},
 		{
-			Name:        "database_create",
-			Label:       "Create Database / Collection",
-			Description: "Create a new database, collection, or keyspace in the NoSQL engine",
-			Options: []plugin.OptionSchema{
-				{Name: "engine", Type: "select", Required: true, Enum: []string{"redis", "mongodb", "couchdb", "rocksdb"}, Description: "Target engine"},
-				{Name: "name", Type: "string", Required: true, Description: "Database or collection name"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "database_create",
+				Label:       "Create Database / Collection",
+				Description: "Create a new database, collection, or keyspace in the NoSQL engine",
+				Options: []plugin.OptionSchema{
+					{Name: "engine", Type: "select", Required: true, Enum: []string{"redis", "valkey", "mongodb", "couchdb", "rocksdb"}, Description: "Target engine"},
+					{Name: "name", Type: "string", Required: true, Description: "Database or collection name"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindDatabase},
 		},
 		{
-			Name:        "database_drop",
-			Label:       "Drop Database / Collection",
-			Description: "Drop a database, collection, or keyspace from the NoSQL engine",
-			Options: []plugin.OptionSchema{
-				{Name: "engine", Type: "select", Required: true, Enum: []string{"redis", "mongodb", "couchdb", "rocksdb"}, Description: "Target engine"},
-				{Name: "name", Type: "string", Required: true, Description: "Database or collection name to drop"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "database_drop",
+				Label:       "Drop Database / Collection",
+				Description: "Drop a database, collection, or keyspace from the NoSQL engine",
+				Options: []plugin.OptionSchema{
+					{Name: "engine", Type: "select", Required: true, Enum: []string{"redis", "valkey", "mongodb", "couchdb", "rocksdb"}, Description: "Target engine"},
+					{Name: "name", Type: "string", Required: true, Description: "Database or collection name to drop"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Permanently drop this NoSQL database, collection, or keyspace?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindDatabase},
 		},
 		{
-			Name:        "user_create",
-			Label:       "Create / Update User",
-			Description: "Create or modify a database user or ACL in the NoSQL engine",
-			Options: []plugin.OptionSchema{
-				{Name: "engine", Type: "select", Required: true, Enum: []string{"redis", "mongodb", "couchdb"}, Description: "Target engine"},
-				{Name: "username", Type: "string", Required: true, Description: "User or ACL identifier"},
-				{Name: "password", Type: "string", Required: false, Secret: true, Description: "User password (secret, vault-masked)"},
-				{Name: "passwordVaultKey", Type: "string", Required: false, Description: "Ansible Vault variable name for the password"},
-				{Name: "roles", Type: "string", Required: false, Default: "readWrite", Description: "Roles or permissions (comma or space separated)"},
-				{Name: "database", Type: "string", Required: false, Default: "admin", Description: "Target database for user"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "user_create",
+				Label:       "Create / Update User",
+				Description: "Create or modify a database user or ACL in the NoSQL engine",
+				Options: []plugin.OptionSchema{
+					{Name: "engine", Type: "select", Required: true, Enum: []string{"redis", "valkey", "mongodb", "couchdb"}, Description: "Target engine"},
+					{Name: "username", Type: "string", Required: true, Description: "User or ACL identifier"},
+					{Name: "password", Type: "string", Required: false, Secret: true, Description: "User password (secret, vault-masked)"},
+					{Name: "passwordVaultKey", Type: "string", Required: false, Description: "Ansible Vault variable name for the password"},
+					{Name: "roles", Type: "string", Required: false, Default: "readWrite", Description: "Roles or permissions (comma or space separated)"},
+					{Name: "database", Type: "string", Required: false, Default: "admin", Description: "Target database for user"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindDatabase},
 		},
 		{
-			Name:        "user_delete",
-			Label:       "Delete User / ACL",
-			Description: "Remove a database user or ACL rule",
-			Options: []plugin.OptionSchema{
-				{Name: "engine", Type: "select", Required: true, Enum: []string{"redis", "mongodb", "couchdb"}, Description: "Target engine"},
-				{Name: "username", Type: "string", Required: true, Description: "Username or ACL name to delete"},
-				{Name: "database", Type: "string", Required: false, Default: "admin", Description: "Target database"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "user_delete",
+				Label:       "Delete User / ACL",
+				Description: "Remove a database user or ACL rule",
+				Options: []plugin.OptionSchema{
+					{Name: "engine", Type: "select", Required: true, Enum: []string{"redis", "valkey", "mongodb", "couchdb"}, Description: "Target engine"},
+					{Name: "username", Type: "string", Required: true, Description: "Username or ACL name to delete"},
+					{Name: "database", Type: "string", Required: false, Default: "admin", Description: "Target database"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Permanently delete this NoSQL database user or ACL rule?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindDatabase},
 		},
 	}
+}
+
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+// ValidateAction validates options against the declared ManagementActionSpec.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	norm := strings.ToLower(strings.TrimSpace(action))
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, norm) {
+			return newapi.ValidateManagementOptions(spec, opts)
+		}
+	}
+	return fmt.Errorf("unsupported nosql action: %s", action)
+}
+
+// CompileTask adapts a typed v2 TaskRequest to the plugin's declarative Ansible TaskSpec compiler.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
 
 // Compile converts a declarative NoSQL action into a TaskSpec.
@@ -640,7 +804,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 	norm := strings.ToLower(strings.TrimSpace(action))
 	engine := strings.ToLower(optString(opts, "engine"))
 	if engine == "" {
-		engine = "redis"
+		engine = defaultNoSQLEngine()
 	}
 
 	secretsMasked := make(map[string]string)
@@ -658,7 +822,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 			return plugin.TaskSpec{}, fmt.Errorf("command is required for query action")
 		}
 		db := optString(opts, "database")
-		limit := optIntDefault(opts, "limit", 50)
+		limit := optIntDefault(opts, "limit", defaultNoSQLQueryLimit())
 
 		return compileQueryTask(engine, db, cmd, limit, secretsMasked)
 
