@@ -42,10 +42,27 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 )
+
+// SettingsPageID is the route slug of the datacenter-wide LXC settings page.
+const SettingsPageID = "vm/lxc"
 
 // lxcURI is the libvirt connection URI for the LXC system-container driver.
 const lxcURI = "lxc:///"
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
+)
 
 func init() {
 	_ = plugin.Register(New())
@@ -59,7 +76,7 @@ func New() *Plugin { return &Plugin{} }
 
 func (p *Plugin) Meta() plugin.Meta {
 	return plugin.Meta{
-		ID:    "vm/lxc",
+		ID:    SettingsPageID,
 		Kind:  plugin.KindVM,
 		Name:  "lxc",
 		Label: "Linux Containers (LXC)",
@@ -85,6 +102,72 @@ func (p *Plugin) Requirements() plugin.Requirements {
 			"community.general",
 		},
 	}
+}
+
+// CollectionSchedule returns the standard polling and cache TTL schedule for VM/LXC telemetry.
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema documents the payload structure returned by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "containers",
+		Description: p.Meta().Description,
+	}
+}
+
+// CategorizedSettingsPage declares datacenter-wide LXC defaults via settingsframework.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	meta := p.Meta()
+	return settingsframework.NewPageBuilder(meta.ID, "LXC Container Defaults").
+		WithIcon(meta.Icon).
+		WithCategory(string(meta.Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(meta.Order).
+		WithDescription("Datacenter-wide libvirt LXC connection URI, default container sizing, and shutdown timeout settings.").
+		StringField(
+			"defaultUri",
+			"Libvirt LXC Connection URI",
+			lxcURI,
+			settingsframework.WithPlaceholder(lxcURI),
+			settingsframework.WithDescription("Default libvirt connection URI used for LXC system container inspection and lifecycle actions."),
+		).
+		StringField(
+			"defaultBridge",
+			"Default Network Bridge",
+			"lxcbr0",
+			settingsframework.WithPlaceholder("lxcbr0"),
+			settingsframework.WithDescription("Default host bridge interface used for LXC container networking."),
+		).
+		IntField(
+			"defaultVCPUs",
+			"Default vCPU Allocation",
+			2,
+			settingsframework.WithMinMax(1, 128),
+			settingsframework.WithDescription("Default vCPU count allocated to newly defined LXC containers."),
+		).
+		IntField(
+			"defaultMemoryMiB",
+			"Default Memory Allocation (MiB)",
+			1024,
+			settingsframework.WithMinMax(64, 1048576),
+			settingsframework.WithDescription("Default memory limit in MiB for LXC containers."),
+		).
+		IntField(
+			"shutdownTimeoutSeconds",
+			"Graceful Shutdown Timeout (Seconds)",
+			30,
+			settingsframework.WithMinMax(5, 600),
+			settingsframework.WithDescription("Timeout in seconds when waiting for a graceful LXC container shutdown."),
+		).
+		BuildCategorized()
+}
+
+// SettingsPage implements plugin.SettingsPageProvider.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
 }
 
 // Container is a single LXC domain as reported by libvirt.
@@ -299,39 +382,114 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// ManagementActions returns rich action specifications for LXC lifecycle mutations.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	nameOpt := plugin.OptionSchema{Name: "name", Type: "string", Required: true, Description: "LXC domain name"}
+	return []newapi.ManagementActionSpec{
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "start",
+				Label:       "Start Container",
+				Description: "Starts an LXC container domain (virsh -c lxc:/// start)",
+				Options:     []plugin.OptionSchema{nameOpt},
+			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
+		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "shutdown",
+				Label:       "Graceful Shutdown",
+				Description: "Requests a graceful shutdown of an LXC container domain",
+				Options:     []plugin.OptionSchema{nameOpt},
+			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
+		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "destroy",
+				Label:       "Force Stop",
+				Description: "Immediately destroys (force-stops) an LXC container domain",
+				Options:     []plugin.OptionSchema{nameOpt},
+			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Immediately force-stop this LXC container domain?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
+		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "suspend",
+				Label:       "Suspend Container",
+				Description: "Pauses an LXC container domain",
+				Options:     []plugin.OptionSchema{nameOpt},
+			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindVM},
+		},
+	}
+}
+
 // Actions returns the mutations this stub actually implements. Each compiles to
 // a declarative community.general.virt task against the lxc:/// URI.
 //
 // NOTE: community.general.virt with uri=lxc:/// is UNVERIFIED. See the package
 // doc comment and README.md.
 func (p *Plugin) Actions() []plugin.ActionSpec {
-	nameOpt := plugin.OptionSchema{Name: "name", Type: "string", Required: true, Description: "LXC domain name"}
-	return []plugin.ActionSpec{
-		{
-			Name:        "start",
-			Label:       "Start Container",
-			Description: "Starts an LXC container domain (virsh -c lxc:/// start)",
-			Options:     []plugin.OptionSchema{nameOpt},
-		},
-		{
-			Name:        "shutdown",
-			Label:       "Graceful Shutdown",
-			Description: "Requests a graceful shutdown of an LXC container domain",
-			Options:     []plugin.OptionSchema{nameOpt},
-		},
-		{
-			Name:        "destroy",
-			Label:       "Force Stop",
-			Description: "Immediately destroys (force-stops) an LXC container domain",
-			Options:     []plugin.OptionSchema{nameOpt},
-		},
-		{
-			Name:        "suspend",
-			Label:       "Suspend Container",
-			Description: "Pauses an LXC container domain",
-			Options:     []plugin.OptionSchema{nameOpt},
-		},
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
 	}
+	return specs
+}
+
+// ValidateAction validates options against the declared ManagementActionSpec.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	norm := strings.ToLower(strings.TrimSpace(action))
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, norm) {
+			return newapi.ValidateManagementOptions(spec, opts)
+		}
+	}
+	return fmt.Errorf("unsupported lxc action: %s", action)
+}
+
+// ContextMenuEntries provides LXC container context menu items for compatible hosts.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	return newapi.NewContextMenuBuilder(p.Meta().ID).
+		WithTarget(newapi.TargetVM).
+		WithGroup(string(p.Meta().Kind)).
+		AddAction("lxc-start", "Start Container", "play_arrow", "start", 10).
+		AddAction("lxc-shutdown", "Graceful Shutdown", "power_settings_new", "shutdown", 20).
+		AddAction("lxc-suspend", "Suspend Container", "pause", "suspend", 30).
+		AddDangerAction("lxc-destroy", "Force Stop", "stop_circle", "destroy", "Immediately force-stop this LXC container domain?", 90).
+		Build()
+}
+
+// CompileTask compiles a typed TaskRequest into a declarative Ansible TaskSpec.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
 
 // Compile maps an LXC action onto a declarative community.general.virt task.
