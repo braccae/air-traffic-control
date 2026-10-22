@@ -2,6 +2,7 @@ package firewalld_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -12,9 +13,13 @@ import (
 
 type mockRunner struct {
 	responses map[string]string
+	err       error
 }
 
 func (m *mockRunner) RunCommand(ctx context.Context, cmd string) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
 	for pattern, resp := range m.responses {
 		if strings.Contains(cmd, pattern) {
 			return resp, nil
@@ -69,7 +74,7 @@ func TestFirewalldPlugin_ProbeReadAndCompile(t *testing.T) {
 	}
 
 	m := data.(map[string]any)
-	if m["status"] != "running" || m["nftablesActive"] != true {
+	if m["status"] != "running" || m["nftablesActive"] != true || m["backend"] != "nftables (firewalld)" {
 		t.Errorf("unexpected read result: %+v", m)
 	}
 
@@ -194,5 +199,130 @@ func TestFirewalldPlugin_CompileForwardPortValidation(t *testing.T) {
 		if _, err := actor.Compile(plugin.HostFacts{NodeID: "node1"}, "forward_port", tc.opts); err == nil {
 			t.Errorf("%s: expected an error, got none", tc.name)
 		}
+	}
+}
+
+func TestFirewalldPlugin_ProbeDetectionStates(t *testing.T) {
+	p, ok := plugin.Get("firewall/firewalld")
+	if !ok {
+		t.Fatalf("firewall/firewalld not registered")
+	}
+
+	t.Run("absent when all commands return empty", func(t *testing.T) {
+		runner := &mockRunner{responses: map[string]string{}}
+		det, err := p.Probe(context.Background(), runner, plugin.HostFacts{OSFamily: "linux"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if det.Detected {
+			t.Errorf("expected Detected=false when commands return empty, got %+v", det)
+		}
+		if det.Status != "UNAVAILABLE" {
+			t.Errorf("expected Status=UNAVAILABLE, got %q", det.Status)
+		}
+	})
+
+	t.Run("absent when all commands fail with error", func(t *testing.T) {
+		runner := &mockRunner{err: errors.New("command failed")}
+		det, err := p.Probe(context.Background(), runner, plugin.HostFacts{OSFamily: "linux"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if det.Detected {
+			t.Errorf("expected Detected=false when commands fail, got %+v", det)
+		}
+		if det.Status != "UNAVAILABLE" {
+			t.Errorf("expected Status=UNAVAILABLE, got %q", det.Status)
+		}
+	})
+
+	t.Run("absent when sudo permission error is returned", func(t *testing.T) {
+		runner := &mockRunner{
+			responses: map[string]string{
+				"firewall-cmd --state": "sudo: a password is required",
+				"command -v":           "sudo: a password is required",
+				"systemctl":            "sudo: a password is required",
+			},
+		}
+		det, err := p.Probe(context.Background(), runner, plugin.HostFacts{OSFamily: "linux"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if det.Detected {
+			t.Errorf("expected Detected=false on permission error, got %+v", det)
+		}
+	})
+
+	t.Run("running when firewall-cmd --state prints running", func(t *testing.T) {
+		runner := &mockRunner{
+			responses: map[string]string{
+				"firewall-cmd --state": "running\n",
+			},
+		}
+		det, err := p.Probe(context.Background(), runner, plugin.HostFacts{OSFamily: "linux"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !det.Detected || det.Status != "running" {
+			t.Errorf("expected Detected=true, Status=running, got %+v", det)
+		}
+	})
+
+	t.Run("inactive when only command -v firewall-cmd resolves", func(t *testing.T) {
+		runner := &mockRunner{
+			responses: map[string]string{
+				"firewall-cmd --state":     "not running\n",
+				"command -v firewall-cmd": "/usr/bin/firewall-cmd\n",
+			},
+		}
+		det, err := p.Probe(context.Background(), runner, plugin.HostFacts{OSFamily: "linux"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !det.Detected || det.Status != "inactive" {
+			t.Errorf("expected Detected=true, Status=inactive, got %+v", det)
+		}
+	})
+
+	t.Run("inactive when only systemctl unit is present", func(t *testing.T) {
+		runner := &mockRunner{
+			responses: map[string]string{
+				"systemctl": "# /usr/lib/systemd/system/firewalld.service\n[Unit]\nDescription=firewalld\n",
+			},
+		}
+		det, err := p.Probe(context.Background(), runner, plugin.HostFacts{OSFamily: "linux"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !det.Detected || det.Status != "inactive" {
+			t.Errorf("expected Detected=true, Status=inactive, got %+v", det)
+		}
+	})
+}
+
+func TestFirewalldPlugin_ReadInactiveDoesNotClaimBackend(t *testing.T) {
+	p, ok := plugin.Get("firewall/firewalld")
+	if !ok {
+		t.Fatalf("firewall/firewalld not registered")
+	}
+
+	runner := &mockRunner{
+		responses: map[string]string{
+			"firewall-cmd --state": "not running\n===ZONES===\n===LIST_ALL===\n===NFT===\nNO_NFT",
+		},
+	}
+
+	reader := p.(plugin.Reader)
+	data, err := reader.Read(context.Background(), runner, plugin.HostFacts{OSFamily: "linux"})
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+
+	m := data.(map[string]any)
+	if m["status"] != "inactive" {
+		t.Errorf("expected status=inactive, got %v", m["status"])
+	}
+	if m["backend"] != "" {
+		t.Errorf("expected empty backend when firewalld is not running, got %q", m["backend"])
 	}
 }

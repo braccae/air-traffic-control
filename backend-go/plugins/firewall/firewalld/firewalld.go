@@ -55,8 +55,9 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		return plugin.Detection{Detected: false, Status: "OFFLINE", Error: "runner is nil"}, nil
 	}
 
-	out, err := r.RunCommand(ctx, "sudo -n firewall-cmd --state 2>&1 || firewall-cmd --state 2>&1 || true")
-	if err == nil && strings.Contains(strings.TrimSpace(out), "running") {
+	// 1. Check if firewalld daemon is actively running.
+	out, err := r.RunCommand(ctx, "sudo -n firewall-cmd --state 2>/dev/null || firewall-cmd --state 2>/dev/null || /usr/bin/firewall-cmd --state 2>/dev/null || /usr/sbin/firewall-cmd --state 2>/dev/null || /sbin/firewall-cmd --state 2>/dev/null || true")
+	if err == nil && isFirewalldRunningState(out) {
 		return plugin.Detection{
 			Detected: true,
 			Status:   "running",
@@ -64,30 +65,80 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		}, nil
 	}
 
-	cmdOut, err := r.RunCommand(ctx, "command -v firewall-cmd")
-	if err == nil && strings.TrimSpace(cmdOut) != "" {
+	// 2. Check if the firewall-cmd binary exists in PATH or common absolute locations.
+	cmdOut, err := r.RunCommand(ctx, "command -v firewall-cmd 2>/dev/null || sudo -n sh -c 'command -v firewall-cmd' 2>/dev/null || for p in /usr/bin/firewall-cmd /usr/sbin/firewall-cmd /sbin/firewall-cmd; do [ -x \"$p\" ] && echo \"$p\" && break; done")
+	if err == nil && hasFirewallCmdBinary(cmdOut) {
 		return plugin.Detection{
 			Detected: true,
 			Status:   "inactive",
 			Details:  "firewalld installed but not running",
 		}, nil
 	}
-	// Fallback: check if firewalld service exists via systemctl
-	if _, err := r.RunCommand(ctx, "systemctl cat firewalld >/dev/null 2>&1"); err == nil {
+
+	// 3. Fallback: check if firewalld service unit exists via systemctl.
+	unitOut, err := r.RunCommand(ctx, "sudo -n systemctl cat firewalld 2>/dev/null || systemctl cat firewalld 2>/dev/null || sudo -n systemctl status firewalld 2>/dev/null || systemctl status firewalld 2>/dev/null")
+	if err == nil && isSystemctlUnitPresent(unitOut) {
 		return plugin.Detection{
 			Detected: true,
 			Status:   "inactive",
 			Details:  "firewalld installed but not running",
 		}, nil
 	}
-	// Final fallback: if we can't directly check, assume firewalld is available
-	// on systems that support it (Linux non-Windows). Users can always install
-	// it if needed via the package manager shown in requirements.
+
 	return plugin.Detection{
-		Detected: true,
-		Status:   "inactive",
-		Details:  "firewalld (install via package manager if not present)",
+		Detected: false,
+		Status:   "UNAVAILABLE",
+		Details:  "firewalld / firewall-cmd not found",
 	}, nil
+}
+
+// isFirewalldRunningState reports whether `firewall-cmd --state` output indicates
+// the daemon is actively running (and not "not running" or a sudo/permission error).
+func isFirewalldRunningState(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.ToLower(strings.TrimSpace(line))
+		if trimmed == "running" {
+			return true
+		}
+	}
+	lower := strings.ToLower(strings.TrimSpace(out))
+	return strings.Contains(lower, "running") && !strings.Contains(lower, "not running")
+}
+
+// hasFirewallCmdBinary reports whether command output contains a resolved path to firewall-cmd.
+func hasFirewallCmdBinary(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.Contains(lower, "sudo:") || strings.Contains(lower, "permission denied") || strings.Contains(lower, "not found") {
+			continue
+		}
+		if strings.HasSuffix(trimmed, "/firewall-cmd") || trimmed == "firewall-cmd" {
+			return true
+		}
+	}
+	return false
+}
+
+// isSystemctlUnitPresent reports whether `systemctl cat/status firewalld` output
+// confirms a real firewalld unit exists (ignoring empty output or permission/not-found errors).
+func isSystemctlUnitPresent(out string) bool {
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.Contains(lower, "no files found") ||
+		strings.Contains(lower, "could not be found") ||
+		strings.Contains(lower, "not-found") ||
+		strings.Contains(lower, "sudo:") ||
+		strings.Contains(lower, "permission denied") {
+		return false
+	}
+	return true
 }
 
 type ParsedFirewallRule struct {
@@ -383,7 +434,7 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 		}
 	}
 
-	isRunning := strings.Contains(stateRaw, "running")
+	isRunning := isFirewalldRunningState(stateRaw)
 	hasNft := !strings.Contains(nftRaw, "NO_NFT") && strings.Contains(nftRaw, "table")
 
 	zones, services, ports, _, rules, forwardPorts, masquerade := parseFirewallListAll(listAllRaw, zonesRaw)
@@ -395,14 +446,20 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}
 
 	status := "inactive"
+	backend := ""
 	if isRunning {
 		status = "running"
+		if hasNft {
+			backend = "nftables (firewalld)"
+		} else {
+			backend = "iptables (firewalld)"
+		}
 	}
 
 	return map[string]any{
 		"status":         status,
 		"nftablesActive": hasNft,
-		"backend":        "nftables (firewalld)",
+		"backend":        backend,
 		"zones":          zones,
 		"services":       services,
 		"ports":          ports,
