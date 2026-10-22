@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 	"air-traffic-control/backend/plugins/firewall/firewalld"
 	_ "air-traffic-control/backend/plugins/all"
 )
@@ -324,5 +326,138 @@ func TestFirewalldPlugin_ReadInactiveDoesNotClaimBackend(t *testing.T) {
 	}
 	if m["backend"] != "" {
 		t.Errorf("expected empty backend when firewalld is not running, got %q", m["backend"])
+	}
+}
+
+func TestFirewalldPlugin_NewAPICompliance(t *testing.T) {
+	p, ok := plugin.Get("firewall/firewalld")
+	if !ok {
+		t.Fatalf("firewall/firewalld not registered")
+	}
+
+	// 1. DataCollectionPlugin
+	dc, ok := p.(newapi.DataCollectionPlugin)
+	if !ok {
+		t.Fatalf("expected firewall/firewalld to implement newapi.DataCollectionPlugin")
+	}
+	sched := dc.CollectionSchedule()
+	if sched.Interval <= 0 || sched.TTL <= 0 {
+		t.Errorf("unexpected CollectionSchedule: %+v", sched)
+	}
+	schema := dc.CollectionSchema()
+	if schema.Version != "v2" || schema.RootKey != "rules" {
+		t.Errorf("unexpected CollectionSchema: %+v", schema)
+	}
+
+	// 2. ManagementPlugin
+	mgmt, ok := p.(newapi.ManagementPlugin)
+	if !ok {
+		t.Fatalf("expected firewall/firewalld to implement newapi.ManagementPlugin")
+	}
+	mgmtActions := mgmt.ManagementActions()
+	legacyActions := mgmt.Actions()
+	if len(mgmtActions) != 3 || len(legacyActions) != len(mgmtActions) {
+		t.Fatalf("expected 3 management actions matching legacy actions, got %d vs %d", len(mgmtActions), len(legacyActions))
+	}
+	for i, ma := range mgmtActions {
+		if ma.Name != legacyActions[i].Name {
+			t.Errorf("action %d mismatch: %q vs %q", i, ma.Name, legacyActions[i].Name)
+		}
+		if ma.Category != newapi.ActionCategorySecurity || !ma.Idempotent {
+			t.Errorf("unexpected management metadata for %q: %+v", ma.Name, ma)
+		}
+	}
+
+	facts := plugin.HostFacts{NodeID: "node1", OSFamily: "linux"}
+	if err := mgmt.ValidateAction(facts, "allow_port", map[string]any{"port": "443", "state": "enabled"}); err != nil {
+		t.Errorf("expected valid allow_port options, got error: %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "port", map[string]any{"port": "443"}); err != nil {
+		t.Errorf("expected alias 'port' to validate, got error: %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "allow_port", map[string]any{}); err == nil {
+		t.Errorf("expected error for missing required option 'port'")
+	}
+	if err := mgmt.ValidateAction(facts, "allow_port", map[string]any{"port": "443", "state": "invalid"}); err == nil {
+		t.Errorf("expected error for invalid enum option 'state'")
+	}
+	if err := mgmt.ValidateAction(facts, "forward_port", map[string]any{"port": "8080", "proto": "tcp", "toport": "80", "toaddr": "192.168.1.10"}); err != nil {
+		t.Errorf("expected valid forward_port options, got error: %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "forward_port", map[string]any{"port": "99999", "toport": "80"}); err == nil {
+		t.Errorf("expected error for out-of-range port in ValidateAction")
+	}
+	if err := mgmt.ValidateAction(facts, "unknown_action", map[string]any{}); err == nil {
+		t.Errorf("expected error for unknown action")
+	}
+
+	// 3. CategorizedSettingsProvider
+	csp, ok := p.(newapi.CategorizedSettingsProvider)
+	if !ok {
+		t.Fatalf("expected firewall/firewalld to implement newapi.CategorizedSettingsProvider")
+	}
+	catPage := csp.CategorizedSettingsPage()
+	if err := newapi.ValidateCategorizedSettingsPage(catPage); err != nil {
+		t.Errorf("ValidateCategorizedSettingsPage failed: %v", err)
+	}
+	if err := settingsframework.ValidateSchema(csp.SettingsPage()); err != nil {
+		t.Errorf("settingsframework.ValidateSchema failed: %v", err)
+	}
+	if catPage.ID != "firewall/firewalld" || catPage.Category != "firewall" || catPage.Scope != newapi.SettingsScopeDatacenter {
+		t.Errorf("unexpected CategorizedSettingsPage metadata: %+v", catPage)
+	}
+
+	// 4. ContextMenuProvider
+	cmp, ok := p.(newapi.ContextMenuProvider)
+	if !ok {
+		t.Fatalf("expected firewall/firewalld to implement newapi.ContextMenuProvider")
+	}
+	entries := cmp.ContextMenuEntries(context.Background(), facts)
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 context menu entries for Linux host, got %d: %+v", len(entries), entries)
+	}
+	for _, entry := range entries {
+		if entry.PluginID != "firewall/firewalld" || entry.Target != newapi.TargetFirewall || entry.Action == "" {
+			t.Errorf("unexpected context menu entry: %+v", entry)
+		}
+	}
+	if winEntries := cmp.ContextMenuEntries(context.Background(), plugin.HostFacts{OSFamily: "windows"}); len(winEntries) != 0 {
+		t.Errorf("expected no context menu entries for windows host, got %+v", winEntries)
+	}
+
+	// 5. TaskCompileProvider
+	tcp, ok := p.(newapi.TaskCompileProvider)
+	if !ok {
+		t.Fatalf("expected firewall/firewalld to implement newapi.TaskCompileProvider")
+	}
+	spec1, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypePluginAction,
+		PluginID: "firewall/firewalld",
+		NodeID:   "node1",
+		Action:   "allow_service",
+		Params:   map[string]any{"service": "https", "zone": "public"},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask failed: %v", err)
+	}
+	if len(spec1.Steps) != 1 || spec1.Steps[0].Params["service"] != "https" {
+		t.Errorf("unexpected CompileTask output: %+v", spec1)
+	}
+
+	spec2, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypePluginAction,
+		PluginID: "firewall/firewalld",
+		NodeID:   "node1",
+		Params:   map[string]any{"action": "allow_port", "port": "8443", "proto": "tcp"},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask with action in Params failed: %v", err)
+	}
+	if len(spec2.Steps) != 1 || spec2.Steps[0].Params["port"] != "8443/tcp" {
+		t.Errorf("unexpected CompileTask output: %+v", spec2)
+	}
+
+	if _, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{NodeID: "node1"}); err == nil {
+		t.Errorf("expected error when CompileTask is called without an action")
 	}
 }
