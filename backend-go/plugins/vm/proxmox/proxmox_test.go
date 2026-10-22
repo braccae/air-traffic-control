@@ -7,9 +7,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 	_ "air-traffic-control/backend/plugins/all"
+	"air-traffic-control/backend/plugins/vm/proxmox"
 )
 
 const testTokenSecret = "super-secret-token-value"
@@ -17,10 +21,10 @@ const testTokenSecret = "super-secret-token-value"
 // fakePVE serves a minimal but real Proxmox JSON API so the plugin's HTTP
 // client is exercised end-to-end. It records the last Authorization header.
 type fakePVE struct {
-	server  *httptest.Server
-	mux     *http.ServeMux
+	server   *httptest.Server
+	mux      *http.ServeMux
 	lastAuth string
-	broken  bool
+	broken   bool
 }
 
 func newFakePVE(t *testing.T) *fakePVE {
@@ -72,8 +76,8 @@ func newFakePVE(t *testing.T) *fakePVE {
 
 func factsFor(f *fakePVE) plugin.HostFacts {
 	return plugin.HostFacts{
-		NodeID:   "node-pve",
-		OSFamily: "linux",
+		NodeID:    "node-pve",
+		OSFamily:  "linux",
 		HostRoute: f.server.URL,
 		Overrides: map[string]string{
 			"proxmox_api_host":         f.server.URL,
@@ -94,6 +98,169 @@ func TestProxmox_Registered(t *testing.T) {
 	}
 	if _, ok := p.(plugin.Actor); !ok {
 		t.Error("vm/proxmox must implement Actor")
+	}
+	if _, ok := p.(plugin.SettingsPageProvider); !ok {
+		t.Error("vm/proxmox must implement SettingsPageProvider")
+	}
+	if !p.Compatible(plugin.HostFacts{OSFamily: "linux"}) {
+		t.Error("expected compatible with linux")
+	}
+	if p.Compatible(plugin.HostFacts{OSFamily: "windows"}) {
+		t.Error("expected incompatible with windows")
+	}
+	if p.Compatible(plugin.HostFacts{OSFamily: "router_switch"}) {
+		t.Error("expected incompatible with router_switch")
+	}
+}
+
+func TestProxmox_NewAPIInterfaces(t *testing.T) {
+	p, ok := plugin.Get("vm/proxmox")
+	if !ok {
+		t.Fatal("vm/proxmox not registered")
+	}
+
+	dc, ok := p.(newapi.DataCollectionPlugin)
+	if !ok {
+		t.Fatal("expected vm/proxmox to implement newapi.DataCollectionPlugin")
+	}
+	sched := dc.CollectionSchedule()
+	if sched.TTL != 60*time.Second || sched.Interval != 60*time.Second {
+		t.Errorf("expected 60s schedule for vm/proxmox, got %+v", sched)
+	}
+	schema := dc.CollectionSchema()
+	if schema.Version != "v2" || schema.RootKey != "vms" {
+		t.Errorf("unexpected collection schema: %+v", schema)
+	}
+
+	mgmt, ok := p.(newapi.ManagementPlugin)
+	if !ok {
+		t.Fatal("expected vm/proxmox to implement newapi.ManagementPlugin")
+	}
+	mgmtActions := mgmt.ManagementActions()
+	if len(mgmtActions) != 14 {
+		t.Fatalf("expected 14 management actions, got %d", len(mgmtActions))
+	}
+	if len(p.(plugin.Actor).Actions()) != len(mgmtActions) {
+		t.Errorf("expected Actions() length %d to match ManagementActions() length %d", len(p.(plugin.Actor).Actions()), len(mgmtActions))
+	}
+
+	facts := plugin.HostFacts{NodeID: "node-pve", OSFamily: "linux"}
+	if err := mgmt.ValidateAction(facts, "vm_start", map[string]any{"node": "pve", "vmid": 100}); err != nil {
+		t.Errorf("expected valid vm_start action, got: %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "update_config", map[string]any{
+		"node": "pve", "guestType": "qemu", "vmid": 100, "key": "memory", "value": "4096",
+	}); err != nil {
+		t.Errorf("expected valid update_config action, got: %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "update_config", map[string]any{
+		"node": "pve", "guestType": "invalid_type", "vmid": 100, "key": "memory", "value": "4096",
+	}); err == nil {
+		t.Error("expected error for invalid guestType enum")
+	}
+	if err := mgmt.ValidateAction(facts, "vm_start", map[string]any{}); err == nil {
+		t.Error("expected error for missing required options")
+	}
+	if err := mgmt.ValidateAction(facts, "vm_start", map[string]any{"node": "pve", "vmid": 0}); err == nil {
+		t.Error("expected error for non-positive vmid")
+	}
+	if err := mgmt.ValidateAction(facts, "unknown_action", map[string]any{}); err == nil {
+		t.Error("expected error for unknown action")
+	}
+}
+
+func TestProxmox_SettingsFramework(t *testing.T) {
+	p, ok := plugin.Get("vm/proxmox")
+	if !ok {
+		t.Fatal("vm/proxmox not registered")
+	}
+
+	csp, ok := p.(newapi.CategorizedSettingsProvider)
+	if !ok {
+		t.Fatal("expected vm/proxmox to implement newapi.CategorizedSettingsProvider")
+	}
+
+	catPage := csp.CategorizedSettingsPage()
+	if catPage.ID != proxmox.SettingsPageID {
+		t.Errorf("expected settings page ID %q, got %q", proxmox.SettingsPageID, catPage.ID)
+	}
+	if catPage.Scope != newapi.SettingsScopeDatacenter || catPage.Category != "vm" {
+		t.Errorf("expected datacenter/vm categorized page, got scope=%q category=%q", catPage.Scope, catPage.Category)
+	}
+	if err := settingsframework.ValidateSchema(catPage.SettingsPage); err != nil {
+		t.Fatalf("ValidateSchema failed: %v", err)
+	}
+	if err := newapi.ValidateCategorizedSettingsPage(catPage); err != nil {
+		t.Fatalf("ValidateCategorizedSettingsPage failed: %v", err)
+	}
+
+	if _, ok := plugin.GetSettingsPage("vm/proxmox"); !ok {
+		t.Error("expected vm/proxmox settings page to be registered in global registry")
+	}
+	if regCat, ok := plugin.GetCategorizedSettingsPage("vm/proxmox"); !ok || regCat.Category != "vm" {
+		t.Errorf("expected vm/proxmox categorized settings page in global registry, got %+v (ok=%v)", regCat, ok)
+	}
+
+	if got := proxmox.DefaultPort(); got != proxmox.DefaultAPIPort {
+		t.Errorf("DefaultPort() = %d, want %d", got, proxmox.DefaultAPIPort)
+	}
+	if got := proxmox.DefaultUser(); got != proxmox.DefaultAPIUser {
+		t.Errorf("DefaultUser() = %q, want %q", got, proxmox.DefaultAPIUser)
+	}
+	if got := proxmox.DefaultStoragePool(); got != proxmox.DefaultStorage {
+		t.Errorf("DefaultStoragePool() = %q, want %q", got, proxmox.DefaultStorage)
+	}
+	if got := proxmox.DefaultNetworkBridge(); got != proxmox.DefaultBridge {
+		t.Errorf("DefaultNetworkBridge() = %q, want %q", got, proxmox.DefaultBridge)
+	}
+	if !proxmox.DefaultTLSInsecure() {
+		t.Error("expected DefaultTLSInsecure() default true")
+	}
+	if _, ok := proxmox.APITokenSecretVaultVar(); ok {
+		t.Error("expected APITokenSecretVaultVar() to be unset by default")
+	}
+}
+
+func TestProxmox_ContextMenu(t *testing.T) {
+	p, ok := plugin.Get("vm/proxmox")
+	if !ok {
+		t.Fatal("vm/proxmox not registered")
+	}
+
+	cmp, ok := p.(newapi.ContextMenuProvider)
+	if !ok {
+		t.Fatal("expected vm/proxmox to implement newapi.ContextMenuProvider")
+	}
+
+	ctx := context.Background()
+	linuxFacts := plugin.HostFacts{NodeID: "node-pve", OSFamily: "linux"}
+	entries := cmp.ContextMenuEntries(ctx, linuxFacts)
+	if len(entries) != 10 {
+		t.Fatalf("expected 10 context menu entries for linux host, got %d", len(entries))
+	}
+	if entries[0].ID != "proxmox-vm-start" || entries[0].Target != newapi.TargetVM || entries[0].PluginID != "vm/proxmox" {
+		t.Errorf("unexpected first context menu entry: %+v", entries[0])
+	}
+	last := entries[len(entries)-1]
+	if last.ID != "proxmox-delete-guest" || !last.Danger || last.ConfirmPrompt == "" {
+		t.Errorf("expected danger entry last, got %+v", last)
+	}
+
+	winEntries := cmp.ContextMenuEntries(ctx, plugin.HostFacts{NodeID: "win1", OSFamily: "windows"})
+	if len(winEntries) != 0 {
+		t.Errorf("expected 0 context menu entries for windows host, got %d", len(winEntries))
+	}
+
+	regEntries := plugin.ListContextMenuEntries(ctx, newapi.TargetVM, linuxFacts)
+	foundProxmox := false
+	for _, e := range regEntries {
+		if e.PluginID == "vm/proxmox" {
+			foundProxmox = true
+			break
+		}
+	}
+	if !foundProxmox {
+		t.Error("expected global registry ListContextMenuEntries(TargetVM) to include vm/proxmox entries")
 	}
 }
 
@@ -145,13 +312,13 @@ func TestProxmox_ReadGuestDetails(t *testing.T) {
 	// Re-encode then decode to reach the unexported structs generically.
 	raw, _ := json.Marshal(data)
 	var decoded struct {
-		Endpoint   string `json:"endpoint"`
-		Version    string `json:"version"`
-		VMs        []struct {
-			VMID    int    `json:"vmid"`
-			Name    string `json:"name"`
-			Type    string `json:"type"`
-			Status  string `json:"status"`
+		Endpoint string `json:"endpoint"`
+		Version  string `json:"version"`
+		VMs      []struct {
+			VMID    int            `json:"vmid"`
+			Name    string         `json:"name"`
+			Type    string         `json:"type"`
+			Status  string         `json:"status"`
 			Console map[string]any `json:"console"`
 		} `json:"vms"`
 		Containers []struct {
@@ -321,5 +488,64 @@ func TestProxmox_CompileRejectsMissingArgs(t *testing.T) {
 	}
 	if _, err := actor.Compile(plugin.HostFacts{}, "bogus_action", map[string]any{}); err == nil {
 		t.Error("expected error for unsupported action")
+	}
+}
+
+func TestProxmox_CompileTask(t *testing.T) {
+	p, ok := plugin.Get("vm/proxmox")
+	if !ok {
+		t.Fatal("vm/proxmox not registered")
+	}
+
+	tcp, ok := p.(newapi.TaskCompileProvider)
+	if !ok {
+		t.Fatal("expected vm/proxmox to implement newapi.TaskCompileProvider")
+	}
+
+	facts := plugin.HostFacts{
+		NodeID:    "node-pve",
+		HostRoute: "192.168.1.10",
+		Overrides: map[string]string{"proxmox_api_port": "8006"},
+	}
+
+	compiled, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		ID:       "req-pve-1",
+		Type:     newapi.TaskTypePluginAction,
+		NodeID:   "node-pve",
+		PluginID: "vm/proxmox",
+		Action:   "vm_start",
+		Params:   map[string]any{"node": "pve", "vmid": 100},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask failed: %v", err)
+	}
+	if compiled.Name != "Proxmox: POST /nodes/pve/qemu/100/status/start" {
+		t.Errorf("unexpected CompileTask name: %q", compiled.Name)
+	}
+
+	// Fallback action from Params["action"]
+	compiledFallback, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		ID:       "req-pve-2",
+		Type:     newapi.TaskTypePluginAction,
+		NodeID:   "node-pve",
+		PluginID: "vm/proxmox",
+		Params:   map[string]any{"action": "ct_shutdown", "node": "pve", "vmid": 200},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask fallback failed: %v", err)
+	}
+	if !strings.Contains(compiledFallback.Name, "/nodes/pve/lxc/200/status/shutdown") {
+		t.Errorf("unexpected CompileTask fallback name: %q", compiledFallback.Name)
+	}
+
+	// Missing action
+	if _, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		ID:       "req-pve-3",
+		Type:     newapi.TaskTypePluginAction,
+		NodeID:   "node-pve",
+		PluginID: "vm/proxmox",
+		Params:   map[string]any{"node": "pve", "vmid": 100},
+	}); err == nil {
+		t.Error("expected error when action is missing from TaskRequest")
 	}
 }
