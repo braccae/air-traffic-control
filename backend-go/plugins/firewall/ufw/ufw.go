@@ -8,6 +8,20 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func init() {
@@ -48,6 +62,68 @@ func (p *Plugin) Requirements() plugin.Requirements {
 			"community.general",
 		},
 	}
+}
+
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "rules",
+		Description: p.Meta().Description,
+	}
+}
+
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	meta := p.Meta()
+	return settingsframework.NewPageBuilder(meta.ID, "UFW Firewall Defaults").
+		WithIcon(meta.Icon).
+		WithCategory(string(meta.Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(meta.Order).
+		WithDescription("Datacenter-wide Uncomplicated Firewall (UFW) default policy, protocol, and logging settings.").
+		SelectField("defaultProto", "Default Protocol", "tcp", []plugin.SettingsFieldOption{
+			{Value: "tcp", Label: "TCP"},
+			{Value: "udp", Label: "UDP"},
+			{Value: "any", Label: "TCP & UDP (any)"},
+		}, settingsframework.WithDescription("Default protocol used when compiling UFW port rules without an explicit protocol.")).
+		SelectField("defaultIncomingPolicy", "Default Incoming Policy", "deny", []plugin.SettingsFieldOption{
+			{Value: "deny", Label: "Deny"},
+			{Value: "reject", Label: "Reject"},
+			{Value: "allow", Label: "Allow"},
+		}, settingsframework.WithDescription("Default policy for unmatched incoming traffic.")).
+		SelectField("loggingLevel", "Logging Level", "low", []plugin.SettingsFieldOption{
+			{Value: "off", Label: "Off"},
+			{Value: "low", Label: "Low"},
+			{Value: "medium", Label: "Medium"},
+			{Value: "high", Label: "High"},
+			{Value: "full", Label: "Full"},
+		}, settingsframework.WithDescription("UFW packet logging verbosity across managed nodes.")).
+		BuildCategorized()
+}
+
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
+}
+
+func defaultUfwProtocol() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault("firewall/ufw", "defaultProto", "tcp")
+}
+
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	return newapi.NewContextMenuBuilder(p.Meta().ID).
+		WithTarget(newapi.TargetFirewall).
+		WithGroup(string(p.Meta().Kind)).
+		AddAction("allow_port", "Allow Port", "lock_open", "allow_port", 10).
+		AddAction("deny_port", "Deny Port", "block", "deny_port", 20).
+		AddDangerAction("delete_port", "Delete Port Rule", "delete_forever", "delete_port",
+			"Delete this UFW port rule from the host firewall?", 90).
+		Build()
 }
 
 type ParsedFirewallRule struct {
@@ -244,41 +320,93 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}, nil
 }
 
-func (p *Plugin) Actions() []plugin.ActionSpec {
-	return []plugin.ActionSpec{
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "allow_port",
-			Label:       "Allow Port",
-			Description: "Allow incoming traffic on a port via community.general.ufw",
-			Options: []plugin.OptionSchema{
-				{Name: "port", Type: "string", Required: true, Description: "Port number or range (e.g. 80, 443, 8000:8080)"},
-				{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp, udp, or any"},
-				{Name: "from_ip", Type: "string", Required: false, Description: "Optional allowed source IP or CIDR"},
-				{Name: "comment", Type: "string", Required: false, Description: "Optional rule comment"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "allow_port",
+				Label:       "Allow Port",
+				Description: "Allow incoming traffic on a port via community.general.ufw",
+				Options: []plugin.OptionSchema{
+					{Name: "port", Type: "string", Required: true, Description: "Port number or range (e.g. 80, 443, 8000:8080)"},
+					{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp, udp, or any"},
+					{Name: "from_ip", Type: "string", Required: false, Description: "Optional allowed source IP or CIDR"},
+					{Name: "comment", Type: "string", Required: false, Description: "Optional rule comment"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
 		},
 		{
-			Name:        "deny_port",
-			Label:       "Deny Port",
-			Description: "Deny incoming traffic on a port via community.general.ufw",
-			Options: []plugin.OptionSchema{
-				{Name: "port", Type: "string", Required: true, Description: "Port number or range (e.g. 23, 8080)"},
-				{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp, udp, or any"},
-				{Name: "from_ip", Type: "string", Required: false, Description: "Optional source IP or CIDR"},
-				{Name: "comment", Type: "string", Required: false, Description: "Optional rule comment"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "deny_port",
+				Label:       "Deny Port",
+				Description: "Deny incoming traffic on a port via community.general.ufw",
+				Options: []plugin.OptionSchema{
+					{Name: "port", Type: "string", Required: true, Description: "Port number or range (e.g. 23, 8080)"},
+					{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp, udp, or any"},
+					{Name: "from_ip", Type: "string", Required: false, Description: "Optional source IP or CIDR"},
+					{Name: "comment", Type: "string", Required: false, Description: "Optional rule comment"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
 		},
 		{
-			Name:        "delete_port",
-			Label:       "Delete Port Rule",
-			Description: "Delete an existing UFW port rule via community.general.ufw",
-			Options: []plugin.OptionSchema{
-				{Name: "port", Type: "string", Required: true, Description: "Port number or range to remove"},
-				{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp, udp, or any"},
-				{Name: "rule", Type: "select", Enum: []string{"allow", "deny", "reject", "limit"}, Default: "allow", Description: "Rule type to delete"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "delete_port",
+				Label:       "Delete Port Rule",
+				Description: "Delete an existing UFW port rule via community.general.ufw",
+				Options: []plugin.OptionSchema{
+					{Name: "port", Type: "string", Required: true, Description: "Port number or range to remove"},
+					{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp, udp, or any"},
+					{Name: "rule", Type: "select", Enum: []string{"allow", "deny", "reject", "limit"}, Default: "allow", Description: "Rule type to delete"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Delete this UFW port rule from the host firewall?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
 		},
 	}
+}
+
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	norm := strings.ToLower(strings.TrimSpace(action))
+	if norm == "port" {
+		norm = "allow_port"
+	}
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, norm) {
+			return newapi.ValidateManagementOptions(spec, opts)
+		}
+	}
+	return fmt.Errorf("unsupported ufw action: %s", action)
+}
+
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
 
 func normalizeUfwPort(raw string) (string, error) {
@@ -318,6 +446,9 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 	norm := strings.ToLower(strings.TrimSpace(action))
 	switch norm {
 	case "allow_port", "port", "deny_port", "delete_port":
+		if err := p.ValidateAction(h, norm, opts); err != nil {
+			return plugin.TaskSpec{}, err
+		}
 		rawPort, _ := opts["port"].(string)
 		portSpec, err := normalizeUfwPort(rawPort)
 		if err != nil {
@@ -332,7 +463,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 			}
 		}
 		if proto == "" {
-			proto = "tcp"
+			proto = defaultUfwProtocol()
 		}
 		if proto != "tcp" && proto != "udp" && proto != "any" {
 			return plugin.TaskSpec{}, fmt.Errorf("invalid protocol %q: must be tcp, udp, or any", proto)

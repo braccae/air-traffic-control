@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 	_ "air-traffic-control/backend/plugins/all"
 	"air-traffic-control/backend/plugins/firewall/ufw"
 )
@@ -134,5 +136,110 @@ func TestUfwPlugin_ProbeReadAndCompile(t *testing.T) {
 	}
 	if delTask.Steps[0].Params["delete"] != true {
 		t.Errorf("expected delete_port delete=true, got %+v", delTask.Steps[0].Params)
+	}
+}
+
+func TestUfwPlugin_V2NewAPIInterfaces(t *testing.T) {
+	p, ok := plugin.Get("firewall/ufw")
+	if !ok {
+		t.Fatalf("firewall/ufw not registered")
+	}
+
+	// 1. DataCollectionPlugin
+	dc, ok := p.(newapi.DataCollectionPlugin)
+	if !ok {
+		t.Fatalf("expected firewall/ufw to implement newapi.DataCollectionPlugin")
+	}
+	sched := dc.CollectionSchedule()
+	if sched.Interval <= 0 || sched.TTL <= 0 {
+		t.Fatalf("expected positive schedule Interval and TTL, got %+v", sched)
+	}
+	schema := dc.CollectionSchema()
+	if schema.Version != "v2" || schema.RootKey != "rules" {
+		t.Fatalf("unexpected collection schema: %+v", schema)
+	}
+
+	// 2. ManagementPlugin
+	mgmt, ok := p.(newapi.ManagementPlugin)
+	if !ok {
+		t.Fatalf("expected firewall/ufw to implement newapi.ManagementPlugin")
+	}
+	mgmtActions := mgmt.ManagementActions()
+	if len(mgmtActions) != 3 {
+		t.Fatalf("expected 3 management actions, got %d", len(mgmtActions))
+	}
+	legacyActions := mgmt.Actions()
+	if len(legacyActions) != len(mgmtActions) {
+		t.Fatalf("Actions() length %d does not match ManagementActions() length %d", len(legacyActions), len(mgmtActions))
+	}
+
+	facts := plugin.HostFacts{NodeID: "node1", OSFamily: "linux"}
+	if err := mgmt.ValidateAction(facts, "allow_port", map[string]any{"port": "443"}); err != nil {
+		t.Fatalf("expected valid allow_port options, got error: %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "allow_port", map[string]any{}); err == nil {
+		t.Fatalf("expected error when required port option is missing")
+	}
+	if err := mgmt.ValidateAction(facts, "delete_port", map[string]any{"port": "443", "rule": "invalid_rule"}); err == nil {
+		t.Fatalf("expected error for invalid enum value on delete_port")
+	}
+	if err := mgmt.ValidateAction(facts, "unknown_action", map[string]any{}); err == nil {
+		t.Fatalf("expected error for unknown action")
+	}
+
+	// 3. CategorizedSettingsProvider
+	csp, ok := p.(newapi.CategorizedSettingsProvider)
+	if !ok {
+		t.Fatalf("expected firewall/ufw to implement newapi.CategorizedSettingsProvider")
+	}
+	catPage := csp.CategorizedSettingsPage()
+	if err := settingsframework.ValidateSchema(csp.SettingsPage()); err != nil {
+		t.Fatalf("settings schema validation failed: %v", err)
+	}
+	if err := newapi.ValidateCategorizedSettingsPage(catPage); err != nil {
+		t.Fatalf("categorized settings page validation failed: %v", err)
+	}
+	if catPage.ID != "firewall/ufw" || catPage.Category != "firewall" || catPage.Scope != newapi.SettingsScopeDatacenter {
+		t.Fatalf("unexpected categorized settings page metadata: %+v", catPage)
+	}
+
+	// 4. ContextMenuProvider
+	cmp, ok := p.(newapi.ContextMenuProvider)
+	if !ok {
+		t.Fatalf("expected firewall/ufw to implement newapi.ContextMenuProvider")
+	}
+	entries := cmp.ContextMenuEntries(context.Background(), facts)
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 context menu entries for compatible linux host, got %d", len(entries))
+	}
+	for _, entry := range entries {
+		if entry.PluginID != "firewall/ufw" || entry.Target != newapi.TargetFirewall || entry.Action == "" {
+			t.Errorf("unexpected context menu entry: %+v", entry)
+		}
+	}
+	if incompat := cmp.ContextMenuEntries(context.Background(), plugin.HostFacts{OSFamily: "windows"}); len(incompat) != 0 {
+		t.Fatalf("expected no context menu entries for incompatible windows host, got %+v", incompat)
+	}
+
+	// 5. TaskCompileProvider
+	tcp, ok := p.(newapi.TaskCompileProvider)
+	if !ok {
+		t.Fatalf("expected firewall/ufw to implement newapi.TaskCompileProvider")
+	}
+	compiledTask, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypePluginAction,
+		PluginID: "firewall/ufw",
+		Action:   "deny_port",
+		NodeID:   "node1",
+		Params: map[string]any{
+			"port":  "23",
+			"proto": "tcp",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask failed: %v", err)
+	}
+	if len(compiledTask.Steps) != 1 || compiledTask.Steps[0].Params["rule"] != "deny" || compiledTask.Steps[0].Params["port"] != "23" {
+		t.Fatalf("unexpected CompileTask output: %+v", compiledTask)
 	}
 }
