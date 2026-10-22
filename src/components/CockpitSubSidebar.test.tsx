@@ -128,9 +128,9 @@ test('CockpitSubSidebar renders detected plugins grouped dynamically by section/
   assert.ok(html.includes('CONTAINERS') || html.includes('CONTAINER'), 'Must display Container section');
 
   // Plugin labels
-  assert.ok(html.includes('ZFS Storage'), 'Must render ZFS Storage tab');
+  assert.ok(html.includes('>ZFS<'), 'Must render ZFS tab');
   assert.ok(html.includes('NFS Exports'), 'Must render NFS Exports tab');
-  assert.ok(html.includes('Podman Containers'), 'Must render Podman Containers tab');
+  assert.ok(html.includes('>Podman<'), 'Must render Podman tab');
 });
 
 test('CockpitSubSidebar merges system plugins into the top SYSTEM group and filters package managers by precedence', () => {
@@ -189,7 +189,7 @@ test('CockpitSubSidebar merges system plugins into the top SYSTEM group and filt
   // SYSTEM header must only appear once
   const systemHeaderMatches = html.match(/>SYSTEM<\/span>/g) || [];
   assert.strictEqual(systemHeaderMatches.length, 1, 'Must render SYSTEM header only once');
-  assert.ok(html.includes('System Services &amp; Power'), 'Must render System Services & Power under SYSTEM');
+  assert.ok(html.includes('>Services<'), 'Must render shortened Services label under SYSTEM');
 
   // Only highest precedence package manager (bootc) should render
   assert.ok(html.includes('bootc (Bootable Containers)'), 'Must render highest-precedence package manager (bootc)');
@@ -238,6 +238,62 @@ test('CockpitSubSidebar renders database plugin section and NoSQL Databases tab 
   );
 
   assert.ok(html.includes('DATABASES &amp; NOSQL'), 'Must display DATABASES & NOSQL section');
-  assert.ok(html.includes('NoSQL Databases'), 'Must render NoSQL Databases tab');
+  assert.ok(html.includes('>MongoDB<'), 'Must render per-engine MongoDB tab');
+  assert.ok(html.includes('>Redis<'), 'Must render per-engine Redis tab');
   assert.ok(html.includes('database'), 'Must render database icon');
+});
+
+test('CockpitSubSidebar expands a detected SQL plugin into one entry per engine', () => {
+  const mockPlugins = [
+    {
+      id: 'database/sql',
+      kind: 'database',
+      name: 'sql',
+      label: 'SQL Databases',
+      icon: 'database',
+      section: 'database',
+      order: 9,
+      detection: { detected: true, status: 'ONLINE (mariadb, postgres)', details: 'Engines: mariadb, postgres' },
+    },
+  ];
+
+  const html = renderToString(
+    React.createElement(CockpitSubSidebar, {
+      node: mockNode,
+      activeItem: 'overview',
+      plugins: mockPlugins,
+      onSelectItem: () => {},
+    })
+  );
+
+  assert.ok(html.includes('DATABASES &amp; NOSQL'), 'Must display database section');
+  assert.ok(html.includes('>Postgres<'), 'Must render Postgres entry');
+  assert.ok(html.includes('>MariaDB<'), 'Must render MariaDB entry');
+  assert.strictEqual(html.includes('>SQL<'), false, 'Must NOT render a generic SQL entry when engines are known');
+});
+
+test('CockpitSubSidebar renders no database entry for an undetected database plugin', () => {
+  const mockPlugins = [
+    {
+      id: 'database/sql',
+      kind: 'database',
+      name: 'sql',
+      label: 'SQL Databases',
+      icon: 'database',
+      section: 'database',
+      order: 9,
+      detection: { detected: false, status: 'UNAVAILABLE', details: 'No supported SQL database engines found' },
+    },
+  ];
+
+  const html = renderToString(
+    React.createElement(CockpitSubSidebar, {
+      node: mockNode,
+      activeItem: 'overview',
+      plugins: mockPlugins,
+      onSelectItem: () => {},
+    })
+  );
+
+  assert.strictEqual(html.includes('DATABASES'), false, 'Undetected database plugin must not produce an entry');
 });
