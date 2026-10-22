@@ -8,11 +8,30 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 )
 
 func init() {
 	_ = plugin.Register(New())
 }
+
+// DefaultVolumeGroupName is the fallback volume group name exposed in the
+// datacenter-wide LVM settings schema.
+const DefaultVolumeGroupName = "vg0"
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
+	_ newapi.TaskTypeProvider            = (*Plugin)(nil)
+)
 
 // Plugin implements LVM (Logical Volume Manager) inspection and provisioning.
 type Plugin struct{}
@@ -46,6 +65,92 @@ func (p *Plugin) Requirements() plugin.Requirements {
 		},
 		ControllerCollections: []string{
 			"community.general",
+		},
+	}
+}
+
+// CollectionSchedule returns the standard storage polling cadence and cache TTL
+// schedule (60s) for LVM telemetry inspection.
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema documents the v2 payload structure emitted by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "volumeGroups",
+		Description: p.Meta().Description,
+	}
+}
+
+// CategorizedSettingsPage declares datacenter-wide LVM provisioning and
+// thin-pool auto-extension defaults via the v2 settings framework.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	meta := p.Meta()
+	return settingsframework.NewPageBuilder(meta.ID, "LVM Storage Defaults").
+		WithIcon(meta.Icon).
+		WithCategory(string(meta.Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(meta.Order).
+		WithDescription("Datacenter-wide Logical Volume Manager (LVM) volume group, thin-pool, and filesystem resize defaults.").
+		StringField("defaultVolumeGroup", "Default Volume Group", DefaultVolumeGroupName,
+			settingsframework.WithPlaceholder("vg0"),
+			settingsframework.WithDescription("Default volume group name suggested when provisioning logical volumes.")).
+		IntField("thinPoolAutoextendThreshold", "Thin Pool Autoextend Threshold (%)", 80,
+			settingsframework.WithMinMax(50, 100),
+			settingsframework.WithDescription("Usage percentage at which LVM thin pools automatically extend.")).
+		IntField("thinPoolAutoextendPercent", "Thin Pool Autoextend Increment (%)", 20,
+			settingsframework.WithMinMax(5, 100),
+			settingsframework.WithDescription("Percentage by which an LVM thin pool is extended when the threshold is reached.")).
+		BoolField("resizeFsOnExtend", "Resize Filesystem on LV Extend", true,
+			settingsframework.WithDescription("Automatically grow the underlying filesystem when extending a logical volume.")).
+		BuildCategorized()
+}
+
+// SettingsPage returns the underlying plugin.SettingsPage for legacy consumers.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
+}
+
+// DefaultVolumeGroup returns the configured datacenter-wide default volume
+// group from the settings store, falling back to DefaultVolumeGroupName.
+func DefaultVolumeGroup() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault("storage/lvm", "defaultVolumeGroup", DefaultVolumeGroupName)
+}
+
+func resizeFsOnExtendDefault() bool {
+	return settingsframework.NewStoreAdapter(nil).BoolOrDefault("storage/lvm", "resizeFsOnExtend", true)
+}
+
+// ContextMenuEntries returns contextual storage actions for compatible hosts.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	meta := p.Meta()
+	return newapi.NewContextMenuBuilder(meta.ID).
+		WithTarget(newapi.TargetStorage).
+		WithGroup(string(meta.Kind)).
+		AddAction("create_lv", "Create Logical Volume", "add_box", "create_lv", 10).
+		AddAction("extend_lv", "Extend Logical Volume", "open_in_full", "extend_lv", 20).
+		AddDangerAction("remove_lv", "Remove Logical Volume", "delete_forever", "remove_lv",
+			"Permanently delete this logical volume and its contents?", 90).
+		Build()
+}
+
+// TaskTypes contributes the LVM storage operation task type specification.
+func (p *Plugin) TaskTypes() []newapi.TaskTypeSpec {
+	meta := p.Meta()
+	return []newapi.TaskTypeSpec{
+		{
+			Type:           newapi.TaskTypeStorageOp,
+			PluginID:       meta.ID,
+			Label:          "LVM Storage Operation",
+			Description:    "Create, extend, or remove LVM logical volumes via community.general.lvol",
+			Icon:           meta.Icon,
+			SupportsDryRun: true,
+			SupportsCancel: true,
 		},
 	}
 }
@@ -316,42 +421,79 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	return result, nil
 }
 
-func (p *Plugin) Actions() []plugin.ActionSpec {
-	return []plugin.ActionSpec{
+// ManagementActions returns the v2 management action specifications for LVM.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "create_lv",
-			Label:       "Create Logical Volume",
-			Description: "Create a new logical volume in an existing volume group",
-			Options: []plugin.OptionSchema{
-				{Name: "vg", Type: "string", Required: true, Description: "Volume group name"},
-				{Name: "lv", Type: "string", Required: true, Description: "Logical volume name"},
-				{Name: "size", Type: "string", Required: true, Description: "Volume size (e.g. 10G, 500M)"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "create_lv",
+				Label:       "Create Logical Volume",
+				Description: "Create a new logical volume in an existing volume group",
+				Options: []plugin.OptionSchema{
+					{Name: "vg", Type: "string", Required: true, Description: "Volume group name"},
+					{Name: "lv", Type: "string", Required: true, Description: "Logical volume name"},
+					{Name: "size", Type: "string", Required: true, Description: "Volume size (e.g. 10G, 500M)"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindStorage},
 		},
 		{
-			Name:        "extend_lv",
-			Label:       "Extend Logical Volume",
-			Description: "Extend an existing logical volume",
-			Options: []plugin.OptionSchema{
-				{Name: "vg", Type: "string", Required: true, Description: "Volume group name"},
-				{Name: "lv", Type: "string", Required: true, Description: "Logical volume name"},
-				{Name: "size", Type: "string", Required: true, Description: "New size or size increment (e.g. +5G)"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "extend_lv",
+				Label:       "Extend Logical Volume",
+				Description: "Extend an existing logical volume",
+				Options: []plugin.OptionSchema{
+					{Name: "vg", Type: "string", Required: true, Description: "Volume group name"},
+					{Name: "lv", Type: "string", Required: true, Description: "Logical volume name"},
+					{Name: "size", Type: "string", Required: true, Description: "New size or size increment (e.g. +5G)"},
+				},
 			},
+			Category:         newapi.ActionCategoryConfiguration,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindStorage},
 		},
 		{
-			Name:        "remove_lv",
-			Label:       "Remove Logical Volume",
-			Description: "Delete a logical volume",
-			Options: []plugin.OptionSchema{
-				{Name: "vg", Type: "string", Required: true, Description: "Volume group name"},
-				{Name: "lv", Type: "string", Required: true, Description: "Logical volume name to remove"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "remove_lv",
+				Label:       "Remove Logical Volume",
+				Description: "Delete a logical volume",
+				Options: []plugin.OptionSchema{
+					{Name: "vg", Type: "string", Required: true, Description: "Volume group name"},
+					{Name: "lv", Type: "string", Required: true, Description: "Logical volume name to remove"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Permanently delete this logical volume and its contents?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindStorage},
 		},
 	}
 }
 
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+// ValidateAction validates options for a declared LVM management action.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, action) {
+			return newapi.ValidateManagementOptions(spec, opts)
+		}
+	}
+	return fmt.Errorf("unsupported %s action: %s", p.Meta().Name, action)
+}
+
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
-	norm := strings.ToLower(action)
+	norm := strings.ToLower(strings.TrimSpace(action))
 	switch norm {
 	case "create_lv":
 		vg, _ := opts["vg"].(string)
@@ -394,7 +536,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 						"vg":       vg,
 						"lv":       lv,
 						"size":     size,
-						"resizefs": true,
+						"resizefs": resizeFsOnExtendDefault(),
 						"become":   true,
 					},
 				},
@@ -427,4 +569,19 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 	default:
 		return plugin.TaskSpec{}, fmt.Errorf("unsupported lvm action: %s", action)
 	}
+}
+
+// CompileTask adapts a typed v2 TaskRequest to the plugin's declarative
+// Ansible TaskSpec compiler.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
