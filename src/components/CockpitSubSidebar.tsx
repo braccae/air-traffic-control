@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../types/index.ts';
 import { resolvePluginIcon } from '../utils/pluginIcons.ts';
+import { shortenPluginLabel, expandDatabaseEntries } from '../utils/pluginLabels.ts';
 
 export interface NodePluginItem {
   id: string;
@@ -16,6 +17,8 @@ export interface NodePluginItem {
     details?: string;
     error?: string;
   };
+  /** Set only on expanded per-engine database entries. */
+  engine?: string;
 }
 
 export interface CockpitSubSidebarProps {
@@ -63,36 +66,11 @@ const SECTION_TITLES: Record<string, string> = {
   backup: 'BACKUPS & SYNC',
 };
 
-// Shorten plugin labels for cleaner sidebar display
-function shortenPluginLabel(label: string, name: string, section: string): string {
-  // Container plugins
-  if (name === 'podman') return 'Podman';
-  if (name === 'docker') return 'Docker';
-  if (name === 'lxc') return 'LXC';
-
-  // Storage plugins
-  if (section === 'storage' && name === 'zfs') return 'ZFS';
-  if (section === 'storage' && name === 'btrfs') return 'Btrfs';
-  if (section === 'storage' && name === 'lvm') return 'LVM';
-
-  // Database plugins - show just the name
-  if (section === 'database' && name === 'sql') return 'SQL';
-  if (section === 'database' && name === 'nosql') return 'NoSQL';
-
-  // System plugins
-  if (name === 'service') return 'Services';
-  if (name === 'journald') return 'Logs';
-  if (name === 'glances') return 'Glances';
-
-  // Network plugins
-  if (name === 'interfaces') return 'Interfaces';
-  if (name === 'tailscale') return 'Tailscale';
-
-  // Firewall
-  if (name === 'firewalld') return 'Firewall';
-
-  // Default: return as-is
-  return label;
+// Display label for a plugin row. Expanded database entries already carry a
+// per-engine friendly label; everything else is shortened from its raw label.
+function displayPluginLabel(p: NodePluginItem): string {
+  if (p.engine) return p.label;
+  return shortenPluginLabel(p.label || p.name, p.name, p.section || p.kind);
 }
 
 export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
@@ -148,12 +126,16 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
     if (!p.detection?.detected) continue;
     // Connection transports and elevation methods belong in Modules / Edit Node modal
     if (p.kind === 'connection' || p.kind === 'elevation') continue;
-    // Hide redundant/hidden plugins per UI cleanup (marked with red X)
+    // Hide only genuinely redundant OS-native entries. Container tabs, the
+    // firewall tab, and database tabs must render (with shortened labels).
     const hiddenNames = [
       'system', 'logs', 'telemetry', 'journald', 'share/nfs', 'share/smb', 'mount/rclone',
-      'firewalld', 'podman', 'docker', 'sql', 'nosql',
     ];
-    if (hiddenNames.includes(p.name.toLowerCase()) || hiddenNames.includes((p.kind || '').toLowerCase())) continue;
+    const nameKey = p.name.toLowerCase();
+    const kindKey = (p.kind || '').toLowerCase();
+    if (hiddenNames.includes(nameKey)) continue;
+    // Never hide the SYSTEM service plugin via its kind.
+    if (kindKey !== 'system' && hiddenNames.includes(kindKey)) continue;
 
     if (p.kind === 'package') {
       if (!chosenPackagePlugin) {
@@ -168,7 +150,12 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
         }
       }
     } else {
-      nonPackagePlugins.push(p);
+      // Expand detected database plugins into one entry per real detected engine.
+      if (kindKey === 'database' || (p.section || '').toLowerCase() === 'database') {
+        nonPackagePlugins.push(...expandDatabaseEntries(p));
+      } else {
+        nonPackagePlugins.push(p);
+      }
     }
   }
 
@@ -231,7 +218,7 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
               const isSelected = activeItem === p.id || activeItem === p.name;
               return (
                 <button
-                  key={p.id}
+                  key={`${p.id}:${p.engine ?? 'default'}`}
                   type="button"
                   onClick={() => onSelectItem(p.id)}
                   className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-[11px] leading-tight cursor-pointer transition-colors ${
@@ -244,7 +231,7 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
                     <span className="material-symbols-outlined text-[13px] text-[#8d909b] shrink-0">
                       {resolvePluginIcon(p.icon)}
                     </span>
-                    <span className="truncate">{shortenPluginLabel(p.label || p.name, p.name, p.section || p.kind)}</span>
+                    <span className="truncate">{displayPluginLabel(p)}</span>
                   </span>
                 </button>
               );
@@ -273,7 +260,7 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
 
                   return (
                     <button
-                      key={p.id}
+                      key={`${p.id}:${p.engine ?? 'default'}`}
                       type="button"
                       onClick={() => onSelectItem(p.id)}
                       className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-[11px] leading-tight cursor-pointer transition-colors ${
@@ -286,7 +273,7 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
                         <span className="material-symbols-outlined text-[13px] text-[#8d909b] shrink-0">
                           {resolvePluginIcon(p.icon)}
                         </span>
-                        <span className="truncate">{shortenPluginLabel(p.label || p.name, p.name, p.section || p.kind)}</span>
+                        <span className="truncate">{displayPluginLabel(p)}</span>
                       </span>
                     </button>
                   );
