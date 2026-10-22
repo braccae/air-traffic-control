@@ -57,6 +57,9 @@ import (
 
 	// Network & Firewall plugins
 	_ "air-traffic-control/backend/plugins/firewall/firewalld"
+	_ "air-traffic-control/backend/plugins/firewall/iptables"
+	_ "air-traffic-control/backend/plugins/firewall/nftables"
+	_ "air-traffic-control/backend/plugins/firewall/ufw"
 	_ "air-traffic-control/backend/plugins/network/interfaces"
 	_ "air-traffic-control/backend/plugins/network/tailscale"
 

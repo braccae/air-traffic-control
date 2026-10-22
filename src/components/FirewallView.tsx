@@ -5,6 +5,7 @@ import { compileDaemonPluginMutation, stageTaskInQueue } from '../utils/drivers/
 
 interface FirewallViewProps {
   node: NodeItem;
+  pluginId?: string;
 }
 
 export interface FirewallPortForward {
@@ -80,7 +81,10 @@ export async function stageFirewallPortForward(
   }
 }
 
-export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
+export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) => {
+  const activePluginName = (pluginId && pluginId.startsWith('firewall/') ? pluginId.split('/')[1] : 'firewalld') || 'firewalld';
+  const isFirewalld = activePluginName === 'firewalld';
+
   const [rules, setRules] = useState<Array<{
     id: string;
     chain: string;
@@ -94,6 +98,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
     rawRule?: string;
   }>>([]);
   const [status, setStatus] = useState<string>('running');
+  const [backendLabel, setBackendLabel] = useState<string>(activePluginName);
   const [nftActive, setNftActive] = useState<boolean>(true);
   const [zones, setZones] = useState<Record<string, { interfaces: string[]; sources: string[] }>>({});
   const [loading, setLoading] = useState(false);
@@ -123,12 +128,44 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
 
   const fetchFirewall = (refresh = false) => {
     setLoading(true);
+    if (!isFirewalld) {
+      fetch(`/api/nodes/${encodeURIComponent(node.id)}/plugins/firewall/${encodeURIComponent(activePluginName)}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data && typeof data === 'object') {
+            const rawRules = Array.isArray(data.rules) ? data.rules : [];
+            setRules(
+              rawRules.map((r: any, idx: number) => ({
+                id: r.id || `${activePluginName}-${idx + 1}`,
+                chain: r.chain || 'INPUT',
+                policy: r.policy || 'ACCEPT',
+                proto: r.proto || 'tcp',
+                port: r.port || 'all',
+                source: r.source || '0.0.0.0/0',
+                comment: r.comment || '',
+                enabled: r.enabled !== undefined ? Boolean(r.enabled) : true,
+                zone: r.zone || r.interface || activePluginName,
+                rawRule: r.rawRule,
+              }))
+            );
+            setStatus(data.status || 'inactive');
+            setBackendLabel(data.backend || activePluginName);
+            setNftActive(Boolean(data.nftablesActive));
+            setZones(data.zones || {});
+          }
+        })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+      return;
+    }
+
     fetch(`/api/nodes/${encodeURIComponent(node.id)}/firewall${refresh ? '?refresh=true' : ''}`)
       .then(res => res.json())
       .then(data => {
         if (data.success) {
           if (Array.isArray(data.rules)) setRules(data.rules);
           if (data.status) setStatus(data.status);
+          if (data.backend) setBackendLabel(data.backend);
           if (typeof data.nftablesActive === 'boolean') setNftActive(data.nftablesActive);
           if (data.zones) setZones(data.zones);
         }
@@ -138,6 +175,11 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
   };
 
   const fetchForwardPorts = () => {
+    if (!isFirewalld) {
+      setForwardPorts([]);
+      setMasquerade(false);
+      return;
+    }
     fetch(`/api/nodes/${encodeURIComponent(node.id)}/plugins/firewall/firewalld`)
       .then(res => res.json())
       .then(data => {
@@ -154,7 +196,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
 
   useEffect(() => {
     refreshAll(false);
-  }, [node.id, node.shortName]);
+  }, [node.id, node.shortName, activePluginName]);
 
   const handlePreset = (preset: {
     port: string;
@@ -204,22 +246,36 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
 
     setSubmitting(true);
     try {
-      const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/firewall/rules`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          port: newProto === 'icmp' ? undefined : newPort.trim(),
-          protocol: newProto,
+      if (!isFirewalld) {
+        const actionName = newPolicy === 'ACCEPT' ? 'allow_port' : 'deny_port';
+        const task = await compileDaemonPluginMutation(node, 'firewall', activePluginName, actionName, {
+          port: newProto === 'icmp' ? '22' : newPort.trim(),
+          proto: newProto === 'all' || newProto === 'icmp' ? 'tcp' : newProto,
           source: newSource.trim() || undefined,
-          inInterface: newInterface.trim() || undefined,
-          zone: newZone,
-          policy: newPolicy,
           comment: newComment.trim() || undefined,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Failed to add firewall rule');
+        });
+        const staged = await stageTaskInQueue(task);
+        if (!staged.success) {
+          throw new Error(staged.error || `Failed to stage ${activePluginName} rule`);
+        }
+      } else {
+        const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/firewall/rules`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            port: newProto === 'icmp' ? undefined : newPort.trim(),
+            protocol: newProto,
+            source: newSource.trim() || undefined,
+            inInterface: newInterface.trim() || undefined,
+            zone: newZone,
+            policy: newPolicy,
+            comment: newComment.trim() || undefined,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Failed to add firewall rule');
+        }
       }
 
       refreshAll(true);
@@ -285,7 +341,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
           <span className="material-symbols-outlined text-[#ffb4ab] text-[22px]">security</span>
           <div>
             <h3 className="font-sans text-sm text-[#dfe1fa] font-bold">
-              Firewall &amp; Packet Filtering (nftables / firewalld on {node.shortName})
+              Firewall &amp; Packet Filtering ({isFirewalld ? 'nftables / firewalld' : backendLabel} on {node.shortName})
             </h3>
             <p className="font-mono text-[11px] text-[#8d909b]">
               Stateful connection tracking, port ranges, CIDR restrictions &amp; zone isolation
@@ -294,7 +350,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node }) => {
         </div>
         <div className="flex items-center gap-2">
           <span className="px-2 py-0.5 bg-[#8cd6cb]/15 text-[#8cd6cb] font-mono text-xs rounded border border-[#8cd6cb]/30">
-            firewalld: {status.toUpperCase()} ({nftActive ? 'nftables ENFORCING' : 'ACTIVE'})
+            {activePluginName}: {status.toUpperCase()} ({isFirewalld && nftActive ? 'nftables ENFORCING' : 'ACTIVE'})
           </span>
           <button
             type="button"
