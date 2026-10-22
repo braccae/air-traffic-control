@@ -8,6 +8,23 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+// SettingsPageID is the route slug of the datacenter-wide Tailscale Mesh Status settings page.
+const SettingsPageID = "network/tailscale"
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func init() {
@@ -24,7 +41,7 @@ func New() *Plugin {
 
 func (p *Plugin) Meta() plugin.Meta {
 	return plugin.Meta{
-		ID:          "network/tailscale",
+		ID:          SettingsPageID,
 		Kind:        plugin.KindNetwork,
 		Name:        "tailscale",
 		Label:       "Tailscale Mesh Status",
@@ -47,6 +64,88 @@ func (p *Plugin) Requirements() plugin.Requirements {
 		},
 		ControllerCollections: []string{"ansible.builtin"},
 	}
+}
+
+// CollectionSchedule returns the standard network polling and cache TTL schedule (30s).
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema documents the v2 payload structure emitted by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "peers",
+		Description: p.Meta().Description,
+	}
+}
+
+// CategorizedSettingsPage declares datacenter-wide Tailscale mesh feature defaults
+// via the v2 settings framework.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	meta := p.Meta()
+	return settingsframework.NewPageBuilder(meta.ID, "Tailscale Mesh Defaults").
+		WithIcon(meta.Icon).
+		WithCategory(string(meta.Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(meta.Order).
+		WithDescription("Datacenter-wide Tailscale mesh peering, MagicDNS, subnet route, and Tailscale SSH feature defaults.").
+		BoolField(
+			"defaultAcceptDNS",
+			"Accept MagicDNS by Default",
+			true,
+			settingsframework.WithDescription("Default preference for accepting MagicDNS configuration on managed Tailscale nodes."),
+		).
+		BoolField(
+			"defaultAcceptRoutes",
+			"Accept Subnet Routes by Default",
+			false,
+			settingsframework.WithDescription("Default preference for accepting advertised subnet routes from other Tailscale nodes."),
+		).
+		BoolField(
+			"defaultSSH",
+			"Enable Tailscale SSH by Default",
+			true,
+			settingsframework.WithDescription("Default preference for running the Tailscale SSH server on managed nodes."),
+		).
+		StringField(
+			"defaultExitNode",
+			"Default Exit Node",
+			"",
+			settingsframework.WithPlaceholder("auto:any"),
+			settingsframework.WithDescription("Optional default exit node (IP, base name, or auto:any) when configuring exit node routing."),
+		).
+		SecretField(
+			"authKeyVaultVar",
+			"Tailscale Node Auth Key Vault Variable",
+			settingsframework.WithPlaceholder("vault_tailscale_auth_key"),
+			settingsframework.WithDescription("Optional Ansible Vault variable holding a reusable or pre-authorized Tailscale node auth key."),
+		).
+		BuildCategorized()
+}
+
+// SettingsPage returns the underlying plugin.SettingsPage for legacy consumers.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
+}
+
+// ContextMenuEntries provides network context menu actions for Tailscale nodes.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	meta := p.Meta()
+	return newapi.NewContextMenuBuilder(meta.ID).
+		WithTarget(newapi.TargetNetwork).
+		WithGroup(string(meta.Kind)).
+		AddAction("set_accept_dns", "Accept DNS", "dns", "set_accept_dns", 10).
+		AddAction("set_accept_routes", "Accept Routes", "alt_route", "set_accept_routes", 20).
+		AddAction("set_ssh", "Tailscale SSH", "terminal", "set_ssh", 30).
+		AddAction("set_advertise_exit_node", "Advertise Exit Node", "public", "set_advertise_exit_node", 40).
+		AddAction("set_advertise_routes", "Advertise Routes", "share_location", "set_advertise_routes", 50).
+		AddAction("set_exit_node", "Exit Node", "outbound", "set_exit_node", 60).
+		AddAction("set_hostname", "Hostname", "badge", "set_hostname", 70).
+		Build()
 }
 
 func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (plugin.Detection, error) {
@@ -245,7 +344,7 @@ func parsePrefs(m map[string]any) Prefs {
 }
 
 // ---------------------------------------------------------------------------
-// Actor: declarative `tailscale set` feature configuration
+// Actor & ManagementPlugin: declarative `tailscale set` feature configuration
 // ---------------------------------------------------------------------------
 
 // tailscaleBoolActions maps an action name to its boolean `tailscale set` flag.
@@ -266,8 +365,8 @@ var tailscaleStringActions = map[string]struct {
 	"set_hostname":         {"hostname", "--hostname"},
 }
 
-// Actions enumerates the supported feature-configuration mutations.
-func (p *Plugin) Actions() []plugin.ActionSpec {
+// ManagementActions returns rich v2 action specifications for Tailscale feature mutations.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
 	boolOpt := func(name, desc string) plugin.OptionSchema {
 		return plugin.OptionSchema{Name: name, Type: "bool", Required: true, Description: desc}
 	}
@@ -275,50 +374,141 @@ func (p *Plugin) Actions() []plugin.ActionSpec {
 		return plugin.OptionSchema{Name: name, Type: "string", Required: true, Description: desc}
 	}
 
-	return []plugin.ActionSpec{
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "set_accept_dns",
-			Label:       "Accept DNS",
-			Description: "Accept DNS configuration from the admin panel (tailscale set --accept-dns)",
-			Options:     []plugin.OptionSchema{boolOpt("enabled", "Enable or disable accepting DNS configuration")},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "set_accept_dns",
+				Label:       "Accept DNS",
+				Description: "Accept DNS configuration from the admin panel (tailscale set --accept-dns)",
+				Options:     []plugin.OptionSchema{boolOpt("enabled", "Enable or disable accepting DNS configuration")},
+			},
+			Category:         newapi.ActionCategoryConfiguration,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindNetwork},
 		},
 		{
-			Name:        "set_accept_routes",
-			Label:       "Accept Routes",
-			Description: "Accept routes advertised by other Tailscale nodes (tailscale set --accept-routes)",
-			Options:     []plugin.OptionSchema{boolOpt("enabled", "Enable or disable accepting advertised routes")},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "set_accept_routes",
+				Label:       "Accept Routes",
+				Description: "Accept routes advertised by other Tailscale nodes (tailscale set --accept-routes)",
+				Options:     []plugin.OptionSchema{boolOpt("enabled", "Enable or disable accepting advertised routes")},
+			},
+			Category:         newapi.ActionCategoryConfiguration,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindNetwork},
 		},
 		{
-			Name:        "set_ssh",
-			Label:       "Tailscale SSH",
-			Description: "Run the Tailscale SSH server on this node (tailscale set --ssh)",
-			Options:     []plugin.OptionSchema{boolOpt("enabled", "Enable or disable the Tailscale SSH server")},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "set_ssh",
+				Label:       "Tailscale SSH",
+				Description: "Run the Tailscale SSH server on this node (tailscale set --ssh)",
+				Options:     []plugin.OptionSchema{boolOpt("enabled", "Enable or disable the Tailscale SSH server")},
+			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindNetwork},
 		},
 		{
-			Name:        "set_advertise_exit_node",
-			Label:       "Advertise Exit Node",
-			Description: "Offer to be an exit node for internet traffic (tailscale set --advertise-exit-node)",
-			Options:     []plugin.OptionSchema{boolOpt("enabled", "Enable or disable advertising as an exit node")},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "set_advertise_exit_node",
+				Label:       "Advertise Exit Node",
+				Description: "Offer to be an exit node for internet traffic (tailscale set --advertise-exit-node)",
+				Options:     []plugin.OptionSchema{boolOpt("enabled", "Enable or disable advertising as an exit node")},
+			},
+			Category:         newapi.ActionCategoryConfiguration,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindNetwork},
 		},
 		{
-			Name:        "set_advertise_routes",
-			Label:       "Advertise Routes",
-			Description: "Routes to advertise to other nodes, comma-separated (tailscale set --advertise-routes)",
-			Options:     []plugin.OptionSchema{strOpt("routes", "Comma-separated CIDRs, e.g. 10.0.0.0/8,192.168.0.0/24")},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "set_advertise_routes",
+				Label:       "Advertise Routes",
+				Description: "Routes to advertise to other nodes, comma-separated (tailscale set --advertise-routes)",
+				Options:     []plugin.OptionSchema{strOpt("routes", "Comma-separated CIDRs, e.g. 10.0.0.0/8,192.168.0.0/24")},
+			},
+			Category:         newapi.ActionCategoryConfiguration,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindNetwork},
 		},
 		{
-			Name:        "set_exit_node",
-			Label:       "Exit Node",
-			Description: "Tailscale exit node (IP, base name, or auto:any) for internet traffic (tailscale set --exit-node)",
-			Options:     []plugin.OptionSchema{strOpt("exitNode", "Exit node IP, base name, or auto:any")},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "set_exit_node",
+				Label:       "Exit Node",
+				Description: "Tailscale exit node (IP, base name, or auto:any) for internet traffic (tailscale set --exit-node)",
+				Options:     []plugin.OptionSchema{strOpt("exitNode", "Exit node IP, base name, or auto:any")},
+			},
+			Category:         newapi.ActionCategoryConfiguration,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindNetwork},
 		},
 		{
-			Name:        "set_hostname",
-			Label:       "Hostname",
-			Description: "Hostname to use instead of the OS-provided one (tailscale set --hostname)",
-			Options:     []plugin.OptionSchema{strOpt("hostname", "Tailscale hostname")},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "set_hostname",
+				Label:       "Hostname",
+				Description: "Hostname to use instead of the OS-provided one (tailscale set --hostname)",
+				Options:     []plugin.OptionSchema{strOpt("hostname", "Tailscale hostname")},
+			},
+			Category:         newapi.ActionCategoryConfiguration,
+			Idempotent:       true,
+			InvalidatesKinds: []plugin.Kind{plugin.KindNetwork},
 		},
 	}
+}
+
+// Actions enumerates the supported feature-configuration mutations, derived
+// directly from ManagementActions().
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+// ValidateAction validates options against the declared ManagementActionSpec
+// and performs type/injection checks for Tailscale feature flags.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	norm := strings.TrimSpace(action)
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, norm) {
+			if err := newapi.ValidateManagementOptions(spec, opts); err != nil {
+				return err
+			}
+			if _, ok := tailscaleBoolActions[spec.Name]; ok {
+				if _, isBool := opts["enabled"].(bool); !isBool {
+					return fmt.Errorf("option \"enabled\" must be a boolean for action %s", spec.Name)
+				}
+			}
+			if strSpec, ok := tailscaleStringActions[spec.Name]; ok {
+				val, _ := opts[strSpec.Option].(string)
+				val = strings.TrimSpace(val)
+				if val == "" {
+					return fmt.Errorf("option %q must not be empty for action %s", strSpec.Option, spec.Name)
+				}
+				if err := validateTailscaleValue(val); err != nil {
+					return fmt.Errorf("invalid %s: %w", strSpec.Option, err)
+				}
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported tailscale action: %s", action)
+}
+
+// CompileTask adapts a typed v2 TaskRequest to the plugin's declarative
+// Ansible TaskSpec compiler.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
 
 // Compile turns a feature action into a declarative ansible.builtin.command task.

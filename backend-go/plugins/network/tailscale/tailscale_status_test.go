@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 )
 
 // fakeRunner returns canned output for commands matching a substring key.
@@ -253,5 +255,153 @@ func TestActionsExposeExpectedFeatureSet(t *testing.T) {
 		if !names[want] {
 			t.Errorf("missing action %q", want)
 		}
+	}
+}
+
+func TestTailscaleStatusPlugin_RegistrationAndProbe(t *testing.T) {
+	p, ok := plugin.Get("network/tailscale")
+	if !ok {
+		t.Fatalf("expected network/tailscale to be registered in default registry")
+	}
+
+	meta := p.Meta()
+	if meta.ID != "network/tailscale" || meta.Kind != plugin.KindNetwork || meta.Name != "tailscale" || meta.Order != 20 {
+		t.Fatalf("unexpected plugin meta: %+v", meta)
+	}
+
+	// Nil runner -> OFFLINE
+	det, err := p.Probe(context.Background(), nil, plugin.HostFacts{NodeID: "node-1"})
+	if err != nil {
+		t.Fatalf("unexpected error on nil runner: %v", err)
+	}
+	if det.Detected || det.Status != "OFFLINE" {
+		t.Fatalf("expected OFFLINE detection for nil runner, got %+v", det)
+	}
+
+	// Empty output -> UNAVAILABLE
+	emptyRunner := &fakeRunner{responses: map[string]string{}}
+	det, err = p.Probe(context.Background(), emptyRunner, plugin.HostFacts{NodeID: "node-1"})
+	if err != nil {
+		t.Fatalf("unexpected error on empty output: %v", err)
+	}
+	if det.Detected || det.Status != "UNAVAILABLE" {
+		t.Fatalf("expected UNAVAILABLE detection for empty output, got %+v", det)
+	}
+
+	// Valid JSON -> Detected=true
+	activeRunner := &fakeRunner{responses: map[string]string{
+		"status --json": sampleStatusJSON,
+	}}
+	det, err = p.Probe(context.Background(), activeRunner, plugin.HostFacts{NodeID: "node-1"})
+	if err != nil {
+		t.Fatalf("unexpected error on valid status JSON: %v", err)
+	}
+	if !det.Detected || det.Status != "Running" || !strings.Contains(det.Details, "2 peer(s)") {
+		t.Fatalf("unexpected active detection: %+v", det)
+	}
+}
+
+func TestTailscaleStatusPlugin_V2NewAPIInterfaces(t *testing.T) {
+	p, ok := plugin.Get("network/tailscale")
+	if !ok {
+		t.Fatalf("network/tailscale not registered")
+	}
+
+	facts := plugin.HostFacts{NodeID: "node-dev-pc", OSFamily: "linux"}
+
+	// 1. DataCollectionPlugin
+	dc, ok := p.(newapi.DataCollectionPlugin)
+	if !ok {
+		t.Fatalf("expected network/tailscale to implement newapi.DataCollectionPlugin")
+	}
+	sched := dc.CollectionSchedule()
+	if sched.Interval <= 0 || sched.TTL <= 0 {
+		t.Fatalf("expected positive schedule Interval and TTL, got %+v", sched)
+	}
+	schema := dc.CollectionSchema()
+	if schema.Version != "v2" || schema.RootKey != "peers" {
+		t.Fatalf("unexpected collection schema: %+v", schema)
+	}
+
+	// 2. ManagementPlugin
+	mgmt, ok := p.(newapi.ManagementPlugin)
+	if !ok {
+		t.Fatalf("expected network/tailscale to implement newapi.ManagementPlugin")
+	}
+	mgmtActions := mgmt.ManagementActions()
+	if len(mgmtActions) != 7 {
+		t.Fatalf("expected 7 management actions, got %d", len(mgmtActions))
+	}
+	legacyActions := mgmt.Actions()
+	if len(legacyActions) != len(mgmtActions) {
+		t.Fatalf("Actions() length %d does not match ManagementActions() length %d", len(legacyActions), len(mgmtActions))
+	}
+
+	if err := mgmt.ValidateAction(facts, "set_accept_dns", map[string]any{"enabled": true}); err != nil {
+		t.Fatalf("expected valid set_accept_dns options, got error: %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "set_accept_dns", map[string]any{}); err == nil {
+		t.Fatalf("expected error when required enabled option is missing")
+	}
+	if err := mgmt.ValidateAction(facts, "set_hostname", map[string]any{"hostname": "dev-pc"}); err != nil {
+		t.Fatalf("expected valid set_hostname options, got error: %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "set_hostname", map[string]any{"hostname": "evil; rm -rf /"}); err == nil {
+		t.Fatalf("expected error for command injection value in ValidateAction")
+	}
+	if err := mgmt.ValidateAction(facts, "unknown_action", map[string]any{}); err == nil {
+		t.Fatalf("expected error for unknown action")
+	}
+
+	// 3. CategorizedSettingsProvider
+	csp, ok := p.(newapi.CategorizedSettingsProvider)
+	if !ok {
+		t.Fatalf("expected network/tailscale to implement newapi.CategorizedSettingsProvider")
+	}
+	catPage := csp.CategorizedSettingsPage()
+	if err := settingsframework.ValidateSchema(csp.SettingsPage()); err != nil {
+		t.Fatalf("settings schema validation failed: %v", err)
+	}
+	if err := newapi.ValidateCategorizedSettingsPage(catPage); err != nil {
+		t.Fatalf("categorized settings page validation failed: %v", err)
+	}
+	if catPage.ID != "network/tailscale" || catPage.Category != "network" || catPage.Scope != newapi.SettingsScopeDatacenter {
+		t.Fatalf("unexpected categorized settings page metadata: %+v", catPage)
+	}
+
+	// 4. ContextMenuProvider
+	cmp, ok := p.(newapi.ContextMenuProvider)
+	if !ok {
+		t.Fatalf("expected network/tailscale to implement newapi.ContextMenuProvider")
+	}
+	entries := cmp.ContextMenuEntries(context.Background(), facts)
+	if len(entries) != 7 {
+		t.Fatalf("expected 7 context menu entries, got %d", len(entries))
+	}
+	for _, entry := range entries {
+		if entry.PluginID != "network/tailscale" || entry.Target != newapi.TargetNetwork || entry.Action == "" {
+			t.Errorf("unexpected context menu entry: %+v", entry)
+		}
+	}
+
+	// 5. TaskCompileProvider
+	tcp, ok := p.(newapi.TaskCompileProvider)
+	if !ok {
+		t.Fatalf("expected network/tailscale to implement newapi.TaskCompileProvider")
+	}
+	compiledTask, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypePluginAction,
+		PluginID: "network/tailscale",
+		Action:   "set_exit_node",
+		NodeID:   "node-dev-pc",
+		Params: map[string]any{
+			"exitNode": "auto:any",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask failed: %v", err)
+	}
+	if len(compiledTask.Steps) != 1 || compiledTask.Steps[0].Params["cmd"] != "tailscale set --exit-node=auto:any" {
+		t.Fatalf("unexpected CompileTask output: %+v", compiledTask)
 	}
 }
