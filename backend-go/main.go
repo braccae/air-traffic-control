@@ -56,8 +56,9 @@ func (r *sshWithLocalFallbackRunner) RunCommand(cfg ssh.Config, command string) 
 	return "", fmt.Errorf("ssh and local fallback failed for host %s", cfg.Host)
 }
 
-func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) *http.ServeMux {
+func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string, store *hostcache.Store) (*http.ServeMux, *plugin.API) {
 	mux := http.NewServeMux()
+	var pluginAPI *plugin.API
 
 	if hub != nil {
 		mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -165,9 +166,9 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 	// store as the plugin API. Startup fails loudly if the resolver cannot be
 	// built, so we never serve a half-broken API.
 	resolvedDB := plugin.ResolveDBPath(dbPath)
-	if store, err := hostcache.Open(resolvedDB); err != nil {
-		log.Printf("readonly API disabled: %v", err)
-		pluginAPI := plugin.NewAPI(plugin.APIOptions{DBPath: dbPath})
+	if store == nil {
+		log.Printf("readonly API disabled: host cache unavailable")
+		pluginAPI = plugin.NewAPI(plugin.APIOptions{DBPath: dbPath})
 		mux.HandleFunc("/api/plugins", pluginAPI.HandleListPlugins)
 		mux.Handle("/api/nodes/", pluginAPI.NodeRoutesHandler())
 	} else {
@@ -178,7 +179,7 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 		}
 
 		// Mount plugin framework REST API routes - with working node resolver from store
-		pluginAPI := plugin.NewAPI(plugin.APIOptions{Store: store})
+		pluginAPI = plugin.NewAPI(plugin.APIOptions{Store: store})
 		mux.HandleFunc("/api/plugins", pluginAPI.HandleListPlugins)
 
 		// Mount the Ansible mutation queue (staging, execution, halting). It
@@ -325,7 +326,7 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 	// an API route or a WebSocket upgrade.
 	mux.Handle("/", webui.SPAHandler())
 
-	return mux
+	return mux, pluginAPI
 }
 
 func readProcLoadAvg() (float64, error) {
@@ -382,13 +383,21 @@ func main() {
 		log.Fatalf("Failed to open host cache: %v", err)
 	}
 
-	apiOptions := plugin.APIOptions{Store: hostStore}
-	mux := newServerMux(hub, podmanMgr, *dbFlag)
+	mux, pluginAPI := newServerMux(hub, podmanMgr, *dbFlag, hostStore)
 	log.Printf("Air Traffic Control backend listening on :%d", *port)
 
-	// Initialize and start background cache manager (3s interval)
-	cacheMgr := cache.NewCacheManager(hostStore, apiOptions.NodeResolver, apiOptions.RunnerResolver, apiOptions.Cache)
-	cacheMgr.Start()
+	// Initialize and start the background cache manager (3s interval). It must
+	// use the resolvers and probe cache that the plugin API actually wired up
+	// (a fresh APIOptions literal leaves them nil and the manager nil-panics on
+	// its first tick). Skip it entirely when no node resolver is available.
+	nodeResolver := pluginAPI.NodeResolver()
+	runnerResolver := pluginAPI.RunnerResolver()
+	if nodeResolver != nil && runnerResolver != nil {
+		cacheMgr := cache.NewCacheManager(hostStore, nodeResolver, runnerResolver, pluginAPI.Cache())
+		cacheMgr.Start()
+	} else {
+		log.Printf("background cache manager disabled: no node resolver available")
+	}
 
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", *port), mux); err != nil {
 		log.Fatalf("Server stopped: %v", err)

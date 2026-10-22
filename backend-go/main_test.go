@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"air-traffic-control/backend/pkg/hostcache"
 	"air-traffic-control/backend/pkg/podman"
 	"air-traffic-control/backend/pkg/ssh"
 	"air-traffic-control/backend/pkg/types"
@@ -36,7 +37,7 @@ func (r *testSSHRunner) RunCommand(cfg ssh.Config, cmd string) (string, error) {
 
 func TestPodmanProbeEndpoint_ReturnsUnprivilegedUsers(t *testing.T) {
 	mgr := podman.NewManager(&testSSHRunner{}, ssh.Config{Host: "192.168.1.150", Port: 22, User: "root"})
-	mux := newServerMux(nil, mgr, "")
+	mux, _ := newServerMux(nil, mgr, "", nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/podman/probe", nil)
 	rec := httptest.NewRecorder()
@@ -98,7 +99,7 @@ func (r *failingSSHWithLocalFallback) RunCommand(cfg ssh.Config, cmd string) (st
 
 func TestPodmanProbeEndpoint_DirectUserPodmanFallback(t *testing.T) {
 	mgr := podman.NewManager(&failingSSHWithLocalFallback{}, ssh.Config{Host: "127.0.0.1", Port: 22, User: "pants"})
-	mux := newServerMux(nil, mgr, "")
+	mux, _ := newServerMux(nil, mgr, "", nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/podman/probe", nil)
 	rec := httptest.NewRecorder()
@@ -126,7 +127,7 @@ func TestPodmanProbeEndpoint_DirectUserPodmanFallback(t *testing.T) {
 }
 
 func TestAPINotFoundCatchAll_ReturnsJSON(t *testing.T) {
-	mux := newServerMux(nil, nil, "")
+	mux, _ := newServerMux(nil, nil, "", nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/does/not/exist", nil)
 	rec := httptest.NewRecorder()
@@ -153,7 +154,7 @@ func TestAPINotFoundCatchAll_ReturnsJSON(t *testing.T) {
 }
 
 func TestAPINotFoundCatchAll_DoesNotShadowRealRoutes(t *testing.T) {
-	mux := newServerMux(nil, nil, "")
+	mux, _ := newServerMux(nil, nil, "", nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 	rec := httptest.NewRecorder()
@@ -165,7 +166,7 @@ func TestAPINotFoundCatchAll_DoesNotShadowRealRoutes(t *testing.T) {
 }
 
 func TestUnknownNonAPIPath_ServesSPAFallback(t *testing.T) {
-	mux := newServerMux(nil, nil, "")
+	mux, _ := newServerMux(nil, nil, "", nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/some/client/route", nil)
 	rec := httptest.NewRecorder()
@@ -183,7 +184,11 @@ func TestUnknownNonAPIPath_ServesSPAFallback(t *testing.T) {
 
 func TestGETNodesEndpoint_ReturnsPopulatedSpecsForAllNodes(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hosts-cache.sqlite")
-	mux := newServerMux(nil, nil, dbPath)
+	store, err := hostcache.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open host cache: %v", err)
+	}
+	mux, _ := newServerMux(nil, nil, dbPath, store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
 	rec := httptest.NewRecorder()

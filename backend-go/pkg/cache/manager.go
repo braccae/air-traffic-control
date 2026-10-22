@@ -65,6 +65,9 @@ func (cm *CacheManager) Stop() {
 }
 
 func (cm *CacheManager) cacheAllHosts() {
+	if cm.store == nil {
+		return
+	}
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -91,6 +94,11 @@ func (cm *CacheManager) cacheAllHosts() {
 }
 
 func (cm *CacheManager) cachePlugins(ctx context.Context, nodeID string) error {
+	// Defensive: a manager constructed without resolvers (e.g. a store-less
+	// plugin API) must no-op rather than nil-panic on its tick.
+	if cm.nodeResolver == nil || cm.runnerResolver == nil || cm.cache == nil {
+		return nil
+	}
 	facts, ok, err := cm.nodeResolver.ResolveNode(nodeID)
 	if err != nil {
 		log.Printf("cache: failed to resolve facts for %s: %v", nodeID, err)

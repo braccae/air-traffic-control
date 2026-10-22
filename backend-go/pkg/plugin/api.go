@@ -434,6 +434,33 @@ type API struct {
 	settingsStore  *SettingsStore
 }
 
+// NodeResolver returns the wired node resolver. It may be nil when no store or
+// database path was available at construction time; callers must nil-check
+// before use (e.g. the background cache manager).
+func (a *API) NodeResolver() NodeResolver {
+	if a == nil {
+		return nil
+	}
+	return a.nodeResolver
+}
+
+// RunnerResolver returns the wired runner resolver. Never nil for a non-nil API
+// (NewAPI substitutes a DefaultRunnerResolver), but nil-check defensively.
+func (a *API) RunnerResolver() RunnerResolver {
+	if a == nil {
+		return nil
+	}
+	return a.runnerResolver
+}
+
+// Cache returns the wired probe cache. Never nil for a non-nil API.
+func (a *API) Cache() *ProbeCache {
+	if a == nil {
+		return nil
+	}
+	return a.cache
+}
+
 // APIOptions holds dependencies for initializing API
 type APIOptions struct {
 	Registry       *Registry
