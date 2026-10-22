@@ -9,6 +9,19 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+// SettingsPageID is the datacenter settings page identifier for firewall/nftables.
+const SettingsPageID = "firewall/nftables"
+
+var (
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func init() {
@@ -49,6 +62,57 @@ func (p *Plugin) Requirements() plugin.Requirements {
 			"ansible.posix",
 		},
 	}
+}
+
+// CollectionSchedule returns the v2 polling and cache TTL schedule for nftables inspection.
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema describes the v2 payload structure returned by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "rules",
+		Description: p.Meta().Description,
+	}
+}
+
+// CategorizedSettingsPage declares datacenter-wide defaults for nftables rules.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	return settingsframework.NewPageBuilder(SettingsPageID, "nftables Firewall Defaults").
+		WithIcon(p.Meta().Icon).
+		WithCategory(string(p.Meta().Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(p.Meta().Order).
+		WithDescription("Datacenter-wide default nftables table, chain, and verdict policies.").
+		StringField("defaultTable", "Default Table", "inet filter",
+			settingsframework.WithDescription("Default nftables family and table used when an action omits the table parameter.")).
+		StringField("defaultChain", "Default Chain", "input",
+			settingsframework.WithDescription("Default nftables chain used when an action omits the chain parameter.")).
+		SelectField("defaultDenyVerdict", "Default Deny Verdict", "drop", []plugin.SettingsFieldOption{
+			{Value: "drop", Label: "Drop (silent)"},
+			{Value: "reject", Label: "Reject (ICMP unreachable)"},
+		}, settingsframework.WithDescription("Default verdict applied by deny_port when no policy option is specified.")).
+		BuildCategorized()
+}
+
+// SettingsPage implements plugin.SettingsPageProvider.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
+}
+
+// ContextMenuEntries provides contextual firewall actions for compatible hosts.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	return newapi.NewContextMenuBuilder(p.Meta().ID).
+		WithTarget(newapi.TargetFirewall).
+		WithGroup(string(p.Meta().Kind)).
+		AddAction("allow_port", "Allow Port", "lock_open", "allow_port", 10).
+		AddDangerAction("deny_port", "Deny Port", "block", "deny_port", "Drop or reject traffic on a port in nftables?", 20).
+		Build()
 }
 
 type ParsedFirewallRule struct {
@@ -377,33 +441,108 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}, nil
 }
 
-func (p *Plugin) Actions() []plugin.ActionSpec {
-	return []plugin.ActionSpec{
+// ManagementActions returns the structured v2 management action specifications for nftables.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "allow_port",
-			Label:       "Allow Port",
-			Description: "Allow an incoming TCP/UDP port in the nftables inet filter input chain",
-			Options: []plugin.OptionSchema{
-				{Name: "port", Type: "string", Required: true, Description: "Destination port or range (e.g. 80, 443, 8000-8080)"},
-				{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp or udp"},
-				{Name: "table", Type: "string", Required: false, Default: "inet filter", Description: "Target nftables family and table"},
-				{Name: "chain", Type: "string", Required: false, Default: "input", Description: "Target nftables chain"},
-				{Name: "comment", Type: "string", Required: false, Description: "Optional rule comment"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "allow_port",
+				Label:       "Allow Port",
+				Description: "Allow an incoming TCP/UDP port in the nftables inet filter input chain",
+				Options: []plugin.OptionSchema{
+					{Name: "port", Type: "string", Required: true, Description: "Destination port or range (e.g. 80, 443, 8000-8080)"},
+					{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp or udp"},
+					{Name: "table", Type: "string", Required: false, Default: "inet filter", Description: "Target nftables family and table"},
+					{Name: "chain", Type: "string", Required: false, Default: "input", Description: "Target nftables chain"},
+					{Name: "comment", Type: "string", Required: false, Description: "Optional rule comment"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       false,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
 		},
 		{
-			Name:        "deny_port",
-			Label:       "Deny Port",
-			Description: "Drop traffic on a TCP/UDP port in the nftables inet filter input chain",
-			Options: []plugin.OptionSchema{
-				{Name: "port", Type: "string", Required: true, Description: "Destination port or range (e.g. 23, 8080)"},
-				{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp or udp"},
-				{Name: "table", Type: "string", Required: false, Default: "inet filter", Description: "Target nftables family and table"},
-				{Name: "chain", Type: "string", Required: false, Default: "input", Description: "Target nftables chain"},
-				{Name: "policy", Type: "select", Enum: []string{"drop", "reject"}, Default: "drop", Description: "Verdict (drop or reject)"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "deny_port",
+				Label:       "Deny Port",
+				Description: "Drop traffic on a TCP/UDP port in the nftables inet filter input chain",
+				Options: []plugin.OptionSchema{
+					{Name: "port", Type: "string", Required: true, Description: "Destination port or range (e.g. 23, 8080)"},
+					{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp or udp"},
+					{Name: "table", Type: "string", Required: false, Default: "inet filter", Description: "Target nftables family and table"},
+					{Name: "chain", Type: "string", Required: false, Default: "input", Description: "Target nftables chain"},
+					{Name: "policy", Type: "select", Enum: []string{"drop", "reject"}, Default: "drop", Description: "Verdict (drop or reject)"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       false,
+			Dangerous:        true,
+			ConfirmPrompt:    "Drop or reject traffic on the specified port in nftables?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
 		},
 	}
+}
+
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	out := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		out[i] = m.ActionSpec
+	}
+	return out
+}
+
+// ValidateAction validates an nftables action name and option map against the v2 ManagementActionSpec.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	norm := strings.ToLower(strings.TrimSpace(action))
+	if norm == "port" {
+		norm = "allow_port"
+	}
+
+	var matched *newapi.ManagementActionSpec
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, norm) {
+			s := spec
+			matched = &s
+			break
+		}
+	}
+	if matched == nil {
+		return fmt.Errorf("unsupported nftables action: %s", action)
+	}
+	if err := newapi.ValidateManagementOptions(*matched, opts); err != nil {
+		return err
+	}
+
+	rawPort, _ := opts["port"].(string)
+	if _, err := validateNftPort(rawPort); err != nil {
+		return err
+	}
+
+	proto, _ := opts["proto"].(string)
+	proto = strings.ToLower(strings.TrimSpace(proto))
+	if proto == "" {
+		if idx := strings.Index(rawPort, "/"); idx >= 0 {
+			proto = strings.ToLower(strings.TrimSpace(rawPort[idx+1:]))
+		}
+	}
+	if proto != "" && proto != "tcp" && proto != "udp" && proto != "sctp" {
+		return fmt.Errorf("invalid protocol %q: must be tcp, udp, or sctp", proto)
+	}
+
+	if table, ok := opts["table"].(string); ok && strings.TrimSpace(table) != "" {
+		if !safeNftIdentifierRe.MatchString(strings.TrimSpace(table)) {
+			return fmt.Errorf("invalid nftables table %q", strings.TrimSpace(table))
+		}
+	}
+	if chain, ok := opts["chain"].(string); ok && strings.TrimSpace(chain) != "" {
+		if !safeNftIdentifierRe.MatchString(strings.TrimSpace(chain)) {
+			return fmt.Errorf("invalid nftables chain %q", strings.TrimSpace(chain))
+		}
+	}
+
+	return nil
 }
 
 var safeNftIdentifierRe = regexp.MustCompile(`^[a-zA-Z0-9_\-\s]+$`)
@@ -435,7 +574,27 @@ func validateNftPort(raw string) (string, error) {
 	return strconv.Itoa(p), nil
 }
 
+func defaultNftTable() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault(SettingsPageID, "defaultTable", "inet filter")
+}
+
+func defaultNftChain() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault(SettingsPageID, "defaultChain", "input")
+}
+
+func defaultNftDenyVerdict() string {
+	v := strings.ToLower(strings.TrimSpace(settingsframework.NewStoreAdapter(nil).StringOrDefault(SettingsPageID, "defaultDenyVerdict", "drop")))
+	if v == "reject" {
+		return "reject"
+	}
+	return "drop"
+}
+
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
+	if err := p.ValidateAction(h, action, opts); err != nil {
+		return plugin.TaskSpec{}, err
+	}
+
 	norm := strings.ToLower(strings.TrimSpace(action))
 	switch norm {
 	case "allow_port", "port", "deny_port":
@@ -462,7 +621,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		table, _ := opts["table"].(string)
 		table = strings.TrimSpace(table)
 		if table == "" {
-			table = "inet filter"
+			table = defaultNftTable()
 		}
 		if !safeNftIdentifierRe.MatchString(table) {
 			return plugin.TaskSpec{}, fmt.Errorf("invalid nftables table %q", table)
@@ -471,7 +630,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		chain, _ := opts["chain"].(string)
 		chain = strings.TrimSpace(chain)
 		if chain == "" {
-			chain = "input"
+			chain = defaultNftChain()
 		}
 		if !safeNftIdentifierRe.MatchString(chain) {
 			return plugin.TaskSpec{}, fmt.Errorf("invalid nftables chain %q", chain)
@@ -479,9 +638,13 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 
 		verdict := "accept"
 		if norm == "deny_port" {
-			verdict = "drop"
-			if pol, ok := opts["policy"].(string); ok && strings.EqualFold(strings.TrimSpace(pol), "reject") {
-				verdict = "reject"
+			verdict = defaultNftDenyVerdict()
+			if pol, ok := opts["policy"].(string); ok && strings.TrimSpace(pol) != "" {
+				if strings.EqualFold(strings.TrimSpace(pol), "reject") {
+					verdict = "reject"
+				} else {
+					verdict = "drop"
+				}
 			}
 		}
 
@@ -509,4 +672,18 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 	default:
 		return plugin.TaskSpec{}, fmt.Errorf("unsupported nftables action: %s", action)
 	}
+}
+
+// CompileTask implements newapi.TaskCompileProvider so typed TaskRequests can compile directly via the plugin.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
