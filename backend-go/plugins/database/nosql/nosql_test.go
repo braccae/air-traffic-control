@@ -4,8 +4,11 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 	_ "air-traffic-control/backend/plugins/all"
 )
 
@@ -181,5 +184,133 @@ func TestNoSQLPlugin_ActionsAndCompile(t *testing.T) {
 	}
 	if !strings.Contains(task.Steps[0].Params["cmd"].(string), "ACL DELUSER") {
 		t.Errorf("expected ACL DELUSER in command, got %v", task.Steps[0].Params["cmd"])
+	}
+}
+
+func TestNoSQLPlugin_NewAPIInterfacesAndSchemas(t *testing.T) {
+	p, ok := plugin.Get("database/nosql")
+	if !ok {
+		t.Fatalf("database/nosql not registered in DefaultRegistry")
+	}
+
+	// 1. DataCollectionPlugin
+	dc, ok := p.(newapi.DataCollectionPlugin)
+	if !ok {
+		t.Fatalf("database/nosql does not implement newapi.DataCollectionPlugin")
+	}
+	sched := dc.CollectionSchedule()
+	if sched.Interval != 60*time.Second || sched.TTL != 60*time.Second {
+		t.Errorf("unexpected collection schedule for database/nosql: %+v", sched)
+	}
+	schema := dc.CollectionSchema()
+	if schema.Version != "v2" || schema.RootKey != "engines" {
+		t.Errorf("unexpected collection schema: %+v", schema)
+	}
+
+	// 2. ManagementPlugin & action parity
+	mgmt, ok := p.(newapi.ManagementPlugin)
+	if !ok {
+		t.Fatalf("database/nosql does not implement newapi.ManagementPlugin")
+	}
+	mgmtActions := mgmt.ManagementActions()
+	legacyActions := p.(plugin.Actor).Actions()
+	if len(mgmtActions) != 5 || len(legacyActions) != len(mgmtActions) {
+		t.Fatalf("expected 5 management actions matching legacy Actions(), got mgmt=%d legacy=%d", len(mgmtActions), len(legacyActions))
+	}
+	for i, ma := range mgmtActions {
+		if ma.Name != legacyActions[i].Name {
+			t.Errorf("action[%d] name mismatch: %q vs %q", i, ma.Name, legacyActions[i].Name)
+		}
+		if (ma.Name == "database_drop" || ma.Name == "user_delete") && (!ma.Dangerous || ma.ConfirmPrompt == "") {
+			t.Errorf("expected %s to be marked dangerous with a confirmation prompt: %+v", ma.Name, ma)
+		}
+	}
+
+	facts := plugin.HostFacts{NodeID: "node1", OSFamily: "linux"}
+	if err := mgmt.ValidateAction(facts, "query", map[string]any{
+		"engine":  "redis",
+		"command": "GET key1",
+	}); err != nil {
+		t.Errorf("expected valid query options to pass ValidateAction, got %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "query", map[string]any{
+		"engine": "redis",
+	}); err == nil {
+		t.Errorf("expected missing required command option to fail ValidateAction")
+	}
+	if err := mgmt.ValidateAction(facts, "database_create", map[string]any{
+		"engine": "invalid_engine",
+		"name":   "testdb",
+	}); err == nil {
+		t.Errorf("expected invalid engine enum to fail ValidateAction")
+	}
+	if err := mgmt.ValidateAction(facts, "unknown_action", nil); err == nil {
+		t.Errorf("expected unknown action to fail ValidateAction")
+	}
+
+	// 3. CategorizedSettingsProvider & settingsframework validation
+	csp, ok := p.(newapi.CategorizedSettingsProvider)
+	if !ok {
+		t.Fatalf("database/nosql does not implement newapi.CategorizedSettingsProvider")
+	}
+	catPage := csp.CategorizedSettingsPage()
+	if err := settingsframework.ValidateSchema(catPage.SettingsPage); err != nil {
+		t.Fatalf("ValidateSchema failed for database/nosql settings page: %v", err)
+	}
+	if err := newapi.ValidateCategorizedSettingsPage(catPage); err != nil {
+		t.Fatalf("ValidateCategorizedSettingsPage failed for database/nosql: %v", err)
+	}
+	if catPage.ID != "database/nosql" || catPage.Scope != newapi.SettingsScopeDatacenter || catPage.Category != "database" {
+		t.Errorf("unexpected categorized settings page metadata: %+v", catPage)
+	}
+	if _, ok := plugin.DefaultRegistry().GetSettingsPage("database/nosql"); !ok {
+		t.Errorf("expected database/nosql settings page to be indexed in DefaultRegistry")
+	}
+
+	// 4. ContextMenuProvider
+	cmp, ok := p.(newapi.ContextMenuProvider)
+	if !ok {
+		t.Fatalf("database/nosql does not implement newapi.ContextMenuProvider")
+	}
+	entries := cmp.ContextMenuEntries(context.Background(), facts)
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 context menu entries for compatible linux host, got %d (%+v)", len(entries), entries)
+	}
+	for _, entry := range entries {
+		if entry.PluginID != "database/nosql" || entry.Target != newapi.TargetDatabase {
+			t.Errorf("unexpected context menu entry metadata: %+v", entry)
+		}
+	}
+	if winEntries := cmp.ContextMenuEntries(context.Background(), plugin.HostFacts{OSFamily: "windows"}); len(winEntries) != 0 {
+		t.Errorf("expected nil/empty context menu entries for incompatible windows host, got %+v", winEntries)
+	}
+
+	// 5. TaskCompileProvider
+	tcp, ok := p.(newapi.TaskCompileProvider)
+	if !ok {
+		t.Fatalf("database/nosql does not implement newapi.TaskCompileProvider")
+	}
+	compiled, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypePluginAction,
+		PluginID: "database/nosql",
+		Action:   "database_create",
+		NodeID:   "node1",
+		Params: map[string]any{
+			"engine": "mongodb",
+			"name":   "events",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask failed: %v", err)
+	}
+	if len(compiled.Steps) != 1 || compiled.Steps[0].Module != "community.mongodb.mongodb_collection" {
+		t.Errorf("unexpected CompileTask steps: %+v", compiled.Steps)
+	}
+	if _, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypePluginAction,
+		PluginID: "database/nosql",
+		NodeID:   "node1",
+	}); err == nil {
+		t.Errorf("expected CompileTask with empty action to return an error")
 	}
 }
