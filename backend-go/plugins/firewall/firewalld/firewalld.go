@@ -9,6 +9,20 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func init() {
@@ -408,6 +422,61 @@ func parseFirewallListAll(listAllRaw, activeZonesRaw string) (map[string]any, []
 	return convertedZones, services, ports, richRules, rules, forwardPorts, masquerade
 }
 
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "rules",
+		Description: p.Meta().Description,
+	}
+}
+
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	return settingsframework.NewPageBuilder(p.Meta().ID, "Firewalld Defaults").
+		WithIcon(p.Meta().Icon).
+		WithCategory(string(p.Meta().Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(p.Meta().Order).
+		WithDescription("Datacenter-wide firewalld default zone, protocol, and masquerade settings.").
+		StringField("defaultZone", "Default Firewall Zone", "public",
+			settingsframework.WithDescription("Default firewalld zone used when an action does not specify a target zone.")).
+		SelectField("defaultProto", "Default Protocol", "tcp", []plugin.SettingsFieldOption{
+			{Value: "tcp", Label: "TCP"},
+			{Value: "udp", Label: "UDP"},
+		}, settingsframework.WithDescription("Default transport protocol when allowing or forwarding ports.")).
+		BoolField("autoMasqueradeOnForward", "Enable Masquerade on Port Forward", true,
+			settingsframework.WithDescription("Automatically enable zone masquerading when forwarding ports.")).
+		BuildCategorized()
+}
+
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
+}
+
+func defaultFirewallZone() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault("firewall/firewalld", "defaultZone", "public")
+}
+
+func defaultFirewallProto() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault("firewall/firewalld", "defaultProto", "tcp")
+}
+
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	return newapi.NewContextMenuBuilder(p.Meta().ID).
+		WithTarget(newapi.TargetFirewall).
+		WithGroup(string(p.Meta().Kind)).
+		AddAction("allow_port", "Allow Port", "lock_open", "allow_port", 10).
+		AddAction("allow_service", "Allow Service", "verified_user", "allow_service", 20).
+		AddAction("forward_port", "Forward Port (NAT MASQ)", "alt_route", "forward_port", 30).
+		Build()
+}
+
 func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (any, error) {
 	if r == nil {
 		return nil, fmt.Errorf("runner is nil")
@@ -469,43 +538,131 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}, nil
 }
 
-func (p *Plugin) Actions() []plugin.ActionSpec {
-	return []plugin.ActionSpec{
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "allow_port",
-			Label:       "Allow Port",
-			Description: "Allow an incoming TCP/UDP port through firewalld",
-			Options: []plugin.OptionSchema{
-				{Name: "port", Type: "string", Required: true, Description: "Port number or port/protocol (e.g. 80, 443/tcp)"},
-				{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp or udp"},
-				{Name: "zone", Type: "string", Required: false, Description: "Target firewall zone"},
-				{Name: "state", Type: "select", Enum: []string{"enabled", "disabled"}, Default: "enabled", Description: "Rule state"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "allow_port",
+				Label:       "Allow Port",
+				Description: "Allow an incoming TCP/UDP port through firewalld",
+				Options: []plugin.OptionSchema{
+					{Name: "port", Type: "string", Required: true, Description: "Port number or port/protocol (e.g. 80, 443/tcp)"},
+					{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp or udp"},
+					{Name: "zone", Type: "string", Required: false, Description: "Target firewall zone"},
+					{Name: "state", Type: "select", Enum: []string{"enabled", "disabled"}, Default: "enabled", Description: "Rule state"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
 		},
 		{
-			Name:        "allow_service",
-			Label:       "Allow Service",
-			Description: "Allow a named service through firewalld",
-			Options: []plugin.OptionSchema{
-				{Name: "service", Type: "string", Required: true, Description: "Service name (e.g. http, ssh)"},
-				{Name: "zone", Type: "string", Required: false, Description: "Target firewall zone"},
-				{Name: "state", Type: "select", Enum: []string{"enabled", "disabled"}, Default: "enabled", Description: "Rule state"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "allow_service",
+				Label:       "Allow Service",
+				Description: "Allow a named service through firewalld",
+				Options: []plugin.OptionSchema{
+					{Name: "service", Type: "string", Required: true, Description: "Service name (e.g. http, ssh)"},
+					{Name: "zone", Type: "string", Required: false, Description: "Target firewall zone"},
+					{Name: "state", Type: "select", Enum: []string{"enabled", "disabled"}, Default: "enabled", Description: "Rule state"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
 		},
 		{
-			Name:        "forward_port",
-			Label:       "Forward Port (NAT MASQ)",
-			Description: "Forward an incoming port to an internal host and port via firewalld masquerade",
-			Options: []plugin.OptionSchema{
-				{Name: "port", Type: "string", Required: true, Description: "External port or range (e.g. 8080 or 8000-8080)"},
-				{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp or udp"},
-				{Name: "toport", Type: "string", Required: true, Description: "Internal destination port (e.g. 80)"},
-				{Name: "toaddr", Type: "string", Required: false, Description: "Internal destination host IP (optional; defaults to same host)"},
-				{Name: "zone", Type: "string", Required: false, Default: "public", Description: "Target firewall zone"},
-				{Name: "state", Type: "select", Enum: []string{"enabled", "disabled"}, Default: "enabled", Description: "Rule state"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "forward_port",
+				Label:       "Forward Port (NAT MASQ)",
+				Description: "Forward an incoming port to an internal host and port via firewalld masquerade",
+				Options: []plugin.OptionSchema{
+					{Name: "port", Type: "string", Required: true, Description: "External port or range (e.g. 8080 or 8000-8080)"},
+					{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp or udp"},
+					{Name: "toport", Type: "string", Required: true, Description: "Internal destination port (e.g. 80)"},
+					{Name: "toaddr", Type: "string", Required: false, Description: "Internal destination host IP (optional; defaults to same host)"},
+					{Name: "zone", Type: "string", Required: false, Default: "public", Description: "Target firewall zone"},
+					{Name: "state", Type: "select", Enum: []string{"enabled", "disabled"}, Default: "enabled", Description: "Rule state"},
+				},
 			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
 		},
 	}
+}
+
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+func normalizeActionName(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "allow_port", "port":
+		return "allow_port"
+	case "allow_service", "service":
+		return "allow_service"
+	case "forward_port", "forward-port", "port_forward":
+		return "forward_port"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	canonical := normalizeActionName(action)
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, canonical) {
+			if err := newapi.ValidateManagementOptions(spec, opts); err != nil {
+				return err
+			}
+			if canonical == "forward_port" {
+				port, _ := opts["port"].(string)
+				port = strings.TrimSpace(port)
+				if !validPortOrRange(port) {
+					return fmt.Errorf("invalid external port %q: must be 1-65535 or START-END", port)
+				}
+				proto, _ := opts["proto"].(string)
+				proto = strings.ToLower(strings.TrimSpace(proto))
+				if proto != "" && proto != "tcp" && proto != "udp" {
+					return fmt.Errorf("invalid protocol %q: must be tcp or udp", proto)
+				}
+				toport, _ := opts["toport"].(string)
+				toport = strings.TrimSpace(toport)
+				if !validPortOrRange(toport) {
+					return fmt.Errorf("invalid destination port %q: must be 1-65535 or START-END", toport)
+				}
+				toaddr, _ := opts["toaddr"].(string)
+				toaddr = strings.TrimSpace(toaddr)
+				if toaddr != "" && !validIPOrCIDR(toaddr) {
+					return fmt.Errorf("invalid destination address %q: must be a valid IP address or CIDR", toaddr)
+				}
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported firewalld action: %s", action)
+}
+
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
 
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
@@ -518,7 +675,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		}
 		proto, _ := opts["proto"].(string)
 		if proto == "" {
-			proto = "tcp"
+			proto = defaultFirewallProto()
 		}
 		portProto := port
 		if !strings.Contains(port, "/") {
@@ -597,7 +754,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		proto, _ := opts["proto"].(string)
 		proto = strings.ToLower(strings.TrimSpace(proto))
 		if proto == "" {
-			proto = "tcp"
+			proto = defaultFirewallProto()
 		}
 		if proto != "tcp" && proto != "udp" {
 			return plugin.TaskSpec{}, fmt.Errorf("invalid protocol %q: must be tcp or udp", proto)
@@ -621,7 +778,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		zone, _ := opts["zone"].(string)
 		zone = strings.TrimSpace(zone)
 		if zone == "" {
-			zone = "public"
+			zone = defaultFirewallZone()
 		}
 
 		state, _ := opts["state"].(string)
