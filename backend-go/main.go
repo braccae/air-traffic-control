@@ -349,7 +349,7 @@ func main() {
 	}
 
 	port := flag.Int("port", 8080, "HTTP and WebSocket server port")
-	dbFlag := flag.String("db", ":memory:", "Path to hosts-cache.sqlite (use :memory: for in-memory mode)")
+	dbFlag := flag.String("db", "", "Path to hosts-cache.sqlite (defaults to ATC_DB_PATH or auto-detected from the repo root). Use :memory: for in-memory mode; note the read-only API still needs a real file, so :memory: disables the /api/nodes/{id}/* read routes.")
 	flag.Parse()
 
 	log.Printf("Starting Air Traffic Control Go Core Daemon on port %d...", *port)
