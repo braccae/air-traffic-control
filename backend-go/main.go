@@ -9,11 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"time"
 
 	"air-traffic-control/backend/cmd/proxy"
 	"air-traffic-control/backend/pkg/ansibleapi"
 	"air-traffic-control/backend/pkg/ansqueue"
+	"air-traffic-control/backend/pkg/cache"
 	"air-traffic-control/backend/pkg/clusterapi"
 	"air-traffic-control/backend/pkg/cronapi"
 	"air-traffic-control/backend/pkg/glances"
@@ -159,16 +161,14 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 		json.NewEncoder(w).Encode(telem)
 	})
 
-	// Mount plugin framework REST API routes
-	pluginAPI := plugin.NewAPI(plugin.APIOptions{DBPath: dbPath})
-	mux.HandleFunc("/api/plugins", pluginAPI.HandleListPlugins)
-
 	// Mount the ported read-only routes. They share the same hosts-cache.sqlite
 	// store as the plugin API. Startup fails loudly if the resolver cannot be
 	// built, so we never serve a half-broken API.
 	resolvedDB := plugin.ResolveDBPath(dbPath)
 	if store, err := hostcache.Open(resolvedDB); err != nil {
 		log.Printf("readonly API disabled: %v", err)
+		pluginAPI := plugin.NewAPI(plugin.APIOptions{DBPath: dbPath})
+		mux.HandleFunc("/api/plugins", pluginAPI.HandleListPlugins)
 		mux.Handle("/api/nodes/", pluginAPI.NodeRoutesHandler())
 	} else {
 		if roAPI, err := readonlyapi.New(readonlyapi.Options{Store: store, DBPath: resolvedDB}); err != nil {
@@ -176,6 +176,10 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string) 
 		} else {
 			roAPI.Register(mux)
 		}
+
+		// Mount plugin framework REST API routes - with working node resolver from store
+		pluginAPI := plugin.NewAPI(plugin.APIOptions{Store: store})
+		mux.HandleFunc("/api/plugins", pluginAPI.HandleListPlugins)
 
 		// Mount the Ansible mutation queue (staging, execution, halting). It
 		// shares the cache file's pooled handle; the queue store never closes it.
@@ -344,7 +348,7 @@ func main() {
 	}
 
 	port := flag.Int("port", 8080, "HTTP and WebSocket server port")
-	dbFlag := flag.String("db", "", "Path to hosts-cache.sqlite (defaults to ATC_DB_PATH or auto-detected from the repo root)")
+	dbFlag := flag.String("db", ":memory:", "Path to hosts-cache.sqlite (use :memory: for in-memory mode)")
 	flag.Parse()
 
 	log.Printf("Starting Air Traffic Control Go Core Daemon on port %d...", *port)
@@ -373,9 +377,76 @@ func main() {
 		}
 	}()
 
+	hostStore, err := hostcache.Open(*dbFlag)
+	if err != nil {
+		log.Fatalf("Failed to open host cache: %v", err)
+	}
+
+	apiOptions := plugin.APIOptions{Store: hostStore}
 	mux := newServerMux(hub, podmanMgr, *dbFlag)
 	log.Printf("Air Traffic Control backend listening on :%d", *port)
+
+	// Initialize and start background cache manager (3s interval)
+	cacheMgr := cache.NewCacheManager(hostStore, apiOptions.NodeResolver, apiOptions.RunnerResolver, apiOptions.Cache)
+	cacheMgr.Start()
+
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", *port), mux); err != nil {
 		log.Fatalf("Server stopped: %v", err)
 	}
 }
+
+// HostDataUpdater periodically refreshes host data in the background
+type HostDataUpdater struct {
+	store    interface{} // hostcache.Store pointer (stored as interface{} to avoid import cycles)
+	interval time.Duration
+	stop     chan struct{}
+	wg       sync.WaitGroup
+}
+
+// NewHostDataUpdater creates a new background updater
+func NewHostDataUpdater(interval time.Duration) *HostDataUpdater {
+	return &HostDataUpdater{
+		interval: interval,
+		stop:     make(chan struct{}),
+	}
+}
+
+// SetStore sets the cache store for periodic backups
+func (u *HostDataUpdater) SetStore(store interface{}) {
+	u.store = store
+}
+
+// Start begins background updates
+func (u *HostDataUpdater) Start() {
+	u.wg.Add(1)
+	go func() {
+		defer u.wg.Done()
+		ticker := time.NewTicker(u.interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-u.stop:
+				return
+			case <-ticker.C:
+				// Backup in-memory store if available
+				if u.store != nil {
+					if s, ok := u.store.(interface{ Backup() error }); ok {
+						_ = s.Backup()
+					}
+				}
+				// TODO: Implement actual host data refresh
+				// This would call probe functions and update the cache
+			}
+		}
+	}()
+}
+
+// Stop stops background updates gracefully
+func (u *HostDataUpdater) Stop() {
+	close(u.stop)
+	u.wg.Wait()
+}
+
+// Ensure import is available
+var _ = sync.WaitGroup{}

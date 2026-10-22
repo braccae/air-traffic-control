@@ -422,7 +422,7 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                           </span>
                           <span className="material-symbols-outlined text-[14px] text-[#d9b9ff]">sell</span>
                           <span className="text-[#dfe1fa] font-medium truncate">{tagGroup.tag}</span>
-                          {tagGroup.chunk && (
+                          {tagGroup.chunk && tagGroup.nodes.length > 0 && (
                             <span
                               className="text-[9px] px-1 py-0.2 rounded bg-[#1f2638] text-[#8cd6cb] font-mono border border-[#8cd6cb]/30 shrink-0"
                               title={`Dynamic chunk: ${tagGroup.chunk.authMethod}`}

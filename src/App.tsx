@@ -1417,7 +1417,7 @@ export default function App() {
 
       {/* Main Content Workspace */}
       <div className="lg:pl-72 pl-0">
-        <main className={`relative pt-12 pb-48 w-full px-3 min-h-screen ${
+        <main className={`relative pt-12 pb-24 w-full px-3 min-h-screen ${
           highContrast ? 'bg-[#080a16]' : 'bg-[#0f1224]'
         }`}>
           {selectedViewMode === 'datacenter' ? (
@@ -1460,7 +1460,7 @@ export default function App() {
             </div>
 
             {/* Cockpit Nested Split Layout: Sub-Sidebar + Main Control Workspace */}
-            <div className="grid grid-cols-12 gap-2 mt-2 w-full items-start">
+            <div className="grid grid-cols-12 gap-2 mt-2 w-full">
               {/* Cockpit Sub-Sidebar with Resizable Width */}
               <div className={getSubSidebarWrapperClasses(subSidebarWidth)}>
                 <CockpitSubSidebar

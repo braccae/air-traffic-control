@@ -34,3 +34,8 @@ data/.rclone-key
 # `go test ./...` still works on a fresh clone that has never run a build.
 /backend-go/webui/dist/*
 !/backend-go/webui/dist/.gitkeep
+
+# Local daemon build artifacts and runtime DB written when the daemon runs from
+# the backend-go module dir. Never track the 45MB binary or real host inventory.
+/backend-go/daemon/
+/backend-go/data/

@@ -171,15 +171,15 @@ export function getSubSidebarWrapperClasses(width: SubSidebarWidth): string {
       ? 'col-span-12 lg:col-span-2 xl:col-span-2'
       : 'col-span-12 lg:col-span-3 xl:col-span-2';
 
-  return `${columnClasses} self-start lg:sticky lg:top-[76px] lg:max-h-[calc(100vh-100px)] overflow-y-auto overflow-x-hidden scrollbar-thin shrink-0`;
+  return `${columnClasses} lg:col-start-1 lg:row-start-1 lg:row-end-2 flex flex-col h-[calc(100vh-120px)] overflow-y-auto overflow-x-hidden scrollbar-thin shrink-0`.trim();
 }
 
 export function getWorkspaceWrapperClasses(width: SubSidebarWidth): string {
   return width === 'wide'
-    ? 'col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-2 min-w-0'
+    ? 'col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-2 min-w-0 h-[calc(100vh-120px)] overflow-y-auto'
     : width === 'compact'
-    ? 'col-span-12 lg:col-span-10 xl:col-span-10 flex flex-col gap-2 min-w-0'
-    : 'col-span-12 lg:col-span-9 xl:col-span-10 flex flex-col gap-2 min-w-0';
+    ? 'col-span-12 lg:col-span-10 xl:col-span-10 flex flex-col gap-2 min-w-0 h-[calc(100vh-120px)] overflow-y-auto'
+    : 'col-span-12 lg:col-span-9 xl:col-span-10 flex flex-col gap-2 min-w-0 h-[calc(100vh-120px)] overflow-y-auto';
 }
 
 export interface FormattedNodeBadge {

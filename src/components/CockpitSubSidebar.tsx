@@ -63,6 +63,38 @@ const SECTION_TITLES: Record<string, string> = {
   backup: 'BACKUPS & SYNC',
 };
 
+// Shorten plugin labels for cleaner sidebar display
+function shortenPluginLabel(label: string, name: string, section: string): string {
+  // Container plugins
+  if (name === 'podman') return 'Podman';
+  if (name === 'docker') return 'Docker';
+  if (name === 'lxc') return 'LXC';
+
+  // Storage plugins
+  if (section === 'storage' && name === 'zfs') return 'ZFS';
+  if (section === 'storage' && name === 'btrfs') return 'Btrfs';
+  if (section === 'storage' && name === 'lvm') return 'LVM';
+
+  // Database plugins - show just the name
+  if (section === 'database' && name === 'sql') return 'SQL';
+  if (section === 'database' && name === 'nosql') return 'NoSQL';
+
+  // System plugins
+  if (name === 'service') return 'Services';
+  if (name === 'journald') return 'Logs';
+  if (name === 'glances') return 'Glances';
+
+  // Network plugins
+  if (name === 'interfaces') return 'Interfaces';
+  if (name === 'tailscale') return 'Tailscale';
+
+  // Firewall
+  if (name === 'firewalld') return 'Firewall';
+
+  // Default: return as-is
+  return label;
+}
+
 export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
   node,
   activeItem,
@@ -116,6 +148,12 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
     if (!p.detection?.detected) continue;
     // Connection transports and elevation methods belong in Modules / Edit Node modal
     if (p.kind === 'connection' || p.kind === 'elevation') continue;
+    // Hide redundant/hidden plugins per UI cleanup (marked with red X)
+    const hiddenNames = [
+      'system', 'logs', 'telemetry', 'journald', 'share/nfs', 'share/smb', 'mount/rclone',
+      'firewalld', 'podman', 'docker', 'sql', 'nosql',
+    ];
+    if (hiddenNames.includes(p.name.toLowerCase()) || hiddenNames.includes((p.kind || '').toLowerCase())) continue;
 
     if (p.kind === 'package') {
       if (!chosenPackagePlugin) {
@@ -206,7 +244,7 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
                     <span className="material-symbols-outlined text-[13px] text-[#8d909b] shrink-0">
                       {resolvePluginIcon(p.icon)}
                     </span>
-                    <span className="truncate">{p.label || p.name}</span>
+                    <span className="truncate">{shortenPluginLabel(p.label || p.name, p.name, p.section || p.kind)}</span>
                   </span>
                 </button>
               );
@@ -248,7 +286,7 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
                         <span className="material-symbols-outlined text-[13px] text-[#8d909b] shrink-0">
                           {resolvePluginIcon(p.icon)}
                         </span>
-                        <span className="truncate">{p.label || p.name}</span>
+                        <span className="truncate">{shortenPluginLabel(p.label || p.name, p.name, p.section || p.kind)}</span>
                       </span>
                     </button>
                   );

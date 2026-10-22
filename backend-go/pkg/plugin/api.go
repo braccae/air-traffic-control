@@ -16,6 +16,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"air-traffic-control/backend/pkg/hostcache"
 )
 
 // PluginSummary represents the summary returned by GET /api/plugins
@@ -64,6 +66,46 @@ type NodeModuleItem struct {
 type NodeResolver interface {
 	ResolveNode(nodeID string) (HostFacts, bool, error)
 }
+
+// storeNodeResolver wraps a hostcache.Store to implement NodeResolver
+type storeNodeResolver struct {
+	Store *hostcache.Store
+}
+
+func (r *storeNodeResolver) ResolveNode(nodeID string) (HostFacts, bool, error) {
+	record, ok, err := r.Store.GetHostByID(nodeID)
+	if err != nil {
+		return HostFacts{}, false, err
+	}
+	if !ok {
+		return HostFacts{}, false, nil
+	}
+
+	// Extract HostFacts from NodeRecord.NodeJSON
+	var nodeJSON struct {
+		NodeID           string            `json:"id"`
+		OSFamily         string            `json:"osFamily"`
+		HostRoute        string            `json:"hostRoute"`
+		ActiveConnection string            `json:"activeConnection"`
+		ActiveElevation  string            `json:"activeElevation"`
+		ActivePackage    string            `json:"activePackage"`
+		Overrides        map[string]string `json:"overrides"`
+	}
+	if err := json.Unmarshal(record.NodeJSON, &nodeJSON); err != nil {
+		return HostFacts{}, false, err
+	}
+
+	return HostFacts{
+		NodeID:           nodeJSON.NodeID,
+		OSFamily:         nodeJSON.OSFamily,
+		HostRoute:        nodeJSON.HostRoute,
+		ActiveConnection: nodeJSON.ActiveConnection,
+		ActiveElevation:  nodeJSON.ActiveElevation,
+		ActivePackage:    nodeJSON.ActivePackage,
+		Overrides:        nodeJSON.Overrides,
+	}, true, nil
+}
+
 
 // RunnerResolver creates or retrieves a Runner for given HostFacts
 type RunnerResolver interface {
@@ -401,6 +443,9 @@ type APIOptions struct {
 	// SettingsStore backs the global settings pages endpoint. When nil, the
 	// store is auto-wired against hosts-cache.sqlite.
 	SettingsStore *SettingsStore
+	// Store optionally provides a pre-initialized hostcache store. When set,
+	// the NodeResolver is auto-wired from this store, bypassing DBPath.
+	Store *hostcache.Store
 	// DBPath optionally overrides the hosts-cache.sqlite location used to
 	// auto-wire the default SQLite-backed NodeResolver and settings store. When
 	// empty, ATC_DB_PATH is consulted, then the path is resolved relative to the
@@ -417,14 +462,19 @@ func NewAPI(opts APIOptions) *API {
 
 	nodeRes := opts.NodeResolver
 	if nodeRes == nil {
-		// Auto-wire the SQLite-backed resolver. Resolve the database path
-		// robustly rather than relying on a CWD-relative literal, because the
-		// daemon may be launched from the repo root or from backend-go/.
-		dbPath := ResolveDBPath(opts.DBPath)
-		if r, err := NewSQLiteNodeResolver(dbPath); err == nil {
-			nodeRes = r
+		// If store is provided, use it to create a NodeResolver
+		if opts.Store != nil {
+			nodeRes = &storeNodeResolver{Store: opts.Store}
 		} else {
-			log.Printf("plugin: node resolver unavailable (%v); endpoints that require a node resolver will fail", err)
+			// Auto-wire the SQLite-backed resolver. Resolve the database path
+			// robustly rather than relying on a CWD-relative literal, because the
+			// daemon may be launched from the repo root or from backend-go/.
+			dbPath := ResolveDBPath(opts.DBPath)
+			if r, err := NewSQLiteNodeResolver(dbPath); err == nil {
+				nodeRes = r
+			} else {
+				log.Printf("plugin: node resolver unavailable (%v); endpoints that require a node resolver will fail", err)
+			}
 		}
 	}
 
