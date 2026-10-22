@@ -1,59 +1,35 @@
 package newapi
 
 import (
-	"fmt"
-	"strings"
-
 	"air-traffic-control/backend/pkg/plugin"
 )
 
 // InventoryNodeType enumerates the supported inventory host/device classes.
-type InventoryNodeType string
+type InventoryNodeType = plugin.InventoryNodeType
 
 const (
-	NodeTypeLinux            InventoryNodeType = "linux"
-	NodeTypeWindows          InventoryNodeType = "windows"
-	NodeTypeRouterSwitch     InventoryNodeType = "router_switch"
-	NodeTypeProxmox          InventoryNodeType = "proxmox"
-	NodeTypeContainerHost    InventoryNodeType = "container_host"
-	NodeTypeStorageAppliance InventoryNodeType = "storage_appliance"
-	NodeTypeKubernetes       InventoryNodeType = "kubernetes"
+	NodeTypeLinux            = plugin.NodeTypeLinux
+	NodeTypeWindows          = plugin.NodeTypeWindows
+	NodeTypeRouterSwitch     = plugin.NodeTypeRouterSwitch
+	NodeTypeProxmox          = plugin.NodeTypeProxmox
+	NodeTypeContainerHost    = plugin.NodeTypeContainerHost
+	NodeTypeStorageAppliance = plugin.NodeTypeStorageAppliance
+	NodeTypeKubernetes       = plugin.NodeTypeKubernetes
 )
 
 // NodeTypeSpec describes a node classification in the datacenter inventory,
 // including its default OS family, transport/elevation defaults, and expected
 // capability kinds.
-type NodeTypeSpec struct {
-	Type              InventoryNodeType `json:"type"`
-	Label             string            `json:"label"`
-	Icon              string            `json:"icon"`
-	Description       string            `json:"description,omitempty"`
-	DefaultOSFamily   string            `json:"defaultOsFamily"`
-	DefaultConnection string            `json:"defaultConnection,omitempty"`
-	DefaultElevation  string            `json:"defaultElevation,omitempty"`
-	Capabilities      []plugin.Kind     `json:"capabilities,omitempty"`
-	Order             int               `json:"order"`
-}
+type NodeTypeSpec = plugin.NodeTypeSpec
 
 // NodeTypeProvider is an optional interface implemented by plugins that
 // register or extend inventory node type definitions.
-type NodeTypeProvider interface {
-	NodeTypes() []NodeTypeSpec
-}
+type NodeTypeProvider = plugin.NodeTypeProvider
 
 // ValidateNodeTypeSpec verifies that a NodeTypeSpec has the required identity
 // and OS family fields populated.
 func ValidateNodeTypeSpec(spec NodeTypeSpec) error {
-	if strings.TrimSpace(string(spec.Type)) == "" {
-		return fmt.Errorf("node type cannot be empty")
-	}
-	if strings.TrimSpace(spec.Label) == "" {
-		return fmt.Errorf("node type %q label cannot be empty", spec.Type)
-	}
-	if strings.TrimSpace(spec.DefaultOSFamily) == "" {
-		return fmt.Errorf("node type %q defaultOsFamily cannot be empty", spec.Type)
-	}
-	return nil
+	return plugin.ValidateNodeTypeSpec(spec)
 }
 
 // DefaultNodeTypes returns the built-in inventory node type specifications.

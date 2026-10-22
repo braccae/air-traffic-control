@@ -36,15 +36,19 @@ type SettingsField struct {
 	Max         *int                  `json:"max,omitempty"`
 }
 
-// SettingsPage describes a datacenter-wide ("global") settings page contributed
-// by an addon module. The ID is the page's route slug and must be unique across
-// all registered plugins (the conventional form is "<kind>/<name>").
+// SettingsPage describes a settings page contributed by an addon module.
+// The ID is the page's route slug and must be unique across all registered
+// plugins (the conventional form is "<kind>/<name>"). Scope ("datacenter" vs
+// "node") and Category are optional and default to "datacenter" and the page's
+// kind prefix when omitted.
 type SettingsPage struct {
 	ID          string          `json:"id"`
 	Title       string          `json:"title"`
 	Icon        string          `json:"icon"`
 	Description string          `json:"description"`
 	Order       int             `json:"order"`
+	Scope       SettingsScope   `json:"scope,omitempty"`
+	Category    string          `json:"category,omitempty"`
 	Fields      []SettingsField `json:"fields"`
 }
 
