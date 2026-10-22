@@ -83,7 +83,7 @@ describe('ansibleQueueCompiler', () => {
     expect(yaml).toContain('ansible_user: "core"');
     expect(yaml).toContain('ansible_port: 22');
     expect(yaml).toContain('become: true');
-    expect(yaml).toContain('become_method: run0');
+    expect(yaml).toContain('become_method: community.general.run0');
   });
 
   it('compiles share mutation with masked secrets in task metadata', () => {

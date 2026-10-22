@@ -126,7 +126,7 @@ func TestCompileOnTheFlyPlaybookExact(t *testing.T) {
     ansible_user: "core"
     ansible_port: 22
   become: true
-  become_method: run0
+  become_method: community.general.run0
   tasks:
     - name: "Restart nginx"
       ansible.builtin.systemd_service:

@@ -3,13 +3,22 @@ package ansibleapi
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"air-traffic-control/backend/pkg/hostcache"
 )
+
+// GalaxyCollectionItem describes an installed Ansible Galaxy collection.
+type GalaxyCollectionItem struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Path    string `json:"path,omitempty"`
+}
 
 // CollectionNameRegex validates <namespace>.<collection> format.
 var CollectionNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$`)
@@ -148,26 +157,163 @@ func BuildDynamicInventory(store *hostcache.Store) (map[string]any, error) {
 	return inventory, nil
 }
 
+func resolveGalaxyBin(repoRoot string) (string, error) {
+	venvDir := GetAnsibleVenvPath(repoRoot)
+	galaxyBin := filepath.Join(venvDir, "bin", "ansible-galaxy")
+	if _, err := exec.LookPath(galaxyBin); err == nil {
+		return galaxyBin, nil
+	}
+	if p, err := exec.LookPath("ansible-galaxy"); err == nil {
+		return p, nil
+	}
+	return "", fmt.Errorf("ansible-galaxy executable not found")
+}
+
+// ListGalaxyCollections returns installed Ansible Galaxy collections with version and path metadata.
+func ListGalaxyCollections(repoRoot string) ([]GalaxyCollectionItem, error) {
+	galaxyBin, err := resolveGalaxyBin(repoRoot)
+	if err != nil {
+		return []GalaxyCollectionItem{}, err
+	}
+
+	out, _ := exec.Command(galaxyBin, "collection", "list", "--format", "json").Output()
+	byName := make(map[string]GalaxyCollectionItem)
+
+	var rawMap map[string]map[string]struct {
+		Version string `json:"version"`
+	}
+	if len(out) > 0 && json.Unmarshal(out, &rawMap) == nil {
+		paths := make([]string, 0, len(rawMap))
+		for p := range rawMap {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+		for _, basePath := range paths {
+			cols := rawMap[basePath]
+			for name, meta := range cols {
+				if strings.HasPrefix(name, "ansible._") || name == "ansible.builtin" {
+					continue
+				}
+				ver := meta.Version
+				if ver == "" || ver == "*" {
+					ver = "installed"
+				}
+				byName[name] = GalaxyCollectionItem{
+					Name:    name,
+					Version: ver,
+					Path:    basePath,
+				}
+			}
+		}
+	} else {
+		// Fallback to plain text parsing
+		txtOut, err := exec.Command(galaxyBin, "collection", "list").CombinedOutput()
+		if err != nil && len(txtOut) == 0 {
+			return []GalaxyCollectionItem{}, err
+		}
+		currentPath := ""
+		for _, line := range strings.Split(string(txtOut), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "# ") {
+				currentPath = strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
+				continue
+			}
+			if strings.Contains(trimmed, ".") && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "Collection") && !strings.HasPrefix(trimmed, "---") {
+				parts := strings.Fields(trimmed)
+				if len(parts) >= 1 && CollectionNameRegex.MatchString(parts[0]) {
+					if strings.HasPrefix(parts[0], "ansible._") || parts[0] == "ansible.builtin" {
+						continue
+					}
+					ver := "installed"
+					if len(parts) >= 2 {
+						ver = parts[1]
+					}
+					byName[parts[0]] = GalaxyCollectionItem{
+						Name:    parts[0],
+						Version: ver,
+						Path:    currentPath,
+					}
+				}
+			}
+		}
+	}
+
+	items := make([]GalaxyCollectionItem, 0, len(byName))
+	for _, item := range byName {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Name < items[j].Name
+	})
+	return items, nil
+}
+
 // InstallGalaxyCollection invokes ansible-galaxy collection install.
 func InstallGalaxyCollection(repoRoot string, collection string) (string, error) {
 	if !CollectionNameRegex.MatchString(collection) {
 		return "", fmt.Errorf("invalid collection name: %s. Format must be <namespace>.<collection>", collection)
 	}
 
-	venvDir := GetAnsibleVenvPath(repoRoot)
-	galaxyBin := filepath.Join(venvDir, "bin", "ansible-galaxy")
-	if _, err := exec.LookPath(galaxyBin); err != nil {
-		p, err := exec.LookPath("ansible-galaxy")
-		if err != nil {
-			return "", fmt.Errorf("ansible-galaxy executable not found")
-		}
-		galaxyBin = p
+	galaxyBin, err := resolveGalaxyBin(repoRoot)
+	if err != nil {
+		return "", err
 	}
 
-	cmd := exec.Command(galaxyBin, "collection", "install", collection)
+	cmd := exec.Command(galaxyBin, "collection", "install", collection, "--force")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("ansible-galaxy collection install failed (%w): %s", err, string(out))
 	}
 	return string(out), nil
+}
+
+// RemoveGalaxyCollection removes an installed Ansible Galaxy collection directory from disk.
+func RemoveGalaxyCollection(repoRoot string, collection string) (string, error) {
+	collection = strings.TrimSpace(collection)
+	if !CollectionNameRegex.MatchString(collection) {
+		return "", fmt.Errorf("invalid collection name: %s. Format must be <namespace>.<collection>", collection)
+	}
+	if collection == "ansible.builtin" {
+		return "", fmt.Errorf("cannot remove core collection ansible.builtin")
+	}
+
+	parts := strings.SplitN(collection, ".", 2)
+	ns, colName := parts[0], parts[1]
+
+	baseDirs := make(map[string]bool)
+	if items, err := ListGalaxyCollections(repoRoot); err == nil {
+		for _, item := range items {
+			if item.Path != "" {
+				baseDirs[item.Path] = true
+			}
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		baseDirs[filepath.Join(home, ".ansible", "collections", "ansible_collections")] = true
+	}
+	venvDir := GetAnsibleVenvPath(repoRoot)
+	baseDirs[filepath.Join(venvDir, "collections", "ansible_collections")] = true
+
+	var removedFrom []string
+	for base := range baseDirs {
+		absBase, err := filepath.Abs(base)
+		if err != nil {
+			continue
+		}
+		targetDir := filepath.Join(absBase, ns, colName)
+		if !strings.HasPrefix(targetDir, absBase+string(filepath.Separator)) {
+			continue
+		}
+		if fi, err := os.Stat(targetDir); err == nil && fi.IsDir() {
+			if err := os.RemoveAll(targetDir); err != nil {
+				return "", fmt.Errorf("failed to remove %s: %w", targetDir, err)
+			}
+			removedFrom = append(removedFrom, targetDir)
+		}
+	}
+
+	if len(removedFrom) == 0 {
+		return "", fmt.Errorf("collection %s is not installed", collection)
+	}
+	return fmt.Sprintf("Removed %s from %s", collection, strings.Join(removedFrom, ", ")), nil
 }

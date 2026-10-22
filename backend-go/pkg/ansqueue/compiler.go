@@ -440,6 +440,13 @@ type hostVars struct {
 	AnsibleSSHExtraArgs  string `json:"ansible_ssh_extra_args,omitempty"`
 }
 
+func qualifyBecomeMethod(m string) string {
+	if strings.EqualFold(strings.TrimSpace(m), "run0") {
+		return "community.general.run0"
+	}
+	return m
+}
+
 // GenerateTaskInventory ports generateTaskInventory: an ephemeral, per-task
 // inventory JSON document derived from the task's connection block.
 func GenerateTaskInventory(task Task) (string, error) {
@@ -471,7 +478,7 @@ func GenerateTaskInventory(task Task) (string, error) {
 	}
 
 	if method := firstNonEmpty(conn.BecomeMethod, task.BecomeMethod); method != "" {
-		hv.AnsibleBecomeMethod = method
+		hv.AnsibleBecomeMethod = qualifyBecomeMethod(method)
 	}
 	if proxyCmd := ResolveProxyCommand(task); proxyCmd != "" {
 		hv.AnsibleSSHCommonArgs = fmt.Sprintf(`-o ProxyCommand="%s"`, proxyCmd)
@@ -524,7 +531,7 @@ func CompileOnTheFlyPlaybook(task Task) string {
 	if port == 0 {
 		port = 22
 	}
-	becomeMethod := firstNonEmpty(conn.BecomeMethod, task.BecomeMethod, "run0")
+	becomeMethod := qualifyBecomeMethod(firstNonEmpty(conn.BecomeMethod, task.BecomeMethod, "run0"))
 
 	lines := []string{
 		"---",

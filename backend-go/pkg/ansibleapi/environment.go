@@ -18,6 +18,13 @@ var RequiredVenvPackages = []string{
 	"netaddr",
 }
 
+// RequiredGalaxyCollections lists Ansible Galaxy collections that must be present
+// (e.g. community.general provides the run0 and doas become plugins).
+var RequiredGalaxyCollections = []string{
+	"community.general",
+	"ansible.posix",
+}
+
 // EnvironmentInfo describes the Ansible runtime environment.
 type EnvironmentInfo struct {
 	Success          bool     `json:"success"`
@@ -68,11 +75,13 @@ func FindUv(repoRoot string) string {
 	return ""
 }
 
-// EnsureAnsibleVenv checks if the virtualenv exists; if missing and uv is available, creates it.
+// EnsureAnsibleVenv checks if the virtualenv exists; if missing and uv is available, creates it,
+// and ensures required Galaxy collections (such as community.general for run0) are installed.
 func EnsureAnsibleVenv(repoRoot string) (string, error) {
 	venvDir := GetAnsibleVenvPath(repoRoot)
 	ansibleBin := filepath.Join(venvDir, "bin", "ansible")
 	if fi, err := os.Stat(ansibleBin); err == nil && !fi.IsDir() {
+		ensureRequiredCollections(repoRoot)
 		return venvDir, nil
 	}
 
@@ -95,7 +104,21 @@ func EnsureAnsibleVenv(repoRoot string) (string, error) {
 		return "", fmt.Errorf("uv pip install failed (%w): %s", err, string(out))
 	}
 
+	ensureRequiredCollections(repoRoot)
 	return venvDir, nil
+}
+
+func ensureRequiredCollections(repoRoot string) {
+	installed, _ := ListGalaxyCollections(repoRoot)
+	have := make(map[string]bool, len(installed))
+	for _, c := range installed {
+		have[c.Name] = true
+	}
+	for _, req := range RequiredGalaxyCollections {
+		if !have[req] {
+			_, _ = InstallGalaxyCollection(repoRoot, req)
+		}
+	}
 }
 
 // InspectEnvironment probes the environment for JSON reporting.

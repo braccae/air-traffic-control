@@ -348,6 +348,7 @@ export type DatacenterSettingPageId =
   | 'playbook-editor'
   | 'datacenter-vars'
   | 'rclone-remotes'
+  | 'ansible-collections'
   | 'ansible-stdout-callback'
   | 'ansible-become-method'
   | 'ansible-forks'
@@ -397,8 +398,16 @@ const DATACENTER_SETTING_CATEGORIES: DatacenterSettingCategory[] = [
     id: 'automation',
     title: 'Ansible Engine',
     icon: 'tune',
-    description: 'ansible.cfg execution parameters',
+    description: 'ansible.cfg execution parameters & Galaxy collections',
     pages: [
+      {
+        id: 'ansible-collections',
+        category: 'automation',
+        title: 'Galaxy Collections',
+        icon: 'extension',
+        description: 'Install and remove Ansible Galaxy collections in the managed environment',
+        slug: 'ansible-collections',
+      },
       {
         id: 'ansible-stdout-callback',
         category: 'automation',

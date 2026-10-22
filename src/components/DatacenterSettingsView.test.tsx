@@ -61,3 +61,14 @@ test('rclone-remotes datacenter settings page renders guided setup and vault sto
   assert.ok(html.includes('data-testid="rclone-guided-setup-card"'));
   assert.ok(html.includes('vault_variables'));
 });
+
+test('ansible-collections datacenter settings page renders collection manager with install and remove controls', () => {
+  const html = renderToString(
+    React.createElement(DatacenterSettingsView, { page: 'ansible-collections' })
+  );
+  assert.ok(html.includes('data-setting-id="ansible-collections"'));
+  assert.ok(html.includes('#/datacenter/settings/automation/ansible-collections'));
+  assert.ok(html.includes('data-testid="datacenter-ansible-collections-settings"'));
+  assert.ok(html.includes('community.general.run0'));
+  assert.ok(html.includes('Install Collection'));
+});

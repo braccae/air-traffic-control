@@ -55,9 +55,9 @@ function parseStdoutCallback(val: string): 'json' | 'yaml' | 'default' {
 
 function parseBecomeMethod(val: string): 'run0' | 'sudo' | 'doas' {
   const norm = val.trim().toLowerCase();
-  if (norm === 'run0' || norm === 'sudo' || norm === 'doas') {
-    return norm;
-  }
+  if (norm === 'run0' || norm === 'community.general.run0') return 'run0';
+  if (norm === 'sudo' || norm === 'ansible.builtin.sudo') return 'sudo';
+  if (norm === 'doas' || norm === 'community.general.doas') return 'doas';
   return 'run0';
 }
 

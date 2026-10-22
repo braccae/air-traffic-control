@@ -91,6 +91,337 @@ const SettingsPageFrame: React.FC<{
   );
 };
 
+interface GalaxyCollectionItem {
+  name: string;
+  version: string;
+  path?: string;
+}
+
+const SUGGESTED_COLLECTIONS: Array<{ name: string; description: string }> = [
+  { name: 'community.general', description: 'Core community modules & become plugins (community.general.run0, doas, etc.)' },
+  { name: 'ansible.posix', description: 'POSIX system modules (firewalld, mount, sysctl, synchronize, acl)' },
+  { name: 'community.docker', description: 'Docker Engine & Docker Compose lifecycle modules' },
+  { name: 'containers.podman', description: 'Rootless and rootful Podman container & pod management' },
+  { name: 'community.postgresql', description: 'PostgreSQL databases, roles, privileges, and extensions' },
+  { name: 'community.mysql', description: 'MariaDB / MySQL databases, users, and replication' },
+  { name: 'community.mongodb', description: 'MongoDB users, roles, replicasets, and sharding' },
+  { name: 'community.proxmox', description: 'Proxmox VE KVM/QEMU and LXC container automation' },
+];
+
+const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }> = ({ page }) => {
+  const [collections, setCollections] = useState<GalaxyCollectionItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [newCollection, setNewCollection] = useState('');
+  const [installing, setInstalling] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  const fetchCollections = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/ansible/collections');
+      const data = await res.json();
+      if (data?.success && Array.isArray(data.collections)) {
+        setCollections(data.collections);
+      }
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: `Failed to load Galaxy collections: ${err?.message || err}` });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchCollections();
+  }, []);
+
+  const handleInstall = async (collectionName: string) => {
+    const trimmed = collectionName.trim();
+    if (!trimmed) return;
+    setInstalling(trimmed);
+    setFeedback(null);
+    try {
+      const res = await fetch('/api/ansible/collections/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ collection: trimmed }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.success) {
+        if (Array.isArray(data.collections)) {
+          setCollections(data.collections);
+        } else {
+          await fetchCollections();
+        }
+        if (trimmed === newCollection.trim()) {
+          setNewCollection('');
+        }
+        setFeedback({ type: 'success', message: data.message || `Installed ${trimmed} into managed Ansible environment.` });
+      } else {
+        setFeedback({ type: 'error', message: data?.error || `Failed to install ${trimmed}` });
+      }
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err?.message || `Network error installing ${trimmed}` });
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  const handleRemove = async (collectionName: string) => {
+    setRemoving(collectionName);
+    setFeedback(null);
+    try {
+      const res = await fetch('/api/ansible/collections/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ collection: collectionName }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.success) {
+        if (Array.isArray(data.collections)) {
+          setCollections(data.collections);
+        } else {
+          await fetchCollections();
+        }
+        setFeedback({ type: 'success', message: data.message || `Removed ${collectionName} from managed Ansible environment.` });
+      } else {
+        setFeedback({ type: 'error', message: data?.error || `Failed to remove ${collectionName}` });
+      }
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err?.message || `Network error removing ${collectionName}` });
+    } finally {
+      setRemoving(null);
+    }
+  };
+
+  const installedNames = new Set(collections.map(c => c.name));
+
+  return (
+    <SettingsPageFrame
+      page={page}
+      actions={
+        <button
+          type="button"
+          onClick={fetchCollections}
+          disabled={loading}
+          className="px-2.5 py-1 rounded text-xs font-mono text-[#dfe1fa] bg-[#171a2d] hover:bg-[#21263d] border border-[#26293c] transition-colors flex items-center gap-1.5 cursor-pointer"
+        >
+          <span className="material-symbols-outlined text-[14px]">refresh</span>
+          <span>Refresh</span>
+        </button>
+      }
+    >
+      <div
+        id="datacenter-ansible-collections"
+        data-testid="datacenter-ansible-collections-settings"
+        className="rounded-lg bg-[#121528] border border-[#26293c] p-4 shadow-md flex flex-col gap-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[18px] text-[#8cd6cb]">extension</span>
+            <h2 className="text-xs font-mono font-bold text-[#dfe1fa] uppercase tracking-wider">
+              Managed Ansible Galaxy Collections
+            </h2>
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#162620] text-[#8cd6cb] border border-[#8cd6cb]/30">
+              {collections.length} Installed
+            </span>
+          </div>
+          <span className="text-[10px] font-mono text-[#8d909b]">
+            Managed via <code className="text-[#79c0ff]">data/ansible-venv/bin/ansible-galaxy</code>
+          </span>
+        </div>
+
+        <p className="text-[11px] text-[#8d909b] font-mono">
+          Add or remove Ansible Galaxy collections in the managed controller environment. Note that{' '}
+          <code className="text-[#8cd6cb]">community.general</code> is required for{' '}
+          <code className="text-[#d9b9ff]">community.general.run0</code> privilege elevation.
+        </p>
+
+        {feedback && (
+          <div
+            className={`p-2.5 rounded text-xs font-mono border flex items-center justify-between ${
+              feedback.type === 'success'
+                ? 'bg-[#162620] text-[#8cd6cb] border-[#8cd6cb]/30'
+                : 'bg-[#311c1c] text-[#ffb4ab] border-[#ffb4ab]/30'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-[16px]">
+                {feedback.type === 'success' ? 'check_circle' : 'error'}
+              </span>
+              <span>{feedback.message}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setFeedback(null)}
+              className="text-[#8d909b] hover:text-[#dfe1fa] cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[14px]">close</span>
+            </button>
+          </div>
+        )}
+
+        {/* Install form */}
+        <form
+          onSubmit={e => {
+            e.preventDefault();
+            handleInstall(newCollection);
+          }}
+          className="p-3 rounded-lg bg-[#171a2d] border border-[#26293c] flex flex-wrap items-end gap-2.5"
+        >
+          <div className="flex-1 min-w-[240px]">
+            <label className="block text-[10px] font-mono text-[#8d909b] uppercase mb-1">
+              Install Galaxy Collection (<code className="text-[#79c0ff]">&lt;namespace&gt;.&lt;collection&gt;</code>)
+            </label>
+            <input
+              type="text"
+              value={newCollection}
+              onChange={e => setNewCollection(e.target.value)}
+              placeholder="e.g. community.general or containers.podman"
+              data-testid="galaxy-collection-input"
+              className="w-full bg-[#121528] border border-[#26293c] focus:border-[#58a6ff] rounded px-2.5 py-1.5 text-xs font-mono text-[#dfe1fa] outline-none"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={Boolean(installing) || !newCollection.trim()}
+            data-testid="galaxy-collection-install-btn"
+            className="px-3 py-1.5 rounded text-xs font-mono font-bold text-white bg-[#1f6feb] hover:bg-[#388bfd] disabled:opacity-50 transition-colors flex items-center gap-1.5 cursor-pointer"
+          >
+            <span className="material-symbols-outlined text-[15px]">
+              {installing === newCollection.trim() ? 'sync' : 'download'}
+            </span>
+            <span>{installing === newCollection.trim() ? 'Installing...' : 'Install Collection'}</span>
+          </button>
+        </form>
+
+        {/* Installed Collections Table */}
+        <div className="flex flex-col gap-2">
+          <h3 className="text-[11px] font-mono font-bold text-[#8d909b] uppercase tracking-wider">
+            Installed Collections ({collections.length})
+          </h3>
+          {loading ? (
+            <div className="p-4 text-center text-xs font-mono text-[#8d909b] bg-[#171a2d] rounded border border-[#26293c]">
+              Querying ansible-galaxy collection list...
+            </div>
+          ) : collections.length === 0 ? (
+            <div className="p-4 text-center text-xs font-mono text-[#8d909b] bg-[#171a2d] rounded border border-[#26293c]">
+              No external Ansible Galaxy collections detected.
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded border border-[#26293c]">
+              <table className="w-full text-left border-collapse font-mono text-xs">
+                <thead>
+                  <tr className="bg-[#171a2d] text-[#8d909b] text-[10px] uppercase border-b border-[#26293c]">
+                    <th className="py-2 px-3">Collection</th>
+                    <th className="py-2 px-3">Version</th>
+                    <th className="py-2 px-3">Collection Path</th>
+                    <th className="py-2 px-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#26293c]/60">
+                  {collections.map(col => (
+                    <tr key={col.name} className="hover:bg-[#171a2d]/60 transition-colors">
+                      <td className="py-2 px-3 font-bold text-[#dfe1fa]">
+                        <div className="flex items-center gap-2">
+                          <span>{col.name}</span>
+                          {col.name === 'community.general' && (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#291e3b] text-[#d9b9ff] border border-[#d9b9ff]/30">
+                              run0 provider
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-2 px-3 text-[#8cd6cb]">{col.version}</td>
+                      <td className="py-2 px-3 text-[#8d909b] text-[11px] truncate max-w-xs" title={col.path}>
+                        {col.path || '~/.ansible/collections/ansible_collections'}
+                      </td>
+                      <td className="py-2 px-3 text-right">
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleInstall(col.name)}
+                            disabled={Boolean(installing) || Boolean(removing)}
+                            className="px-2 py-0.5 rounded text-[10px] bg-[#1b2a38] text-[#79c0ff] hover:bg-[#24384b] border border-[#79c0ff]/30 disabled:opacity-50 cursor-pointer"
+                            title={`Reinstall or upgrade ${col.name}`}
+                          >
+                            {installing === col.name ? 'Updating...' : 'Update'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRemove(col.name)}
+                            disabled={Boolean(removing) || Boolean(installing)}
+                            data-testid={`remove-collection-${col.name}`}
+                            className="px-2 py-0.5 rounded text-[10px] bg-[#311c1c] text-[#ffb4ab] hover:bg-[#442424] border border-[#ffb4ab]/30 disabled:opacity-50 cursor-pointer"
+                            title={`Remove ${col.name}`}
+                          >
+                            {removing === col.name ? 'Removing...' : 'Remove'}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Recommended Homelab Collections */}
+        <div className="flex flex-col gap-2 pt-2 border-t border-[#26293c]/60">
+          <h3 className="text-[11px] font-mono font-bold text-[#8d909b] uppercase tracking-wider">
+            Recommended Collections Catalog
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {SUGGESTED_COLLECTIONS.map(item => {
+              const isInstalled = installedNames.has(item.name);
+              return (
+                <div
+                  key={item.name}
+                  className="p-2.5 rounded bg-[#171a2d] border border-[#26293c] flex items-center justify-between gap-2"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-mono font-bold text-[#79c0ff]">{item.name}</span>
+                      {isInstalled && (
+                        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#162620] text-[#8cd6cb] border border-[#8cd6cb]/30">
+                          INSTALLED
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[10px] font-mono text-[#8d909b] truncate" title={item.description}>
+                      {item.description}
+                    </p>
+                  </div>
+                  {isInstalled ? (
+                    <button
+                      type="button"
+                      onClick={() => handleRemove(item.name)}
+                      disabled={Boolean(removing) || Boolean(installing)}
+                      className="px-2.5 py-1 rounded text-[10px] font-mono text-[#ffb4ab] bg-[#311c1c] hover:bg-[#442424] border border-[#ffb4ab]/30 shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      {removing === item.name ? 'Removing...' : 'Remove'}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleInstall(item.name)}
+                      disabled={Boolean(installing) || Boolean(removing)}
+                      className="px-2.5 py-1 rounded text-[10px] font-mono font-bold text-white bg-[#1f6feb] hover:bg-[#388bfd] shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      {installing === item.name ? 'Installing...' : '+ Install'}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </SettingsPageFrame>
+  );
+};
+
 const AnsibleSettingsPage: React.FC<{ page: DatacenterSettingPageId }> = ({ page }) => {
   const [config, setConfig] = useState<AnsibleConfigSettings>(DEFAULT_ANSIBLE_CONFIG);
   const [loading, setLoading] = useState(true);
@@ -780,6 +1111,9 @@ export const DatacenterSettingsView: React.FC<DatacenterSettingsViewProps> = ({ 
   }
   if (meta.category === 'terminal') {
     return <QuickCommandsSettingsPage page={meta.id} />;
+  }
+  if (meta.id === 'ansible-collections') {
+    return <AnsibleCollectionsSettingsPage page={meta.id} />;
   }
   return <AnsibleSettingsPage page={meta.id} />;
 };
