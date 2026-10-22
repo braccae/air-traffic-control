@@ -344,3 +344,228 @@ func TestInterfaces_ReaderAndActor(t *testing.T) {
 		t.Fatalf("expected masked secret in task spec, got %v", spec.SecretsMasked)
 	}
 }
+
+type fakeFullExtPlugin struct {
+	fakePlugin
+	nodeTypes       []plugin.NodeTypeSpec
+	catSettingsPage plugin.CategorizedSettingsPage
+	menuEntries     []plugin.ContextMenuEntry
+	taskTypes       []plugin.TaskTypeSpec
+}
+
+func (p *fakeFullExtPlugin) NodeTypes() []plugin.NodeTypeSpec {
+	return p.nodeTypes
+}
+
+func (p *fakeFullExtPlugin) SettingsPage() plugin.SettingsPage {
+	return p.catSettingsPage.SettingsPage
+}
+
+func (p *fakeFullExtPlugin) CategorizedSettingsPage() plugin.CategorizedSettingsPage {
+	return p.catSettingsPage
+}
+
+func (p *fakeFullExtPlugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []plugin.ContextMenuEntry {
+	return p.menuEntries
+}
+
+func (p *fakeFullExtPlugin) TaskTypes() []plugin.TaskTypeSpec {
+	return p.taskTypes
+}
+
+func TestRegistry_ExtendedCapabilities(t *testing.T) {
+	reg := plugin.NewRegistry()
+
+	extPlugin := &fakeFullExtPlugin{
+		fakePlugin: fakePlugin{
+			meta: plugin.Meta{
+				ID:    "storage/zfs",
+				Kind:  plugin.KindStorage,
+				Name:  "zfs",
+				Label: "ZFS",
+				Order: 10,
+			},
+			compatibleFn: func(h plugin.HostFacts) bool {
+				return h.OSFamily == "linux"
+			},
+		},
+		nodeTypes: []plugin.NodeTypeSpec{
+			{
+				Type:              plugin.NodeTypeStorageAppliance,
+				Label:             "Storage Appliance",
+				Icon:              "hard_drive",
+				DefaultOSFamily:   "linux",
+				DefaultConnection: "connection/ssh",
+				Order:             20,
+			},
+			{
+				Type:              plugin.NodeTypeLinux,
+				Label:             "Linux Host",
+				Icon:              "dns",
+				DefaultOSFamily:   "linux",
+				DefaultConnection: "connection/ssh",
+				Order:             10,
+			},
+		},
+		catSettingsPage: plugin.CategorizedSettingsPage{
+			SettingsPage: plugin.SettingsPage{
+				ID:          "storage/zfs",
+				Title:       "ZFS Settings",
+				Icon:        "database",
+				Description: "Datacenter ZFS defaults",
+				Order:       5,
+				Fields: []plugin.SettingsField{
+					{Name: "scrub_interval", Label: "Scrub Interval", Type: plugin.SettingsFieldInt, Default: 30},
+				},
+			},
+			Scope:    plugin.SettingsScopeDatacenter,
+			Category: "storage",
+		},
+		menuEntries: []plugin.ContextMenuEntry{
+			{
+				ID:     "zfs-scrub",
+				Target: plugin.TargetStorage,
+				Label:  "Scrub Pool",
+				Action: "scrub_pool",
+				Order:  20,
+			},
+			{
+				ID:     "zfs-status",
+				Target: plugin.TargetNode,
+				Label:  "ZFS Pool Health",
+				Action: "pool_health",
+				Order:  10,
+			},
+		},
+		taskTypes: []plugin.TaskTypeSpec{
+			{
+				Type:           plugin.TaskTypeStorageOp,
+				Label:          "ZFS Storage Operation",
+				SupportsDryRun: true,
+				SupportsCancel: true,
+			},
+		},
+	}
+
+	nodeScopedPlugin := &fakeFullExtPlugin{
+		fakePlugin: fakePlugin{
+			meta: plugin.Meta{
+				ID:    "network/interfaces",
+				Kind:  plugin.KindNetwork,
+				Name:  "interfaces",
+				Label: "Network Interfaces",
+				Order: 20,
+			},
+		},
+		catSettingsPage: plugin.CategorizedSettingsPage{
+			SettingsPage: plugin.SettingsPage{
+				ID:          "network/interfaces",
+				Title:       "Node Interface Overrides",
+				Icon:        "lan",
+				Description: "Per-node network interface settings",
+				Order:       15,
+			},
+			Scope:    plugin.SettingsScopeNode,
+			Category: "network",
+		},
+	}
+
+	if err := reg.Register(extPlugin); err != nil {
+		t.Fatalf("failed to register extPlugin: %v", err)
+	}
+	if err := reg.Register(nodeScopedPlugin); err != nil {
+		t.Fatalf("failed to register nodeScopedPlugin: %v", err)
+	}
+
+	// 1. Verify NodeType registration and sorting
+	nodeTypes := reg.ListNodeTypes()
+	if len(nodeTypes) != 2 {
+		t.Fatalf("expected 2 node types, got %d", len(nodeTypes))
+	}
+	if nodeTypes[0].Type != plugin.NodeTypeLinux || nodeTypes[1].Type != plugin.NodeTypeStorageAppliance {
+		t.Errorf("expected node types sorted by Order (linux then storage_appliance), got %+v", nodeTypes)
+	}
+	if gotNT, ok := reg.GetNodeType(plugin.NodeTypeStorageAppliance); !ok || gotNT.Label != "Storage Appliance" {
+		t.Errorf("expected to retrieve storage_appliance node type, got %+v (ok=%v)", gotNT, ok)
+	}
+
+	// Standalone RegisterNodeType and duplicate rejection
+	if err := reg.RegisterNodeType(plugin.NodeTypeSpec{
+		Type:            plugin.NodeTypeProxmox,
+		Label:           "Proxmox VE",
+		DefaultOSFamily: "linux",
+		Order:           15,
+	}); err != nil {
+		t.Fatalf("unexpected error registering standalone node type: %v", err)
+	}
+	if err := reg.RegisterNodeType(plugin.NodeTypeSpec{
+		Type:            plugin.NodeTypeProxmox,
+		Label:           "Duplicate Proxmox",
+		DefaultOSFamily: "linux",
+	}); err == nil {
+		t.Fatal("expected error registering duplicate node type")
+	}
+
+	// 2. Verify Settings Page categorization (datacenter vs node scope and category filtering)
+	dcPages := reg.ListSettingsPagesByScope(plugin.SettingsScopeDatacenter)
+	if len(dcPages) != 1 || dcPages[0].ID != "storage/zfs" {
+		t.Fatalf("expected 1 datacenter settings page (storage/zfs), got %+v", dcPages)
+	}
+	nodePages := reg.ListSettingsPagesByScope(plugin.SettingsScopeNode)
+	if len(nodePages) != 1 || nodePages[0].ID != "network/interfaces" {
+		t.Fatalf("expected 1 node settings page (network/interfaces), got %+v", nodePages)
+	}
+
+	byScopeAlias := reg.ListSettingsPagesByCategory("datacenter")
+	if len(byScopeAlias) != 1 || byScopeAlias[0].ID != "storage/zfs" {
+		t.Fatalf("expected ListSettingsPagesByCategory('datacenter') to return storage/zfs, got %+v", byScopeAlias)
+	}
+	byCat := reg.ListSettingsPagesByCategory("network")
+	if len(byCat) != 1 || byCat[0].ID != "network/interfaces" {
+		t.Fatalf("expected ListSettingsPagesByCategory('network') to return network/interfaces, got %+v", byCat)
+	}
+
+	if catPage, ok := reg.GetCategorizedSettingsPage("storage/zfs"); !ok || catPage.Category != "storage" {
+		t.Errorf("expected GetCategorizedSettingsPage('storage/zfs') category 'storage', got %+v (ok=%v)", catPage, ok)
+	}
+
+	// 3. Verify ContextMenuProvider registration and filtering
+	ctx := context.Background()
+	linuxFacts := plugin.HostFacts{NodeID: "node-1", OSFamily: "linux"}
+	winFacts := plugin.HostFacts{NodeID: "node-2", OSFamily: "windows"}
+
+	storageMenus := reg.ListContextMenuEntries(ctx, plugin.TargetStorage, linuxFacts)
+	if len(storageMenus) != 1 || storageMenus[0].ID != "zfs-scrub" || storageMenus[0].PluginID != "storage/zfs" {
+		t.Fatalf("expected 1 storage menu entry from storage/zfs, got %+v", storageMenus)
+	}
+
+	allLinuxMenus := reg.ListContextMenuEntries(ctx, "", linuxFacts)
+	if len(allLinuxMenus) != 2 || allLinuxMenus[0].ID != "zfs-status" {
+		t.Fatalf("expected 2 sorted menu entries for linux host, got %+v", allLinuxMenus)
+	}
+
+	// Incompatible host facts filter out plugin context menu entries
+	winMenus := reg.ListContextMenuEntries(ctx, "", winFacts)
+	if len(winMenus) != 0 {
+		t.Fatalf("expected 0 menu entries for incompatible windows host, got %+v", winMenus)
+	}
+
+	// 4. Verify TaskType registration and lookup
+	taskTypes := reg.ListTaskTypes()
+	if len(taskTypes) != 1 || taskTypes[0].Type != plugin.TaskTypeStorageOp || taskTypes[0].PluginID != "storage/zfs" {
+		t.Fatalf("expected 1 registered task type (storage_op), got %+v", taskTypes)
+	}
+	if gotTT, ok := reg.GetTaskType(plugin.TaskTypeStorageOp); !ok || !gotTT.SupportsDryRun {
+		t.Errorf("expected GetTaskType(storage_op) with SupportsDryRun=true, got %+v (ok=%v)", gotTT, ok)
+	}
+
+	if err := reg.RegisterTaskType(plugin.TaskTypeSpec{
+		Type:  plugin.TaskTypeAnsiblePlaybook,
+		Label: "Ansible Playbook",
+	}); err != nil {
+		t.Fatalf("unexpected error registering standalone task type: %v", err)
+	}
+	if len(reg.ListTaskTypes()) != 2 {
+		t.Fatalf("expected 2 task types after standalone registration, got %d", len(reg.ListTaskTypes()))
+	}
+}

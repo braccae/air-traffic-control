@@ -1,7 +1,6 @@
 package newapi
 
 import (
-	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -10,53 +9,32 @@ import (
 )
 
 // TaskType identifies the execution class of an orchestrated task.
-type TaskType string
+type TaskType = plugin.TaskType
 
 const (
-	TaskTypeAnsiblePlaybook TaskType = "ansible_playbook"
-	TaskTypePluginAction    TaskType = "plugin_action"
-	TaskTypeHostProbe       TaskType = "host_probe"
-	TaskTypeBackupSnapshot  TaskType = "backup_snapshot"
-	TaskTypeServiceControl  TaskType = "service_control"
-	TaskTypeStorageOp       TaskType = "storage_op"
-	TaskTypeCustom          TaskType = "custom"
+	TaskTypeAnsiblePlaybook = plugin.TaskTypeAnsiblePlaybook
+	TaskTypePluginAction    = plugin.TaskTypePluginAction
+	TaskTypeHostProbe       = plugin.TaskTypeHostProbe
+	TaskTypeBackupSnapshot  = plugin.TaskTypeBackupSnapshot
+	TaskTypeServiceControl  = plugin.TaskTypeServiceControl
+	TaskTypeStorageOp       = plugin.TaskTypeStorageOp
+	TaskTypeCustom          = plugin.TaskTypeCustom
 )
 
 // TaskTypeSpec describes a task type registered by the core system or a plugin.
-type TaskTypeSpec struct {
-	Type           TaskType              `json:"type"`
-	Label          string                `json:"label"`
-	Description    string                `json:"description,omitempty"`
-	Icon           string                `json:"icon,omitempty"`
-	PluginID       string                `json:"pluginId,omitempty"`
-	Parameters     []plugin.OptionSchema `json:"parameters,omitempty"`
-	SupportsDryRun bool                  `json:"supportsDryRun,omitempty"`
-	SupportsCancel bool                  `json:"supportsCancel,omitempty"`
-}
+type TaskTypeSpec = plugin.TaskTypeSpec
 
 // TaskRequest represents a concrete request to compile or execute a typed task
 // against a target node.
-type TaskRequest struct {
-	ID       string         `json:"id"`
-	Type     TaskType       `json:"type"`
-	NodeID   string         `json:"nodeId"`
-	PluginID string         `json:"pluginId,omitempty"`
-	Action   string         `json:"action,omitempty"`
-	Params   map[string]any `json:"params,omitempty"`
-	DryRun   bool           `json:"dryRun,omitempty"`
-}
+type TaskRequest = plugin.TaskRequest
 
 // TaskTypeProvider is an optional interface implemented by plugins that
 // register custom or specialized task types.
-type TaskTypeProvider interface {
-	TaskTypes() []TaskTypeSpec
-}
+type TaskTypeProvider = plugin.TaskTypeProvider
 
 // TaskCompileProvider is an optional interface implemented by plugins that
 // compile typed TaskRequests into declarative Ansible TaskSpecs.
-type TaskCompileProvider interface {
-	CompileTask(ctx context.Context, h plugin.HostFacts, req TaskRequest) (plugin.TaskSpec, error)
-}
+type TaskCompileProvider = plugin.TaskCompileProvider
 
 // ValidateTaskRequest verifies that a TaskRequest matches the given TaskTypeSpec
 // and satisfies all required parameter schemas.

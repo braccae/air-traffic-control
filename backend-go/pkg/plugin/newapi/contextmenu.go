@@ -1,7 +1,6 @@
 package newapi
 
 import (
-	"context"
 	"sort"
 	"strings"
 
@@ -9,37 +8,23 @@ import (
 )
 
 // ContextMenuTarget identifies the UI entity type that a context menu targets.
-type ContextMenuTarget string
+type ContextMenuTarget = plugin.ContextMenuTarget
 
 const (
-	TargetNode      ContextMenuTarget = "node"
-	TargetContainer ContextMenuTarget = "container"
-	TargetVM        ContextMenuTarget = "vm"
-	TargetStorage   ContextMenuTarget = "storage"
-	TargetShare     ContextMenuTarget = "share"
-	TargetNetwork   ContextMenuTarget = "network"
-	TargetFirewall  ContextMenuTarget = "firewall"
-	TargetService   ContextMenuTarget = "service"
-	TargetDatabase  ContextMenuTarget = "database"
+	TargetNode      = plugin.TargetNode
+	TargetContainer = plugin.TargetContainer
+	TargetVM        = plugin.TargetVM
+	TargetStorage   = plugin.TargetStorage
+	TargetShare     = plugin.TargetShare
+	TargetNetwork   = plugin.TargetNetwork
+	TargetFirewall  = plugin.TargetFirewall
+	TargetService   = plugin.TargetService
+	TargetDatabase  = plugin.TargetDatabase
 )
 
 // ContextMenuEntry represents a single actionable item or nested submenu
 // contributed by a plugin to a UI context menu.
-type ContextMenuEntry struct {
-	ID             string             `json:"id"`
-	PluginID       string             `json:"pluginId,omitempty"`
-	Target         ContextMenuTarget  `json:"target"`
-	Label          string             `json:"label"`
-	Icon           string             `json:"icon,omitempty"`
-	Group          string             `json:"group,omitempty"`
-	Order          int                `json:"order"`
-	Action         string             `json:"action,omitempty"`
-	ConfirmPrompt  string             `json:"confirmPrompt,omitempty"`
-	Danger         bool               `json:"danger,omitempty"`
-	Disabled       bool               `json:"disabled,omitempty"`
-	DisabledReason string             `json:"disabledReason,omitempty"`
-	Children       []ContextMenuEntry `json:"children,omitempty"`
-}
+type ContextMenuEntry = plugin.ContextMenuEntry
 
 // ContextMenuBuilder provides a fluent interface for constructing sorted,
 // plugin-attributed context menu entries.
@@ -55,9 +40,7 @@ type ContextMenuBuilder interface {
 
 // ContextMenuProvider is an optional interface implemented by plugins that
 // contribute context menu entries for a host or resource target.
-type ContextMenuProvider interface {
-	ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []ContextMenuEntry
-}
+type ContextMenuProvider = plugin.ContextMenuProvider
 
 type contextMenuBuilder struct {
 	pluginID string
