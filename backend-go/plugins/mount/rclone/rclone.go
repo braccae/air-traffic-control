@@ -17,7 +17,21 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 	"air-traffic-control/backend/pkg/systemd"
+)
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
 )
 
 func init() {
@@ -54,76 +68,76 @@ func (p *Plugin) Meta() plugin.Meta {
 	}
 }
 
+// CollectionSchedule returns the standard polling cadence and cache TTL
+// schedule for rclone mount telemetry inspection.
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema documents the v2 payload structure emitted by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "mounts",
+		Description: p.Meta().Description,
+	}
+}
+
+// CategorizedSettingsPage declares datacenter-wide rclone remote and mount
+// defaults via the v2 settings framework.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	return settingsframework.NewPageBuilder(SettingsPageID, "Rclone Remotes & Mount Defaults").
+		WithIcon("cloud_queue").
+		WithCategory(string(plugin.KindMount)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(25).
+		WithDescription("Datacenter-wide rclone remote defaults (base mount path, default mount strategy, VFS cache flags) and guided rclone.conf remote vault storage.").
+		StringField("defaultMountBaseDir", "Default Mount Base Directory", DefaultMountBaseDir,
+			settingsframework.WithRequired(true),
+			settingsframework.WithPlaceholder(DefaultMountBaseDir),
+			settingsframework.WithDescription("Base directory under which remotes mount by default (e.g. /mnt/rclone/<remote>).")).
+		SelectField("defaultPolicy", "Default Client Mount Policy", DefaultMountPolicy, []plugin.SettingsFieldOption{
+			{Value: "systemd-mount", Label: "systemd mount (rclone-<name>.service)"},
+			{Value: "systemd-automount", Label: "systemd automount (.mount + .automount pair)"},
+			{Value: "fstab", Label: "/etc/fstab entry (fuse.rclone)"},
+			{Value: "script", Label: "Service script (/usr/local/bin/rclone-mount-<name>.sh)"},
+		}, settingsframework.WithDescription("Default mount strategy used when installing a remote to a Linux client.")).
+		StringField("defaultMountOptions", "Default rclone Mount Flags", DefaultMountOptions,
+			settingsframework.WithPlaceholder(DefaultMountOptions),
+			settingsframework.WithDescription("Extra flags passed to `rclone mount` when a client does not specify custom options.")).
+		StringField("defaultMountUser", "Default Mount Owner User", DefaultMountUser,
+			settingsframework.WithPlaceholder(DefaultMountUser),
+			settingsframework.WithDescription("System user that owns the FUSE mount process on target hosts.")).
+		SecretField("configPasswordVaultVar", "rclone.conf Encryption Password Vault Variable",
+			settingsframework.WithPlaceholder("vault_rclone_config_password"),
+			settingsframework.WithDescription("Optional Ansible Vault variable holding RCLONE_CONFIG_PASS. Never stored or returned in plaintext.")).
+		BuildCategorized()
+}
+
 // SettingsPage implements plugin.SettingsPageProvider so datacenter-wide rclone
 // defaults and remote management appear in the Datacenter Settings view and the
 // global settings framework.
 func (p *Plugin) SettingsPage() plugin.SettingsPage {
-	return plugin.SettingsPage{
-		ID:          SettingsPageID,
-		Title:       "Rclone Remotes & Mount Defaults",
-		Icon:        "cloud_queue",
-		Description: "Datacenter-wide rclone remote defaults (base mount path, default mount strategy, VFS cache flags) and guided rclone.conf remote vault storage.",
-		Order:       25,
-		Fields: []plugin.SettingsField{
-			{
-				Name:        "defaultMountBaseDir",
-				Label:       "Default Mount Base Directory",
-				Type:        plugin.SettingsFieldString,
-				Default:     DefaultMountBaseDir,
-				Required:    true,
-				Placeholder: DefaultMountBaseDir,
-				Description: "Base directory under which remotes mount by default (e.g. /mnt/rclone/<remote>).",
-			},
-			{
-				Name:        "defaultPolicy",
-				Label:       "Default Client Mount Policy",
-				Type:        plugin.SettingsFieldSelect,
-				Default:     DefaultMountPolicy,
-				Description: "Default mount strategy used when installing a remote to a Linux client.",
-				Options: []plugin.SettingsFieldOption{
-					{Value: "systemd-mount", Label: "systemd mount (rclone-<name>.service)"},
-					{Value: "systemd-automount", Label: "systemd automount (.mount + .automount pair)"},
-					{Value: "fstab", Label: "/etc/fstab entry (fuse.rclone)"},
-					{Value: "script", Label: "Service script (/usr/local/bin/rclone-mount-<name>.sh)"},
-				},
-			},
-			{
-				Name:        "defaultMountOptions",
-				Label:       "Default rclone Mount Flags",
-				Type:        plugin.SettingsFieldString,
-				Default:     DefaultMountOptions,
-				Placeholder: DefaultMountOptions,
-				Description: "Extra flags passed to `rclone mount` when a client does not specify custom options.",
-			},
-			{
-				Name:        "defaultMountUser",
-				Label:       "Default Mount Owner User",
-				Type:        plugin.SettingsFieldString,
-				Default:     DefaultMountUser,
-				Placeholder: DefaultMountUser,
-				Description: "System user that owns the FUSE mount process on target hosts.",
-			},
-			{
-				Name:        "configPasswordVaultVar",
-				Label:       "rclone.conf Encryption Password Vault Variable",
-				Type:        plugin.SettingsFieldSecret,
-				Secret:      true,
-				Placeholder: "vault_rclone_config_password",
-				Description: "Optional Ansible Vault variable holding RCLONE_CONFIG_PASS. Never stored or returned in plaintext.",
-			},
-		},
-	}
+	return p.CategorizedSettingsPage().SettingsPage
 }
 
 func globalSetting(field, fallback string) string {
-	store := plugin.GlobalSettingsStore()
-	if store == nil {
-		return fallback
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault(SettingsPageID, field, fallback)
+}
+
+// ContextMenuEntries provides rclone mount actions for compatible Linux hosts.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
 	}
-	if v, ok := store.Value(SettingsPageID, field); ok && strings.TrimSpace(v) != "" {
-		return strings.TrimSpace(v)
-	}
-	return fallback
+	meta := p.Meta()
+	return newapi.NewContextMenuBuilder(meta.ID).
+		WithTarget(newapi.TargetNode).
+		WithGroup(string(meta.Kind)).
+		AddAction("install_remote", "Install Remote", "cloud_upload", "install_remote", 10).
+		AddDangerAction("remove_remote", "Remove Remote", "cloud_off", "remove_remote",
+			"Unmount and remove this rclone remote from the host?", 90).
+		Build()
 }
 
 func (p *Plugin) Compatible(h plugin.HostFacts) bool {
@@ -209,34 +223,67 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}, nil
 }
 
-func (p *Plugin) Actions() []plugin.ActionSpec {
-	return []plugin.ActionSpec{
+// ManagementActions returns the v2 management action specifications for rclone mounts.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "install_remote",
-			Label:       "Install Remote",
-			Description: "Write an rclone remote config to the device and install its mount using the chosen policy",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "rclone remote name (e.g. hetzner)"},
-				{Name: "configContent", Type: "string", Required: true, Secret: true, Description: "rclone.conf section (obscured secret values only)"},
-				{Name: "mountTarget", Type: "string", Required: true, Description: "Absolute mount point (e.g. /mnt/rclone/hetzner)"},
-				{Name: "policy", Type: "select", Required: false, Default: "systemd-mount", Enum: []string{"systemd-mount", "systemd-automount", "fstab", "script"}, Description: "Mount strategy"},
-				{Name: "mountOptions", Type: "string", Required: false, Default: "--vfs-cache-mode writes --dir-cache-time 5m", Description: "Extra rclone mount arguments"},
-				{Name: "mountUser", Type: "string", Required: false, Default: "root", Description: "User that owns the FUSE mount"},
-				{Name: "scope", Type: "select", Required: false, Default: "system", Enum: []string{"system", "user"}, Description: "systemd manager scope"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "install_remote",
+				Label:       "Install Remote",
+				Description: "Write an rclone remote config to the device and install its mount using the chosen policy",
+				Options: []plugin.OptionSchema{
+					{Name: "name", Type: "string", Required: true, Description: "rclone remote name (e.g. hetzner)"},
+					{Name: "configContent", Type: "string", Required: true, Secret: true, Description: "rclone.conf section (obscured secret values only)"},
+					{Name: "mountTarget", Type: "string", Required: true, Description: "Absolute mount point (e.g. /mnt/rclone/hetzner)"},
+					{Name: "policy", Type: "select", Required: false, Default: "systemd-mount", Enum: []string{"systemd-mount", "systemd-automount", "fstab", "script"}, Description: "Mount strategy"},
+					{Name: "mountOptions", Type: "string", Required: false, Default: "--vfs-cache-mode writes --dir-cache-time 5m", Description: "Extra rclone mount arguments"},
+					{Name: "mountUser", Type: "string", Required: false, Default: "root", Description: "User that owns the FUSE mount"},
+					{Name: "scope", Type: "select", Required: false, Default: "system", Enum: []string{"system", "user"}, Description: "systemd manager scope"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindMount},
 		},
 		{
-			Name:        "remove_remote",
-			Label:       "Remove Remote",
-			Description: "Unmount and remove a previously installed rclone remote",
-			Options: []plugin.OptionSchema{
-				{Name: "name", Type: "string", Required: true, Description: "rclone remote name"},
-				{Name: "mountTarget", Type: "string", Required: false, Description: "Mount point to unmount"},
-				{Name: "policy", Type: "select", Required: false, Default: "systemd-mount", Enum: []string{"systemd-mount", "systemd-automount", "fstab", "script"}, Description: "Mount strategy used at install time"},
-				{Name: "scope", Type: "select", Required: false, Default: "system", Enum: []string{"system", "user"}, Description: "systemd manager scope"},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "remove_remote",
+				Label:       "Remove Remote",
+				Description: "Unmount and remove a previously installed rclone remote",
+				Options: []plugin.OptionSchema{
+					{Name: "name", Type: "string", Required: true, Description: "rclone remote name"},
+					{Name: "mountTarget", Type: "string", Required: false, Description: "Mount point to unmount"},
+					{Name: "policy", Type: "select", Required: false, Default: "systemd-mount", Enum: []string{"systemd-mount", "systemd-automount", "fstab", "script"}, Description: "Mount strategy used at install time"},
+					{Name: "scope", Type: "select", Required: false, Default: "system", Enum: []string{"system", "user"}, Description: "systemd manager scope"},
+				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Unmount and remove this rclone remote from the host?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindMount},
 		},
 	}
+}
+
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+// ValidateAction validates options for a declared rclone management action.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, action) {
+			return newapi.ValidateManagementOptions(spec, opts)
+		}
+	}
+	return fmt.Errorf("unsupported %s action: %s", p.Meta().Name, action)
 }
 
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
@@ -248,6 +295,21 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 	default:
 		return plugin.TaskSpec{}, fmt.Errorf("unsupported rclone action: %s", action)
 	}
+}
+
+// CompileTask adapts a typed v2 TaskRequest to the plugin's declarative
+// Ansible TaskSpec compiler.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
 
 func str(opts map[string]any, key, def string) string {

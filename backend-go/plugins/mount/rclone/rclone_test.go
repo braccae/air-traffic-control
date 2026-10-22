@@ -4,8 +4,11 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 	_ "air-traffic-control/backend/plugins/all"
 	"air-traffic-control/backend/plugins/mount/rclone"
 )
@@ -255,6 +258,129 @@ func TestRclonePlugin_CompileMasksSecretsAndRejectsBadInput(t *testing.T) {
 		if _, err := actor.Compile(plugin.HostFacts{OSFamily: "linux"}, "install_remote", bad); err == nil {
 			t.Errorf("expected error for %+v", bad)
 		}
+	}
+}
+
+func TestRclonePlugin_NewAPIInterfacesAndSchemas(t *testing.T) {
+	p, ok := plugin.Get("mount/rclone")
+	if !ok {
+		t.Fatalf("mount/rclone not registered in DefaultRegistry")
+	}
+
+	// 1. DataCollectionPlugin
+	dc, ok := p.(newapi.DataCollectionPlugin)
+	if !ok {
+		t.Fatalf("mount/rclone does not implement newapi.DataCollectionPlugin")
+	}
+	sched := dc.CollectionSchedule()
+	if sched.Interval != 60*time.Second || sched.TTL != 60*time.Second {
+		t.Errorf("unexpected collection schedule for mount/rclone: %+v", sched)
+	}
+	schema := dc.CollectionSchema()
+	if schema.Version != "v2" || schema.RootKey != "mounts" {
+		t.Errorf("unexpected collection schema: %+v", schema)
+	}
+
+	// 2. ManagementPlugin & action parity
+	mgmt, ok := p.(newapi.ManagementPlugin)
+	if !ok {
+		t.Fatalf("mount/rclone does not implement newapi.ManagementPlugin")
+	}
+	mgmtActions := mgmt.ManagementActions()
+	legacyActions := p.(plugin.Actor).Actions()
+	if len(mgmtActions) != 2 || len(legacyActions) != len(mgmtActions) {
+		t.Fatalf("expected 2 management actions matching legacy Actions(), got mgmt=%d legacy=%d", len(mgmtActions), len(legacyActions))
+	}
+	for i, ma := range mgmtActions {
+		if ma.Name != legacyActions[i].Name {
+			t.Errorf("action[%d] name mismatch: %q vs %q", i, ma.Name, legacyActions[i].Name)
+		}
+		if ma.Name == "remove_remote" && (!ma.Dangerous || ma.ConfirmPrompt == "") {
+			t.Errorf("expected remove_remote to be marked dangerous with a confirmation prompt: %+v", ma)
+		}
+	}
+
+	facts := plugin.HostFacts{NodeID: "node1", OSFamily: "linux"}
+	if err := mgmt.ValidateAction(facts, "install_remote", map[string]any{
+		"name":          "hetzner",
+		"configContent": "[hetzner]\ntype=sftp\n",
+		"mountTarget":   "/mnt/rclone/hetzner",
+		"policy":        "systemd-mount",
+	}); err != nil {
+		t.Errorf("expected valid install_remote options to pass ValidateAction, got %v", err)
+	}
+	if err := mgmt.ValidateAction(facts, "install_remote", map[string]any{"name": "hetzner"}); err == nil {
+		t.Errorf("expected missing required options to fail ValidateAction")
+	}
+	if err := mgmt.ValidateAction(facts, "install_remote", map[string]any{
+		"name":          "hetzner",
+		"configContent": "x",
+		"mountTarget":   "/mnt/rclone/hetzner",
+		"policy":        "invalid-policy",
+	}); err == nil {
+		t.Errorf("expected invalid enum policy to fail ValidateAction")
+	}
+	if err := mgmt.ValidateAction(facts, "unknown_action", nil); err == nil {
+		t.Errorf("expected unknown action to fail ValidateAction")
+	}
+
+	// 3. CategorizedSettingsProvider & settingsframework validation
+	csp, ok := p.(newapi.CategorizedSettingsProvider)
+	if !ok {
+		t.Fatalf("mount/rclone does not implement newapi.CategorizedSettingsProvider")
+	}
+	catPage := csp.CategorizedSettingsPage()
+	if err := settingsframework.ValidateSchema(catPage.SettingsPage); err != nil {
+		t.Fatalf("ValidateSchema failed for mount/rclone settings page: %v", err)
+	}
+	if err := newapi.ValidateCategorizedSettingsPage(catPage); err != nil {
+		t.Fatalf("ValidateCategorizedSettingsPage failed for mount/rclone: %v", err)
+	}
+	if catPage.ID != "mount/rclone" || catPage.Scope != newapi.SettingsScopeDatacenter || catPage.Category != "mount" {
+		t.Errorf("unexpected categorized settings page metadata: %+v", catPage)
+	}
+	if _, ok := plugin.GetCategorizedSettingsPage("mount/rclone"); !ok {
+		t.Errorf("expected mount/rclone categorized settings page to be indexed in DefaultRegistry")
+	}
+
+	// 4. ContextMenuProvider
+	cmp, ok := p.(newapi.ContextMenuProvider)
+	if !ok {
+		t.Fatalf("mount/rclone does not implement newapi.ContextMenuProvider")
+	}
+	entries := cmp.ContextMenuEntries(context.Background(), facts)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 context menu entries for compatible linux host, got %d (%+v)", len(entries), entries)
+	}
+	for _, entry := range entries {
+		if entry.PluginID != "mount/rclone" || entry.Target != newapi.TargetNode || entry.Action == "" {
+			t.Errorf("unexpected context menu entry metadata: %+v", entry)
+		}
+	}
+	if winEntries := cmp.ContextMenuEntries(context.Background(), plugin.HostFacts{OSFamily: "windows"}); len(winEntries) != 0 {
+		t.Errorf("expected nil/empty context menu entries for incompatible windows host, got %+v", winEntries)
+	}
+
+	// 5. TaskCompileProvider
+	tcp, ok := p.(newapi.TaskCompileProvider)
+	if !ok {
+		t.Fatalf("mount/rclone does not implement newapi.TaskCompileProvider")
+	}
+	compiled, err := tcp.CompileTask(context.Background(), facts, newapi.TaskRequest{
+		Type:     newapi.TaskTypePluginAction,
+		PluginID: "mount/rclone",
+		Action:   "remove_remote",
+		NodeID:   "node1",
+		Params: map[string]any{
+			"name":        "hetzner",
+			"mountTarget": "/mnt/rclone/hetzner",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask failed: %v", err)
+	}
+	if len(compiled.Steps) == 0 || compiled.Name != "Remove rclone remote hetzner" {
+		t.Errorf("unexpected CompileTask result: %+v", compiled)
 	}
 }
 
