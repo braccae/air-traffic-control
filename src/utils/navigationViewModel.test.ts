@@ -269,18 +269,20 @@ test('groupNodesByDynamicCluster groups arbitrary Tailscale tag groups (e.g. tag
   assert.equal(updated.specs.ramGiB, 32);
 });
 
-test('getSubSidebarWrapperClasses generates responsive sticky positioning and independent scrollbar classes for all widths', async () => {
+test('getSubSidebarWrapperClasses generates responsive full-height flex column classes for all widths', async () => {
   const { getSubSidebarWrapperClasses, getWorkspaceWrapperClasses } = await import('./navigationViewModel.ts');
 
-  // Verify sticky pinned positioning and independent scroll properties across all widths
+  // Verify full-height flex column layout with independent scroll across all widths.
+  // The sidebar fills the viewport height (no sticky pinning or self-start).
   for (const width of ['compact', 'normal', 'wide'] as const) {
     const classes = getSubSidebarWrapperClasses(width);
-    assert.ok(classes.includes('self-start'), `Expected self-start for ${width}`);
-    assert.ok(classes.includes('lg:sticky lg:top-[76px]'), `Expected lg:sticky lg:top-[76px] for ${width}`);
-    assert.ok(classes.includes('lg:max-h-[calc(100vh-100px)]'), `Expected responsive viewport height calculation for ${width}`);
+    assert.ok(classes.includes('flex flex-col'), `Expected flex flex-col for ${width}`);
+    assert.ok(classes.includes('h-[calc(100vh-120px)]'), `Expected h-[calc(100vh-120px)] for ${width}`);
     assert.ok(classes.includes('overflow-y-auto'), `Expected overflow-y-auto for ${width}`);
     assert.ok(classes.includes('shrink-0'), `Expected shrink-0 for ${width}`);
     assert.ok(classes.includes('scrollbar-thin'), `Expected scrollbar-thin for ${width}`);
+    assert.ok(!classes.includes('sticky'), `Did not expect sticky positioning for ${width}`);
+    assert.ok(!classes.includes('self-start'), `Did not expect self-start for ${width}`);
   }
 
   // Verify responsive width column allocations
