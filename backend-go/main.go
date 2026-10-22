@@ -17,17 +17,21 @@ import (
 	"air-traffic-control/backend/pkg/ansqueue"
 	"air-traffic-control/backend/pkg/cache"
 	"air-traffic-control/backend/pkg/clusterapi"
+	"air-traffic-control/backend/pkg/contextmenu"
 	"air-traffic-control/backend/pkg/cronapi"
 	"air-traffic-control/backend/pkg/glances"
 	"air-traffic-control/backend/pkg/hostcache"
 	"air-traffic-control/backend/pkg/nodeapi"
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 	"air-traffic-control/backend/pkg/podman"
 	"air-traffic-control/backend/pkg/rcloneapi"
 	"air-traffic-control/backend/pkg/readonlyapi"
 	"air-traffic-control/backend/pkg/restic"
 	"air-traffic-control/backend/pkg/ssh"
 	"air-traffic-control/backend/pkg/tailscale"
+	"air-traffic-control/backend/pkg/taskapi"
 	"air-traffic-control/backend/pkg/terminal"
 	"air-traffic-control/backend/pkg/types"
 	"air-traffic-control/backend/pkg/vaultapi"
@@ -179,7 +183,7 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string, 
 		}
 
 		// Mount plugin framework REST API routes - with working node resolver from store
-		pluginAPI = plugin.NewAPI(plugin.APIOptions{Store: store})
+		pluginAPI = plugin.NewAPI(plugin.APIOptions{Store: store, DBPath: dbPath})
 		mux.HandleFunc("/api/plugins", pluginAPI.HandleListPlugins)
 
 		// Mount the Ansible mutation queue (staging, execution, halting). It
@@ -312,6 +316,33 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string, 
 			})
 		}
 	}
+
+	// Wire global & categorized settings pages, context menus, inventory node types, and task types
+	pluginAPI.RegisterSettingsRoutes(mux)
+
+	settingsHandler := settingsframework.NewHandler(pluginAPI.Registry(), pluginAPI.SettingsStore())
+	settingsHandler.RegisterRoutes(mux)
+
+	cmRenderer := contextmenu.NewRenderer(contextmenu.RendererOptions{
+		Registry:     pluginAPI.Registry(),
+		NodeResolver: pluginAPI.NodeResolver(),
+	})
+	contextmenu.NewAPI(cmRenderer).Register(mux)
+
+	nodeTypesHandler := nodeapi.NewHandler(func() []newapi.NodeTypeSpec {
+		if pluginAPI != nil && pluginAPI.Registry() != nil {
+			return pluginAPI.Registry().ListNodeTypes()
+		}
+		return plugin.ListNodeTypes()
+	})
+	mux.HandleFunc("/api/node-types", nodeTypesHandler)
+	mux.HandleFunc("/api/node-types/", nodeTypesHandler)
+
+	taskAPI := taskapi.NewAPI(taskapi.APIOptions{
+		PluginRegistry: pluginAPI.Registry(),
+		NodeResolver:   pluginAPI.NodeResolver(),
+	})
+	taskAPI.Register(mux)
 
 	// API 404 catch-all. Mirrors server.ts: an unhandled /api/* request must
 	// return JSON, never fall through to the SPA index.html. Every /api/*

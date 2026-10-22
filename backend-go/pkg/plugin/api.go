@@ -507,6 +507,22 @@ func (a *API) RunnerResolver() RunnerResolver {
 	return a.runnerResolver
 }
 
+// Registry returns the wired plugin registry. Never nil for a non-nil API.
+func (a *API) Registry() *Registry {
+	if a == nil {
+		return nil
+	}
+	return a.registry
+}
+
+// SettingsStore returns the wired settings store.
+func (a *API) SettingsStore() *SettingsStore {
+	if a == nil {
+		return nil
+	}
+	return a.settingsStore
+}
+
 // Cache returns the wired probe cache. Never nil for a non-nil API.
 func (a *API) Cache() *ProbeCache {
 	if a == nil {
@@ -594,6 +610,11 @@ func NewAPI(opts APIOptions) *API {
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/plugins", a.handleListPlugins)
 	mux.HandleFunc("/api/nodes/", a.handleNodeRoutes)
+	a.RegisterSettingsRoutes(mux)
+}
+
+// RegisterSettingsRoutes mounts the global settings endpoints onto the given ServeMux
+func (a *API) RegisterSettingsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/pages", a.handleSettingsPages)
 	mux.HandleFunc("/api/settings/pages/", a.handleSettingsPageRoutes)
 }

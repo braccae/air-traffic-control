@@ -266,6 +266,11 @@ func NewRegistry() *Registry {
 // Global default registry
 var defaultRegistry = NewRegistry()
 
+// DefaultRegistry returns the process-wide default plugin Registry.
+func DefaultRegistry() *Registry {
+	return defaultRegistry
+}
+
 // Register validates and registers a plugin with the global registry.
 func Register(p Plugin) error {
 	return defaultRegistry.Register(p)

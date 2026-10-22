@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,9 +9,14 @@ import (
 	"strings"
 	"testing"
 
+	"air-traffic-control/backend/pkg/contextmenu"
 	"air-traffic-control/backend/pkg/hostcache"
+	"air-traffic-control/backend/pkg/nodeapi"
+	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 	"air-traffic-control/backend/pkg/podman"
 	"air-traffic-control/backend/pkg/ssh"
+	"air-traffic-control/backend/pkg/taskapi"
 	"air-traffic-control/backend/pkg/types"
 )
 
@@ -231,4 +237,149 @@ func TestGETNodesEndpoint_ReturnsPopulatedSpecsForAllNodes(t *testing.T) {
 			t.Errorf("node %s invalid specs: %+v", id, specs)
 		}
 	}
+}
+
+func TestNewAPIsWiredInServerMux(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hosts-cache.sqlite")
+	store, err := hostcache.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open host cache: %v", err)
+	}
+	mux, _ := newServerMux(nil, nil, dbPath, store)
+
+	// 1. Verify all 29 registered plugins via GET /api/plugins
+	t.Run("PluginsEndpoint", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/plugins", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/plugins status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var summaries []plugin.PluginSummary
+		if err := json.NewDecoder(rec.Body).Decode(&summaries); err != nil {
+			t.Fatalf("decode /api/plugins: %v", err)
+		}
+		if len(summaries) < 29 {
+			t.Fatalf("expected at least 29 registered plugins, got %d", len(summaries))
+		}
+	})
+
+	// 2. Verify global & categorized settings endpoints
+	t.Run("SettingsEndpoints", func(t *testing.T) {
+		reqPages := httptest.NewRequest(http.MethodGet, "/api/settings/pages", nil)
+		recPages := httptest.NewRecorder()
+		mux.ServeHTTP(recPages, reqPages)
+		if recPages.Code != http.StatusOK {
+			t.Fatalf("GET /api/settings/pages status=%d body=%s", recPages.Code, recPages.Body.String())
+		}
+		var pages []plugin.GlobalSettingsPageView
+		if err := json.NewDecoder(recPages.Body).Decode(&pages); err != nil {
+			t.Fatalf("decode /api/settings/pages: %v", err)
+		}
+		if len(pages) == 0 {
+			t.Fatal("expected registered settings pages on /api/settings/pages")
+		}
+
+		reqCat := httptest.NewRequest(http.MethodGet, "/api/settings/categories?scope=datacenter", nil)
+		recCat := httptest.NewRecorder()
+		mux.ServeHTTP(recCat, reqCat)
+		if recCat.Code != http.StatusOK {
+			t.Fatalf("GET /api/settings/categories status=%d body=%s", recCat.Code, recCat.Body.String())
+		}
+		var groups []settingsframework.CategoryGroup
+		if err := json.NewDecoder(recCat.Body).Decode(&groups); err != nil {
+			t.Fatalf("decode /api/settings/categories: %v", err)
+		}
+		if len(groups) == 0 {
+			t.Fatal("expected settings category groups")
+		}
+
+		reqDC := httptest.NewRequest(http.MethodGet, "/api/settings/datacenter", nil)
+		recDC := httptest.NewRecorder()
+		mux.ServeHTTP(recDC, reqDC)
+		if recDC.Code != http.StatusOK {
+			t.Fatalf("GET /api/settings/datacenter status=%d body=%s", recDC.Code, recDC.Body.String())
+		}
+	})
+
+	// 3. Verify context menu endpoints
+	t.Run("ContextMenuEndpoints", func(t *testing.T) {
+		reqMenu := httptest.NewRequest(http.MethodGet, "/api/context-menus?target=node&nodeId=node-likes-it-cold", nil)
+		recMenu := httptest.NewRecorder()
+		mux.ServeHTTP(recMenu, reqMenu)
+		if recMenu.Code != http.StatusOK {
+			t.Fatalf("GET /api/context-menus status=%d body=%s", recMenu.Code, recMenu.Body.String())
+		}
+		var menu contextmenu.RenderedMenu
+		if err := json.NewDecoder(recMenu.Body).Decode(&menu); err != nil {
+			t.Fatalf("decode /api/context-menus: %v", err)
+		}
+		if menu.Target != contextmenu.TargetNode {
+			t.Errorf("expected target=node, got %q", menu.Target)
+		}
+
+		reqTargets := httptest.NewRequest(http.MethodGet, "/api/context-menus/targets", nil)
+		recTargets := httptest.NewRecorder()
+		mux.ServeHTTP(recTargets, reqTargets)
+		if recTargets.Code != http.StatusOK {
+			t.Fatalf("GET /api/context-menus/targets status=%d body=%s", recTargets.Code, recTargets.Body.String())
+		}
+	})
+
+	// 4. Verify inventory node types endpoint
+	t.Run("NodeTypesEndpoint", func(t *testing.T) {
+		reqNT := httptest.NewRequest(http.MethodGet, "/api/node-types", nil)
+		recNT := httptest.NewRecorder()
+		mux.ServeHTTP(recNT, reqNT)
+		if recNT.Code != http.StatusOK {
+			t.Fatalf("GET /api/node-types status=%d body=%s", recNT.Code, recNT.Body.String())
+		}
+		var ntResp nodeapi.NodeTypesResponse
+		if err := json.NewDecoder(recNT.Body).Decode(&ntResp); err != nil {
+			t.Fatalf("decode /api/node-types: %v", err)
+		}
+		if ntResp.Count < 7 || len(ntResp.NodeTypes) < 7 {
+			t.Fatalf("expected at least 7 built-in node types, got %d", ntResp.Count)
+		}
+	})
+
+	// 5. Verify task types discovery & execution endpoints
+	t.Run("TaskTypesEndpoints", func(t *testing.T) {
+		reqTT := httptest.NewRequest(http.MethodGet, "/api/task-types", nil)
+		recTT := httptest.NewRecorder()
+		mux.ServeHTTP(recTT, reqTT)
+		if recTT.Code != http.StatusOK {
+			t.Fatalf("GET /api/task-types status=%d body=%s", recTT.Code, recTT.Body.String())
+		}
+		var specs []taskapi.TaskTypeSpec
+		if err := json.NewDecoder(recTT.Body).Decode(&specs); err != nil {
+			t.Fatalf("decode /api/task-types: %v", err)
+		}
+		if len(specs) < 7 {
+			t.Fatalf("expected at least 7 built-in task types, got %d", len(specs))
+		}
+
+		execBody, _ := json.Marshal(map[string]any{
+			"id":     "test-main-task-1",
+			"type":   "service_control",
+			"nodeId": "node-likes-it-cold",
+			"options": map[string]any{
+				"service": "sshd.service",
+				"state":   "restarted",
+			},
+		})
+		reqExec := httptest.NewRequest(http.MethodPost, "/api/task-types/execute", bytes.NewReader(execBody))
+		recExec := httptest.NewRecorder()
+		mux.ServeHTTP(recExec, reqExec)
+		if recExec.Code != http.StatusOK {
+			t.Fatalf("POST /api/task-types/execute status=%d body=%s", recExec.Code, recExec.Body.String())
+		}
+		var result taskapi.TaskResult
+		if err := json.NewDecoder(recExec.Body).Decode(&result); err != nil {
+			t.Fatalf("decode TaskResult: %v", err)
+		}
+		if !result.Success || result.Compiled == nil {
+			t.Fatalf("expected compiled TaskResult, got %+v", result)
+		}
+	})
 }
