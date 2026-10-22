@@ -38,6 +38,7 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node, scop
 
   const fetchShares = (refresh = false) => {
     setLoading(true);
+    setSambaConfig('');
     fetch(`/api/nodes/${encodeURIComponent(node.id)}/shares${refresh ? '?refresh=true' : ''}`)
       .then(res => res.json())
       .then(data => {
@@ -62,9 +63,10 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node, scop
           status: string;
         }> = [];
         const seenNames = new Set<string>();
+        let resolvedSambaConfig = '';
 
         const parseSambaSection = (sec: string, source: string) => {
-          const headerMatch = sec.match(/^\[([^\]]+)\]/);
+          const headerMatch = sec.trim().match(/^\[([^\]]+)\]/m);
           if (!headerMatch) return;
           const name = headerMatch[1].trim();
           if (name === 'global' || name === 'printers' || name === 'print$' || name === 'homes') return;
@@ -87,22 +89,24 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node, scop
         };
 
         if (sambaRaw && !sambaRaw.includes('NO_SAMBA')) {
-          setSambaConfig(sambaRaw);
+          resolvedSambaConfig = sambaRaw;
           const sections = sambaRaw.split(/(?=\[[^\]]+\])/);
           for (const sec of sections) parseSambaSection(sec, 'Samba / SMB');
         }
 
         if (zfsSharesRaw && !zfsSharesRaw.includes('NO_ZFS_SHARES')) {
-          if (!sambaConfig) setSambaConfig(zfsSharesRaw);
+          if (!resolvedSambaConfig) resolvedSambaConfig = zfsSharesRaw;
           const sections = zfsSharesRaw.split(/(?=\[[^\]]+\])/);
           for (const sec of sections) parseSambaSection(sec, 'Cockpit ZFS (Samba)');
         }
 
         if (netConfRaw && !netConfRaw.includes('NO_NET_CONF')) {
-          if (!sambaConfig) setSambaConfig(netConfRaw);
+          if (!resolvedSambaConfig) resolvedSambaConfig = netConfRaw;
           const sections = netConfRaw.split(/(?=\[[^\]]+\])/);
           for (const sec of sections) parseSambaSection(sec, 'Samba Registry');
         }
+
+        setSambaConfig(resolvedSambaConfig);
 
         if (nfsRaw && !nfsRaw.includes('NO_NFS')) {
           const lines = nfsRaw.split('\n');
@@ -154,7 +158,7 @@ export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node, scop
 
   useEffect(() => {
     fetchShares(false);
-  }, [node.id, node.shortName]);
+  }, [node.id, node.shortName, scope]);
 
   const [reloading, setReloading] = useState(false);
   const handleReloadShares = async () => {

@@ -317,8 +317,33 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
     }
   };
 
-  const handleDeleteRule = async (rule: { id: string; zone?: string; rawRule?: string }) => {
+  const handleDeleteRule = async (rule: {
+    id: string;
+    port?: string;
+    proto?: string;
+    chain?: string;
+    policy?: string;
+    zone?: string;
+    rawRule?: string;
+  }) => {
     try {
+      if (!isFirewalld) {
+        const task = await compileDaemonPluginMutation(node, 'firewall', activePluginName, 'delete_port', {
+          port: rule.port || '22',
+          proto: rule.proto === 'all' || !rule.proto ? 'tcp' : rule.proto,
+          chain: rule.chain || 'INPUT',
+          jump: rule.policy || 'ACCEPT',
+          rule: rule.policy === 'DROP' ? 'deny' : rule.policy === 'REJECT' ? 'reject' : 'allow',
+        });
+        const staged = await stageTaskInQueue(task);
+        if (!staged.success) {
+          setErrorMessage(staged.error || `Failed to stage ${activePluginName} rule deletion`);
+          return;
+        }
+        refreshAll(true);
+        return;
+      }
+
       const params = new URLSearchParams();
       if (rule.zone) params.set('zone', rule.zone);
       if (rule.rawRule) params.set('rawRule', rule.rawRule);
@@ -659,6 +684,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
       </div>
 
       {/* Port Forwarding (NAT MASQ) */}
+      {isFirewalld && (
       <div className="mt-4 pt-3 border-t border-[#26293c] font-mono text-xs">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -793,6 +819,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
           </table>
         </div>
       </div>
+      )}
     </section>
   );
 };

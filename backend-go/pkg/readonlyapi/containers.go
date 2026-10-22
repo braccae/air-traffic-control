@@ -40,24 +40,27 @@ const podmanProbeScript = "ps -eo uid,user:32,args --no-headers" + "; " +
 	"USERS=$( ( [ -d /run/user ] && ls -1 /run/user 2>/dev/null | grep -E \"^[0-9]+$\" | while read u; do id -nu \"$u\" 2>/dev/null; done ; ls -1 /var/lib/systemd/linger 2>/dev/null ) | sort -u )" + "; " +
 	"for u in $USERS; do uid=$(id -u \"$u\" 2>/dev/null || true); [ -n \"$uid\" ] && [ \"$uid\" -gt 0 ] 2>/dev/null || continue; sock=\"/run/user/$uid/podman/podman.sock\"; echo \"---USER_PS:$u:$uid---\"; (run0 --background=no curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || sudo -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || doas -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/json?all=true\" 2>/dev/null || run0 --background=no --user \"$u\" podman ps --all --format json 2>/dev/null || sudo -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman ps --all --format json 2>/dev/null || doas -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman ps --all --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman ps --all --format json 2>/dev/null) || true; echo \"---USER_PODS:$u:$uid---\"; (run0 --background=no curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || sudo -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || doas -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/pods/json\" 2>/dev/null || run0 --background=no --user \"$u\" podman pod ps --format json 2>/dev/null || sudo -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman pod ps --format json 2>/dev/null || doas -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman pod ps --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman pod ps --format json 2>/dev/null) || true; echo \"---USER_STATS:$u:$uid---\"; (run0 --background=no curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || sudo -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || doas -n curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || curl -sf --unix-socket \"$sock\" \"http://d/v4.0.0/libpod/containers/stats?stream=false\" 2>/dev/null || run0 --background=no --user \"$u\" podman stats --no-stream --format json 2>/dev/null || sudo -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman stats --no-stream --format json 2>/dev/null || doas -n -u \"$u\" XDG_RUNTIME_DIR=/run/user/$uid podman stats --no-stream --format json 2>/dev/null || XDG_RUNTIME_DIR=/run/user/$uid podman stats --no-stream --format json 2>/dev/null) || true; done" + "; " +
 	"echo \"===DOCKER_CLI===\"" + "; " +
-	"which docker 2>/dev/null || echo \"NO_DOCKER\"" + "; " +
+	"(which docker 2>/dev/null && (docker --version 2>&1; readlink /var/run/docker.sock /run/docker.sock 2>/dev/null || true)) || echo \"NO_DOCKER\"" + "; " +
 	"echo \"===DOCKER===\"" + "; " +
-	"(docker ps --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}\" 2>/dev/null || run0 --background=no docker ps --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}\" 2>/dev/null || sudo -n docker ps --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}\" 2>/dev/null || doas -n docker ps --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}\" 2>/dev/null) || echo \"NO_DOCKER\""
+	"if which docker >/dev/null 2>&1 && ! (docker --version 2>&1; readlink /var/run/docker.sock /run/docker.sock 2>/dev/null) | grep -qi podman; then (docker ps -a --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}:::{{.Label \\\"com.docker.compose.project\\\"}}:::{{.Label \\\"com.docker.compose.service\\\"}}:::{{.Label \\\"com.docker.compose.project.config_files\\\"}}\" 2>/dev/null || run0 --background=no docker ps -a --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}:::{{.Label \\\"com.docker.compose.project\\\"}}:::{{.Label \\\"com.docker.compose.service\\\"}}:::{{.Label \\\"com.docker.compose.project.config_files\\\"}}\" 2>/dev/null || sudo -n docker ps -a --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}:::{{.Label \\\"com.docker.compose.project\\\"}}:::{{.Label \\\"com.docker.compose.service\\\"}}:::{{.Label \\\"com.docker.compose.project.config_files\\\"}}\" 2>/dev/null || doas -n docker ps -a --format \"{{.ID}}:::{{.Names}}:::{{.Image}}:::{{.Status}}:::{{.Label \\\"com.docker.compose.project\\\"}}:::{{.Label \\\"com.docker.compose.service\\\"}}:::{{.Label \\\"com.docker.compose.project.config_files\\\"}}\" 2>/dev/null) || echo \"NO_DOCKER\"; else echo \"NO_DOCKER\"; fi"
 
 // containerItem mirrors ContainerItem in src/types/index.ts (wire keys and
 // types). podId/podName are omitted when empty, like `undefined` in Express.
 type containerItem struct {
-	ID       string `json:"id"`
-	PodID    string `json:"podId,omitempty"`
-	PodName  string `json:"podName,omitempty"`
-	Name     string `json:"name"`
-	Image    string `json:"image"`
-	Status   string `json:"status"`
-	CPU      string `json:"cpu"`
-	Memory   string `json:"memory"`
-	User     string `json:"user"`
-	UID      int    `json:"uid"`
-	Rootless bool   `json:"rootless"`
+	ID                 string `json:"id"`
+	PodID              string `json:"podId,omitempty"`
+	PodName            string `json:"podName,omitempty"`
+	Name               string `json:"name"`
+	Image              string `json:"image"`
+	Status             string `json:"status"`
+	CPU                string `json:"cpu"`
+	Memory             string `json:"memory"`
+	User               string `json:"user"`
+	UID                int    `json:"uid"`
+	Rootless           bool   `json:"rootless"`
+	ComposeProject     string `json:"composeProject,omitempty"`
+	ComposeService     string `json:"composeService,omitempty"`
+	ComposeConfigFiles string `json:"composeConfigFiles,omitempty"`
 }
 
 // podItem mirrors PodItem in src/types/index.ts.
@@ -780,6 +783,10 @@ func parseMemoryStringToBytes(mem string) float64 {
 func parseDockerPsOutput(rawPsOutput, cliCheckOutput string) (bool, []containerItem) {
 	containers := []containerItem{}
 
+	if strings.Contains(strings.ToLower(cliCheckOutput), "podman") || strings.Contains(strings.ToLower(rawPsOutput), "emulate docker cli using podman") {
+		return false, containers
+	}
+
 	cliFound := false
 	if cliCheckOutput != "" {
 		trimmed := strings.TrimSpace(cliCheckOutput)
@@ -799,6 +806,16 @@ func parseDockerPsOutput(rawPsOutput, cliCheckOutput string) (bool, []containerI
 			continue
 		}
 		id, name, image, status := parts[0], parts[1], parts[2], parts[3]
+		var composeProject, composeService, composeConfigFiles string
+		if len(parts) > 4 {
+			composeProject = strings.TrimSpace(parts[4])
+		}
+		if len(parts) > 5 {
+			composeService = strings.TrimSpace(parts[5])
+		}
+		if len(parts) > 6 {
+			composeConfigFiles = strings.TrimSpace(parts[6])
+		}
 		if id == "" || name == "" {
 			continue
 		}
@@ -821,15 +838,18 @@ func parseDockerPsOutput(rawPsOutput, cliCheckOutput string) (bool, []containerI
 			status = "Running"
 		}
 		containers = append(containers, containerItem{
-			ID:       shortID,
-			Name:     name,
-			Image:    image,
-			Status:   status,
-			CPU:      "",
-			Memory:   "",
-			User:     "docker",
-			UID:      0,
-			Rootless: false,
+			ID:                 shortID,
+			Name:               name,
+			Image:              image,
+			Status:             status,
+			CPU:                "",
+			Memory:             "",
+			User:               "docker",
+			UID:                0,
+			Rootless:           false,
+			ComposeProject:     composeProject,
+			ComposeService:     composeService,
+			ComposeConfigFiles: composeConfigFiles,
 		})
 	}
 

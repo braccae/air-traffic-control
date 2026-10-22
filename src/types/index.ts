@@ -131,6 +131,9 @@ export interface ContainerItem {
   user?: string;
   uid?: number;
   rootless?: boolean;
+  composeProject?: string;
+  composeService?: string;
+  composeConfigFiles?: string;
 }
 
 export interface PodItem {

@@ -33,15 +33,37 @@ interface NoSQLReadData {
   count?: number;
 }
 
-export const NoSQLView: React.FC<NoSQLViewProps> = ({ node, initialData, initialLoading }) => {
+export const NoSQLView: React.FC<NoSQLViewProps> = ({ node, pluginId, initialData, initialLoading }) => {
+  const parseEngineFromPluginId = (pid?: string): string | null => {
+    if (!pid || !pid.includes(':')) return null;
+    const raw = pid.split(':')[1]?.toLowerCase().trim();
+    if (raw === 'redis' || raw === 'valkey') return 'redis';
+    if (raw === 'mongodb' || raw === 'mongo') return 'mongodb';
+    if (raw === 'couchdb') return 'couchdb';
+    if (raw === 'rocksdb') return 'rocksdb';
+    return null;
+  };
+
+  const defaultPortForEngine = (eng: string): string => {
+    if (eng === 'mongodb') return '27017';
+    if (eng === 'couchdb') return '5984';
+    if (eng === 'rocksdb') return '';
+    return '6379';
+  };
+
   const [data, setData] = useState<NoSQLReadData | null>(initialData || null);
   const [actions, setActions] = useState<ActionSpec[]>([]);
   const [loading, setLoading] = useState(initialLoading ?? (initialData ? false : true));
   const [error, setError] = useState<string | null>(null);
-  const [activeEngine, setActiveEngine] = useState<string>('redis');
+  const [activeEngine, setActiveEngine] = useState<string>(() => parseEngineFromPluginId(pluginId) || 'redis');
   const [activeAction, setActiveAction] = useState<ActionSpec | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+
+  // Configurable Port & Socket state
+  const [configPort, setConfigPort] = useState<string>('');
+  const [configSocket, setConfigSocket] = useState<string>('');
+  const [savingConfig, setSavingConfig] = useState<boolean>(false);
 
   // Raw query workbench state
   const [queryCommand, setQueryCommand] = useState<string>('');
@@ -49,6 +71,13 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({ node, initialData, initial
   const [queryRunning, setQueryRunning] = useState<boolean>(false);
   const [queryResult, setQueryResult] = useState<any>(null);
   const [queryError, setQueryError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const pinned = parseEngineFromPluginId(pluginId);
+    if (pinned) {
+      setActiveEngine(pinned);
+    }
+  }, [pluginId]);
 
   const fetchData = async () => {
     if (!node?.id) return;
@@ -68,8 +97,12 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({ node, initialData, initial
       } else {
         const readData = await res.json();
         setData(readData);
-        if (readData.engines && readData.engines.length > 0) {
-          setActiveEngine(readData.engines[0].engine);
+        const pinned = parseEngineFromPluginId(pluginId);
+        if (pinned) {
+          setActiveEngine(pinned);
+        } else if (readData.engines && readData.engines.length > 0) {
+          const firstEng = readData.engines[0].engine === 'valkey' ? 'redis' : readData.engines[0].engine;
+          setActiveEngine(firstEng);
         }
       }
     } catch (err: any) {
@@ -84,12 +117,68 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({ node, initialData, initial
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [node?.id]);
 
-  const currentEngineData = data?.engines?.find(e => e.engine === activeEngine) || {
+  const currentEngineData = data?.engines?.find(
+    e => e.engine === activeEngine || (activeEngine === 'redis' && e.engine === 'valkey')
+  ) || {
     engine: activeEngine,
     status: 'inactive',
     databases: [],
     users: [],
+    metrics: {},
     dataFormat: activeEngine === 'redis' || activeEngine === 'valkey' ? 'keyvalue' : activeEngine === 'rocksdb' ? 'text' : 'document',
+  };
+
+  useEffect(() => {
+    const overrides = node?.pluginOverrides || {};
+    const metricPort = currentEngineData.metrics?.port ? String(currentEngineData.metrics.port) : '';
+    const metricSocket = currentEngineData.metrics?.socket ? String(currentEngineData.metrics.socket) : '';
+    const ovPort =
+      overrides[`${activeEngine}_port`] ||
+      (activeEngine === 'redis' ? overrides.valkey_port : '') ||
+      '';
+    const ovSocket =
+      overrides[`${activeEngine}_socket`] ||
+      (activeEngine === 'redis' ? overrides.valkey_socket : '') ||
+      '';
+    setConfigPort(ovPort || metricPort || defaultPortForEngine(activeEngine));
+    setConfigSocket(ovSocket || metricSocket || '');
+  }, [activeEngine, node?.pluginOverrides, currentEngineData.metrics?.port, currentEngineData.metrics?.socket]);
+
+  const handleSaveConnectionConfig = async () => {
+    if (!node?.id) return;
+    setSavingConfig(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const updatedOverrides: NonNullable<NodeItem['pluginOverrides']> = {
+        ...(node.pluginOverrides || {}),
+        [`${activeEngine}_port`]: configPort.trim() || defaultPortForEngine(activeEngine),
+      };
+      if (configSocket.trim()) {
+        updatedOverrides[`${activeEngine}_socket`] = configSocket.trim();
+      } else {
+        delete updatedOverrides[`${activeEngine}_socket`];
+      }
+      const putRes = await fetch(`/api/nodes/${encodeURIComponent(node.id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...node,
+          pluginOverrides: updatedOverrides,
+        }),
+      });
+      if (!putRes.ok) {
+        const errText = await putRes.text();
+        throw new Error(`Failed to save connection config: ${errText || putRes.statusText}`);
+      }
+      await fetch(`/api/nodes/${encodeURIComponent(node.id)}/plugins/refresh`, { method: 'POST' });
+      setNotice(`Saved ${activeEngine.toUpperCase()} connection settings (port ${updatedOverrides[`${activeEngine}_port`]}) and re-probed host.`);
+      await fetchData();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to save connection config');
+    } finally {
+      setSavingConfig(false);
+    }
   };
 
   const handleActionSubmit = async (values: Record<string, any>) => {
@@ -102,7 +191,7 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({ node, initialData, initial
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...values, engine: values.engine || activeEngine }),
+          body: JSON.stringify({ options: { ...values, engine: values.engine || activeEngine } }),
         }
       );
       if (!compileRes.ok) {
@@ -215,7 +304,7 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({ node, initialData, initial
         {/* Engine Tabs */}
         <div className="flex items-center gap-1 bg-[#121528] p-1 rounded border border-[#26293c]">
           {['redis', 'mongodb', 'couchdb', 'rocksdb'].map(eng => {
-            const detected = data?.engines?.some(e => e.engine === eng && e.status === 'active');
+            const detected = data?.engines?.some(e => (e.engine === eng || (eng === 'redis' && e.engine === 'valkey')) && e.status === 'active');
             const isSelected = activeEngine === eng;
             return (
               <button
@@ -239,6 +328,52 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({ node, initialData, initial
           })}
         </div>
       </div>
+
+      {/* Connection Config (Port & Socket) Bar */}
+      {activeEngine !== 'rocksdb' && (
+        <div className="bg-[#131627] border border-[#26293c] rounded p-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <div className="flex items-center gap-2 text-[#dfe1fa] font-bold">
+            <span className="material-symbols-outlined text-[15px] text-[#8cd6cb]">settings_ethernet</span>
+            <span>Connection Config ({activeEngine.toUpperCase()}):</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-1 text-[#8d909b]">
+              <span>TCP Port:</span>
+              <input
+                type="text"
+                value={configPort}
+                onChange={e => setConfigPort(e.target.value)}
+                placeholder={defaultPortForEngine(activeEngine)}
+                className="bg-[#0a0d1f] border border-[#26293c] rounded px-2 py-0.5 text-[11px] text-[#dfe1fa] w-20"
+              />
+            </label>
+            <label className="flex items-center gap-1 text-[#8d909b]">
+              <span>Unix Socket (optional):</span>
+              <input
+                type="text"
+                value={configSocket}
+                onChange={e => setConfigSocket(e.target.value)}
+                placeholder={
+                  activeEngine === 'redis'
+                    ? '/run/redis/redis.sock'
+                    : activeEngine === 'mongodb'
+                    ? `/tmp/mongodb-${configPort || '27017'}.sock`
+                    : '/run/couchdb/couchdb.sock'
+                }
+                className="bg-[#0a0d1f] border border-[#26293c] rounded px-2 py-0.5 text-[11px] text-[#dfe1fa] w-56"
+              />
+            </label>
+            <button
+              type="button"
+              disabled={savingConfig}
+              onClick={handleSaveConnectionConfig}
+              className="px-2.5 py-0.5 rounded bg-[#21263d] hover:bg-[#313754] disabled:opacity-50 text-[#b0c9ff] border border-[#b0c9ff]/40 font-bold cursor-pointer"
+            >
+              {savingConfig ? 'Saving...' : 'Save Port / Re-probe'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {notice && (
         <div className="bg-[#1b263b] text-[#8cd6cb] p-2 rounded border border-[#8cd6cb]/30 flex items-center justify-between">

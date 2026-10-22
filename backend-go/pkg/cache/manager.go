@@ -112,6 +112,7 @@ func (cm *CacheManager) cachePlugins(ctx context.Context, nodeID string) error {
 	runner, err := cm.runnerResolver.ResolveRunner(ctx, facts)
 	if err != nil {
 		log.Printf("cache: failed to resolve runner for %s: %v", nodeID, err)
+		cm.lastUpdate[nodeID] = time.Now().Add(30 * time.Second)
 		return err
 	}
 
@@ -124,8 +125,15 @@ func (cm *CacheManager) cachePlugins(ctx context.Context, nodeID string) error {
 			continue
 		}
 
-		// Probe the plugin
-		det, probeErr := p.Probe(ctx, runner, facts)
+		// Respect cache TTLs instead of re-probing fresh entries on every tick
+		if _, ok := cm.cache.Get(nodeID, meta.ID); ok {
+			continue
+		}
+
+		// Probe the plugin with a bounded 5s timeout
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		det, probeErr := p.Probe(probeCtx, runner, facts)
+		cancel()
 		if probeErr != nil {
 			det = plugin.Detection{
 				Detected: false,

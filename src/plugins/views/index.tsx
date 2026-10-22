@@ -315,11 +315,13 @@ const SystemLogsViewAdapter: React.FC<PluginViewProps> = ({ node }) => (
 
 const PodmanViewAdapter: React.FC<PluginViewProps> = ({
   node,
+  pluginId,
   onOpenLogs = () => {},
   onOpenExec = () => {},
 }) => (
   <PodmanManager
     selectedNode={node}
+    pluginId={pluginId}
     onOpenLogs={onOpenLogs}
     onOpenExec={onOpenExec}
     onRestartPod={() => {}}
@@ -480,10 +482,11 @@ export const PLUGIN_VIEW_REGISTRY: Record<string, PluginViewComponent> = {
  * Falls back to GenericPluginView if no custom view is registered.
  */
 export function getPluginView(pluginIdOrKind: string): PluginViewComponent {
-  if (PLUGIN_VIEW_REGISTRY[pluginIdOrKind]) {
-    return PLUGIN_VIEW_REGISTRY[pluginIdOrKind];
+  const baseId = (pluginIdOrKind || '').split(':')[0];
+  if (PLUGIN_VIEW_REGISTRY[baseId]) {
+    return PLUGIN_VIEW_REGISTRY[baseId];
   }
-  const kind = pluginIdOrKind.split('/')[0];
+  const kind = baseId.split('/')[0];
   if (PLUGIN_VIEW_REGISTRY[kind]) {
     return PLUGIN_VIEW_REGISTRY[kind];
   }

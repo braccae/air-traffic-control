@@ -164,6 +164,16 @@ export function parseDockerPsOutput(
   rawPsOutput: string,
   cliCheckOutput?: string
 ): DockerProbeResult {
+  if (
+    (cliCheckOutput && cliCheckOutput.toLowerCase().includes('podman')) ||
+    (rawPsOutput && rawPsOutput.toLowerCase().includes('emulate docker cli using podman'))
+  ) {
+    return {
+      hasDocker: false,
+      dockerContainers: [],
+    };
+  }
+
   const isCliFound = cliCheckOutput
     ? !cliCheckOutput.includes('NO_DOCKER') && cliCheckOutput.trim().length > 0
     : !rawPsOutput.includes('NO_DOCKER') && rawPsOutput.trim().length > 0;
@@ -176,7 +186,7 @@ export function parseDockerPsOutput(
     if (!line.includes(':::') || line.includes('{{')) continue;
     const parts = line.split(':::');
     if (parts.length < 4) continue;
-    const [id, name, image, status] = parts;
+    const [id, name, image, status, composeProject, composeService, composeConfigFiles] = parts;
     if (!id || !name) continue;
     const nameLower = name.toLowerCase();
     const imgLower = (image || '').toLowerCase();
@@ -188,7 +198,7 @@ export function parseDockerPsOutput(
     ) {
       continue;
     }
-    containers.push({
+    const item: ContainerItem = {
       id: id.slice(0, 12),
       name,
       image: image || 'docker/image:latest',
@@ -198,7 +208,11 @@ export function parseDockerPsOutput(
       user: 'docker',
       uid: 0,
       rootless: false,
-    });
+    };
+    if (composeProject?.trim()) item.composeProject = composeProject.trim();
+    if (composeService?.trim()) item.composeService = composeService.trim();
+    if (composeConfigFiles?.trim()) item.composeConfigFiles = composeConfigFiles.trim();
+    containers.push(item);
   }
 
   const hasDocker = Boolean(isCliFound || containers.length > 0);
@@ -424,6 +438,19 @@ export function countPodmanStatuses(
 
   if (dockerContainers && dockerContainers.length > 0) {
     result.docker = dockerContainers.length;
+    if (pods.length === 0 && daemons.length === 0) {
+      for (const dc of dockerContainers) {
+        const s = (dc.status || '').toLowerCase();
+        if (s.includes('running') || s.startsWith('up ')) {
+          running++;
+        } else {
+          stopped++;
+        }
+      }
+      result.all = running + stopped;
+      result.running = running;
+      result.stopped = stopped;
+    }
   }
 
   return result;

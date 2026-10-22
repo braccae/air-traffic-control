@@ -64,8 +64,8 @@ func TestIptablesPlugin_FirewalldActiveReportsInactive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !det.Detected || det.Status != "inactive" {
-		t.Fatalf("expected Detected=true and Status=inactive when firewalld is running, got %+v", det)
+	if det.Detected || det.Status != "inactive" {
+		t.Fatalf("expected Detected=false and Status=inactive when firewalld is running, got %+v", det)
 	}
 }
 

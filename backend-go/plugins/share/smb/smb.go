@@ -53,28 +53,40 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		return plugin.Detection{Detected: false, Status: "OFFLINE", Error: "runner is nil"}, nil
 	}
 
-	out, err := r.RunCommand(ctx, "sudo -n testparm -s 2>/dev/null || testparm -s 2>/dev/null || cat /etc/samba/smb.conf 2>/dev/null || true")
+	out, err := r.RunCommand(ctx, "(sudo -n testparm -s 2>/dev/null || testparm -s 2>/dev/null || cat /etc/samba/smb.conf /etc/samba/smb.conf.d/*.conf 2>/dev/null; sudo -n net conf list 2>/dev/null || net conf list 2>/dev/null; sudo -n cat /etc/cockpit/zfs/shares.conf 2>/dev/null) || true")
 	if err == nil && strings.TrimSpace(out) != "" && !strings.Contains(out, "NO_SAMBA") {
-		return plugin.Detection{
-			Detected: true,
-			Status:   "ONLINE",
-			Details:  "Samba configuration present",
-		}, nil
+		for _, line := range strings.Split(out, "\n") {
+			t := strings.TrimSpace(line)
+			if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
+				sec := strings.ToLower(strings.TrimSpace(t[1 : len(t)-1]))
+				if sec != "" && sec != "global" && sec != "homes" && sec != "printers" && sec != "print$" {
+					return plugin.Detection{
+						Detected: true,
+						Status:   "ONLINE",
+						Details:  "Samba shares configured",
+					}, nil
+				}
+			}
+		}
 	}
 
-	cmdOut, err := r.RunCommand(ctx, "command -v smbd || command -v samba")
-	if err == nil && strings.TrimSpace(cmdOut) != "" {
-		return plugin.Detection{
-			Detected: true,
-			Status:   "ONLINE",
-			Details:  "smbd binary found",
-		}, nil
+	svcOut, err := r.RunCommand(ctx, "systemctl is-active smb smbd 2>/dev/null || true")
+	if err == nil {
+		for _, l := range strings.Split(svcOut, "\n") {
+			if strings.TrimSpace(l) == "active" {
+				return plugin.Detection{
+					Detected: true,
+					Status:   "ONLINE",
+					Details:  "smbd service active",
+				}, nil
+			}
+		}
 	}
 
 	return plugin.Detection{
 		Detected: false,
 		Status:   "UNAVAILABLE",
-		Error:    "neither smb.conf nor smbd found",
+		Error:    "neither active Samba shares nor running smbd service found",
 	}, nil
 }
 

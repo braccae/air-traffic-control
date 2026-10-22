@@ -51,57 +51,105 @@ func (p *Plugin) Requirements() plugin.Requirements {
 	}
 }
 
-// Probe checks for installed SQL database engines (PostgreSQL, MariaDB/MySQL, MSSQL) on the host.
+// Probe checks for active SQL database engines (PostgreSQL, MariaDB/MySQL, MSSQL) on the host.
 func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (plugin.Detection, error) {
 	if r == nil {
 		return plugin.Detection{Detected: false, Status: "OFFLINE", Error: "runner is nil"}, nil
 	}
 
-	cmd := "command -v psql || command -v mysql || command -v mariadb || command -v sqlcmd || true"
-	out, err := r.RunCommand(ctx, cmd)
+	pgPort := firstNonEmpty(h.Overrides["postgres_port"], "5432")
+	pgSocket := h.Overrides["postgres_socket"]
+	mariaPort := firstNonEmpty(h.Overrides["mariadb_port"], h.Overrides["mysql_port"], "3306")
+	mariaSocket := firstNonEmpty(h.Overrides["mariadb_socket"], h.Overrides["mysql_socket"])
+	mssqlPort := firstNonEmpty(h.Overrides["mssql_port"], "1433")
+	mssqlSocket := h.Overrides["mssql_socket"]
+
+	detectedEngines := make([]string, 0)
+
+	// 1. Probe running SQL server processes (without -f or -a so the subshell never matches itself)
+	psOut, err := r.RunCommand(ctx, "pgrep -l '^(postgres|postmaster|mysqld|mariadbd|sqlservr)$' 2>/dev/null || true")
 	if err != nil {
 		return plugin.Detection{Detected: false, Status: "ERROR", Error: err.Error()}, nil
 	}
-
-	lines := strings.Fields(strings.TrimSpace(out))
-	detectedEngines := make([]string, 0)
-	for _, l := range lines {
-		base := l
-		if idx := strings.LastIndex(l, "/"); idx != -1 {
-			base = l[idx+1:]
-		}
-		switch base {
-		case "psql":
-			if !contains(detectedEngines, "postgres") {
-				detectedEngines = append(detectedEngines, "postgres")
-			}
-		case "mysql", "mariadb":
-			if !contains(detectedEngines, "mariadb") {
-				detectedEngines = append(detectedEngines, "mariadb")
-			}
-		case "sqlcmd":
-			if !contains(detectedEngines, "mssql") {
-				detectedEngines = append(detectedEngines, "mssql")
-			}
-		}
-	}
-
-	// Also probe running systemd/process services
-	psOut, _ := r.RunCommand(ctx, "pgrep -a -f 'postgres|mysqld|mariadbd|sqlservr' || true")
 	psLower := strings.ToLower(psOut)
-	if strings.Contains(psLower, "postgres") && !contains(detectedEngines, "postgres") {
-		detectedEngines = append(detectedEngines, "postgres")
+	if strings.Contains(psLower, "postgres") || strings.Contains(psLower, "postmaster") {
+		if !contains(detectedEngines, "postgres") {
+			detectedEngines = append(detectedEngines, "postgres")
+		}
 	}
-	if (strings.Contains(psLower, "mysqld") || strings.Contains(psLower, "mariadbd")) && !contains(detectedEngines, "mariadb") {
+	hasMysqld := strings.Contains(psLower, "mysqld")
+	hasMariadbd := strings.Contains(psLower, "mariadbd")
+	if hasMysqld && !contains(detectedEngines, "mariadb") {
 		detectedEngines = append(detectedEngines, "mariadb")
+	} else if hasMariadbd && !contains(detectedEngines, "mariadb") {
+		// Verify mariadbd is not solely KDE Akonadi private user session
+		akOut, _ := r.RunCommand(ctx, "pgrep -a '^mariadbd$' 2>/dev/null || true")
+		nonAkonadi := false
+		if strings.TrimSpace(akOut) == "" {
+			// Mock runner or system where pgrep -a is empty -> accept the pgrep -l match
+			nonAkonadi = true
+		} else {
+			for _, line := range strings.Split(strings.TrimSpace(akOut), "\n") {
+				if strings.TrimSpace(line) != "" && !strings.Contains(strings.ToLower(line), "akonadi") {
+					nonAkonadi = true
+					break
+				}
+			}
+		}
+		if nonAkonadi {
+			detectedEngines = append(detectedEngines, "mariadb")
+		}
 	}
 	if strings.Contains(psLower, "sqlservr") && !contains(detectedEngines, "mssql") {
 		detectedEngines = append(detectedEngines, "mssql")
 	}
 
-	// Also check host overrides
+	// 2. Probe Unix sockets and listening TCP ports
+	sockProbeCmd := fmt.Sprintf(
+		"for s in %s /run/postgresql/.s.PGSQL.%s /var/run/postgresql/.s.PGSQL.%s /run/postgres/.s.PGSQL.%s /tmp/.s.PGSQL.%s; do [ -n \"$s\" ] && [ -S \"$s\" ] && echo \"PG_SOCK:$s\" && break; done; "+
+			"for s in %s /run/mysqld/mysqld.sock /var/run/mysqld/mysqld.sock /var/lib/mysql/mysql.sock /run/mariadb/mariadb.sock /tmp/mysql.sock; do [ -n \"$s\" ] && [ -S \"$s\" ] && echo \"MARIA_SOCK:$s\" && break; done; "+
+			"for s in %s /var/opt/mssql/.system/mssql.sock; do [ -n \"$s\" ] && [ -S \"$s\" ] && echo \"MSSQL_SOCK:$s\" && break; done; "+
+			"echo '===SS==='; ss -ltn 2>/dev/null || true",
+		escapeArg(pgSocket), pgPort, pgPort, pgPort, pgPort,
+		escapeArg(mariaSocket),
+		escapeArg(mssqlSocket),
+	)
+	sockOut, _ := r.RunCommand(ctx, sockProbeCmd)
+	parts := strings.Split(sockOut, "===SS===")
+	sockPart := parts[0]
+	ssPart := ""
+	if len(parts) > 1 {
+		ssPart = parts[1]
+	}
+
+	if strings.Contains(sockPart, "PG_SOCK:") || hasListeningPort(ssPart, pgPort) {
+		if !contains(detectedEngines, "postgres") {
+			detectedEngines = append(detectedEngines, "postgres")
+		}
+	}
+	if strings.Contains(sockPart, "MARIA_SOCK:") || hasListeningPort(ssPart, mariaPort) {
+		if !contains(detectedEngines, "mariadb") {
+			detectedEngines = append(detectedEngines, "mariadb")
+		}
+	}
+	if strings.Contains(sockPart, "MSSQL_SOCK:") || hasListeningPort(ssPart, mssqlPort) {
+		if !contains(detectedEngines, "mssql") {
+			detectedEngines = append(detectedEngines, "mssql")
+		}
+	}
+
+	// 3. Also check explicit host overrides
 	if eng, ok := h.Overrides["sql_engine"]; ok && eng != "" && !contains(detectedEngines, eng) {
 		detectedEngines = append(detectedEngines, eng)
+	}
+	if (h.Overrides["postgres_host"] != "" || h.Overrides["postgres_port"] != "" || h.Overrides["postgres_socket"] != "") && !contains(detectedEngines, "postgres") {
+		detectedEngines = append(detectedEngines, "postgres")
+	}
+	if (h.Overrides["mariadb_host"] != "" || h.Overrides["mariadb_port"] != "" || h.Overrides["mariadb_socket"] != "" || h.Overrides["mysql_port"] != "" || h.Overrides["mysql_socket"] != "") && !contains(detectedEngines, "mariadb") {
+		detectedEngines = append(detectedEngines, "mariadb")
+	}
+	if (h.Overrides["mssql_host"] != "" || h.Overrides["mssql_port"] != "" || h.Overrides["mssql_socket"] != "") && !contains(detectedEngines, "mssql") {
+		detectedEngines = append(detectedEngines, "mssql")
 	}
 
 	if len(detectedEngines) == 0 {
@@ -145,10 +193,14 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 
 	engines := make([]EngineStatus, 0)
 
+	det, _ := p.Probe(ctx, r, h)
+	detLower := strings.ToLower(det.Status + " " + det.Details)
+
 	// 1. Inspect PostgreSQL
 	psqlCli, _ := r.RunCommand(ctx, "command -v psql || true")
-	if strings.TrimSpace(psqlCli) != "" || h.Overrides["postgres_host"] != "" {
-		st := inspectPostgres(ctx, r, strings.TrimSpace(psqlCli), h)
+	psqlCli = strings.TrimSpace(psqlCli)
+	if psqlCli != "" || strings.Contains(detLower, "postgres") || h.Overrides["postgres_host"] != "" || h.Overrides["postgres_port"] != "" || h.Overrides["postgres_socket"] != "" {
+		st := inspectPostgres(ctx, r, psqlCli, h, strings.Contains(detLower, "postgres"))
 		if st != nil {
 			engines = append(engines, *st)
 		}
@@ -156,8 +208,9 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 
 	// 2. Inspect MariaDB / MySQL
 	mysqlCli, _ := r.RunCommand(ctx, "command -v mariadb || command -v mysql || true")
-	if strings.TrimSpace(mysqlCli) != "" || h.Overrides["mariadb_host"] != "" {
-		st := inspectMariaDB(ctx, r, strings.TrimSpace(mysqlCli), h)
+	mysqlCli = strings.TrimSpace(mysqlCli)
+	if mysqlCli != "" || strings.Contains(detLower, "mariadb") || h.Overrides["mariadb_host"] != "" || h.Overrides["mariadb_port"] != "" || h.Overrides["mariadb_socket"] != "" || h.Overrides["mysql_port"] != "" || h.Overrides["mysql_socket"] != "" {
+		st := inspectMariaDB(ctx, r, mysqlCli, h, strings.Contains(detLower, "mariadb"))
 		if st != nil {
 			engines = append(engines, *st)
 		}
@@ -165,8 +218,9 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 
 	// 3. Inspect MSSQL
 	mssqlCli, _ := r.RunCommand(ctx, "command -v sqlcmd || true")
-	if strings.TrimSpace(mssqlCli) != "" || h.Overrides["mssql_host"] != "" {
-		st := inspectMSSQL(ctx, r, strings.TrimSpace(mssqlCli), h)
+	mssqlCli = strings.TrimSpace(mssqlCli)
+	if mssqlCli != "" || strings.Contains(detLower, "mssql") || h.Overrides["mssql_host"] != "" || h.Overrides["mssql_port"] != "" || h.Overrides["mssql_socket"] != "" {
+		st := inspectMSSQL(ctx, r, mssqlCli, h, strings.Contains(detLower, "mssql"))
 		if st != nil {
 			engines = append(engines, *st)
 		}
@@ -178,22 +232,61 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}, nil
 }
 
-func inspectPostgres(ctx context.Context, r plugin.Runner, cli string, h plugin.HostFacts) *EngineStatus {
-	if cli == "" {
-		cli = "psql"
+func inspectPostgres(ctx context.Context, r plugin.Runner, cli string, h plugin.HostFacts, detected bool) *EngineStatus {
+	port := firstNonEmpty(h.Overrides["postgres_port"], "5432")
+	socketOverride := h.Overrides["postgres_socket"]
+	metrics := map[string]any{"port": port}
+	if socketOverride != "" {
+		metrics["socket"] = socketOverride
 	}
-	opts := buildPostgresFlags(h)
 
-	// Test connection and query version
-	cmd := fmt.Sprintf("%s %s -t -A -c 'SELECT version();' 2>/dev/null || true", cli, opts)
-	verOut, err := r.RunCommand(ctx, cmd)
-	if err != nil || strings.TrimSpace(verOut) == "" {
+	runPsql := func(sqlQuery string) string {
+		if cli != "" {
+			opts := buildPostgresFlags(h)
+			cmd := fmt.Sprintf("%s %s -t -A -c %s 2>/dev/null || true", cli, opts, escapeArg(sqlQuery))
+			if out, err := r.RunCommand(ctx, cmd); err == nil && strings.TrimSpace(out) != "" {
+				return out
+			}
+			// Try common Unix socket directories or 127.0.0.1 fallback if default failed
+			sockDirs := []string{"/run/postgresql", "/var/run/postgresql", "/run/postgres", "/tmp"}
+			if socketOverride != "" {
+				if idx := strings.LastIndex(socketOverride, "/"); idx > 0 {
+					sockDirs = append([]string{socketOverride[:idx]}, sockDirs...)
+				}
+			}
+			for _, dir := range sockDirs {
+				tryCmd := fmt.Sprintf("[ -S %s/.s.PGSQL.%s ] && (sudo -n -u postgres %s -h %s -p %s -t -A -c %s 2>/dev/null || %s -h %s -p %s -t -A -c %s 2>/dev/null) || true",
+					escapeArg(dir), port, cli, escapeArg(dir), port, escapeArg(sqlQuery), cli, escapeArg(dir), port, escapeArg(sqlQuery))
+				if out, err := r.RunCommand(ctx, tryCmd); err == nil && strings.TrimSpace(out) != "" {
+					metrics["socket"] = fmt.Sprintf("%s/.s.PGSQL.%s", dir, port)
+					return out
+				}
+			}
+		}
+		// Container exec fallback (Podman / Docker)
+		ctrCmd := fmt.Sprintf(
+			"for rt in 'sudo -n podman' podman 'sudo -n docker' docker; do "+
+				"cid=$($rt ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -iE 'postgres|postgis|timescale|pgvector' | awk '{print $1}' | head -n1); "+
+				"if [ -n \"$cid\" ]; then $rt exec \"$cid\" sh -c \"psql -U \\${POSTGRES_USER:-postgres} -t -A -c %s\" 2>/dev/null && break; fi; "+
+				"done || true",
+			escapeArg(sqlQuery),
+		)
+		out, _ := r.RunCommand(ctx, ctrCmd)
+		return out
+	}
+
+	verOut := runPsql("SELECT version();")
+	if strings.TrimSpace(verOut) == "" {
+		status := "inactive"
+		if detected {
+			status = "active"
+		}
 		return &EngineStatus{
 			Engine:    "postgres",
-			Status:    "inactive",
+			Status:    status,
 			Databases: []string{},
 			Users:     []EngineUser{},
-			Metrics:   map[string]any{},
+			Metrics:   metrics,
 		}
 	}
 
@@ -203,8 +296,7 @@ func inspectPostgres(ctx context.Context, r plugin.Runner, cli string, h plugin.
 	}
 
 	// List databases
-	dbCmd := fmt.Sprintf("%s %s -t -A -c 'SELECT datname FROM pg_database WHERE datistemplate = false;' 2>/dev/null || true", cli, opts)
-	dbOut, _ := r.RunCommand(ctx, dbCmd)
+	dbOut := runPsql("SELECT datname FROM pg_database WHERE datistemplate = false;")
 	databases := make([]string, 0)
 	for _, l := range strings.Split(dbOut, "\n") {
 		l = strings.TrimSpace(l)
@@ -215,8 +307,15 @@ func inspectPostgres(ctx context.Context, r plugin.Runner, cli string, h plugin.
 	sort.Strings(databases)
 
 	// List users and attributes
-	userCmd := fmt.Sprintf("%s %s -t -A -F'|' -c 'SELECT usename, usesuper, usecreatedb FROM pg_user;' 2>/dev/null || true", cli, opts)
-	userOut, _ := r.RunCommand(ctx, userCmd)
+	var userOut string
+	if cli != "" {
+		opts := buildPostgresFlags(h)
+		userCmd := fmt.Sprintf("%s %s -t -A -F'|' -c 'SELECT usename, usesuper, usecreatedb FROM pg_user;' 2>/dev/null || true", cli, opts)
+		userOut, _ = r.RunCommand(ctx, userCmd)
+	}
+	if strings.TrimSpace(userOut) == "" {
+		userOut = runPsql("SELECT usename || '|' || usesuper || '|' || usecreatedb FROM pg_user;")
+	}
 	users := make([]EngineUser, 0)
 	for _, l := range strings.Split(userOut, "\n") {
 		l = strings.TrimSpace(l)
@@ -225,19 +324,17 @@ func inspectPostgres(ctx context.Context, r plugin.Runner, cli string, h plugin.
 		}
 		parts := strings.Split(l, "|")
 		u := EngineUser{Username: parts[0], Roles: make([]string, 0)}
-		if len(parts) > 1 && parts[1] == "t" {
+		if len(parts) > 1 && (parts[1] == "t" || parts[1] == "true") {
 			u.Roles = append(u.Roles, "superuser")
 		}
-		if len(parts) > 2 && parts[2] == "t" {
+		if len(parts) > 2 && (parts[2] == "t" || parts[2] == "true") {
 			u.Roles = append(u.Roles, "createdb")
 		}
 		users = append(users, u)
 	}
 
-	// Metrics: connections and size
-	metrics := make(map[string]any)
-	statCmd := fmt.Sprintf("%s %s -t -A -c 'SELECT count(*) FROM pg_stat_activity;' 2>/dev/null || true", cli, opts)
-	if statOut, err := r.RunCommand(ctx, statCmd); err == nil && strings.TrimSpace(statOut) != "" {
+	// Metrics: connections
+	if statOut := runPsql("SELECT count(*) FROM pg_stat_activity;"); strings.TrimSpace(statOut) != "" {
 		metrics["active_connections"] = strings.TrimSpace(statOut)
 	}
 
@@ -251,29 +348,66 @@ func inspectPostgres(ctx context.Context, r plugin.Runner, cli string, h plugin.
 	}
 }
 
-func inspectMariaDB(ctx context.Context, r plugin.Runner, cli string, h plugin.HostFacts) *EngineStatus {
-	if cli == "" {
-		cli = "mysql"
+func inspectMariaDB(ctx context.Context, r plugin.Runner, cli string, h plugin.HostFacts, detected bool) *EngineStatus {
+	port := firstNonEmpty(h.Overrides["mariadb_port"], h.Overrides["mysql_port"], "3306")
+	socketOverride := firstNonEmpty(h.Overrides["mariadb_socket"], h.Overrides["mysql_socket"])
+	metrics := map[string]any{"port": port}
+	if socketOverride != "" {
+		metrics["socket"] = socketOverride
 	}
-	opts := buildMariaDBFlags(h)
 
-	cmd := fmt.Sprintf("%s %s -s -N -e 'SELECT VERSION();' 2>/dev/null || true", cli, opts)
-	verOut, err := r.RunCommand(ctx, cmd)
-	if err != nil || strings.TrimSpace(verOut) == "" {
+	runMysql := func(sqlQuery string) string {
+		if cli != "" {
+			opts := buildMariaDBFlags(h)
+			cmd := fmt.Sprintf("%s %s -s -N -e %s 2>/dev/null || true", cli, opts, escapeArg(sqlQuery))
+			if out, err := r.RunCommand(ctx, cmd); err == nil && strings.TrimSpace(out) != "" {
+				return out
+			}
+			// Try common Unix sockets with sudo/direct fallback
+			sockets := []string{"/run/mysqld/mysqld.sock", "/var/run/mysqld/mysqld.sock", "/var/lib/mysql/mysql.sock", "/run/mariadb/mariadb.sock", "/tmp/mysql.sock"}
+			if socketOverride != "" {
+				sockets = append([]string{socketOverride}, sockets...)
+			}
+			for _, sock := range sockets {
+				tryCmd := fmt.Sprintf("[ -S %s ] && (sudo -n %s -S %s -s -N -e %s 2>/dev/null || %s -S %s -s -N -e %s 2>/dev/null) || true",
+					escapeArg(sock), cli, escapeArg(sock), escapeArg(sqlQuery), cli, escapeArg(sock), escapeArg(sqlQuery))
+				if out, err := r.RunCommand(ctx, tryCmd); err == nil && strings.TrimSpace(out) != "" {
+					metrics["socket"] = sock
+					return out
+				}
+			}
+		}
+		// Container exec fallback
+		ctrCmd := fmt.Sprintf(
+			"for rt in 'sudo -n podman' podman 'sudo -n docker' docker; do "+
+				"cid=$($rt ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -iE 'mariadb|mysql' | awk '{print $1}' | head -n1); "+
+				"if [ -n \"$cid\" ]; then $rt exec \"$cid\" sh -c \"(mariadb -u root -p\\\"\\${MARIADB_ROOT_PASSWORD:-\\${MYSQL_ROOT_PASSWORD}}\\\" -s -N -e %s || mysql -u root -p\\\"\\${MARIADB_ROOT_PASSWORD:-\\${MYSQL_ROOT_PASSWORD}}\\\" -s -N -e %s)\" 2>/dev/null && break; fi; "+
+				"done || true",
+			escapeArg(sqlQuery), escapeArg(sqlQuery),
+		)
+		out, _ := r.RunCommand(ctx, ctrCmd)
+		return out
+	}
+
+	verOut := runMysql("SELECT VERSION();")
+	if strings.TrimSpace(verOut) == "" {
+		status := "inactive"
+		if detected {
+			status = "active"
+		}
 		return &EngineStatus{
 			Engine:    "mariadb",
-			Status:    "inactive",
+			Status:    status,
 			Databases: []string{},
 			Users:     []EngineUser{},
-			Metrics:   map[string]any{},
+			Metrics:   metrics,
 		}
 	}
 
 	version := strings.TrimSpace(verOut)
 
 	// List databases
-	dbCmd := fmt.Sprintf("%s %s -s -N -e 'SHOW DATABASES;' 2>/dev/null || true", cli, opts)
-	dbOut, _ := r.RunCommand(ctx, dbCmd)
+	dbOut := runMysql("SHOW DATABASES;")
 	databases := make([]string, 0)
 	for _, l := range strings.Split(dbOut, "\n") {
 		l = strings.TrimSpace(l)
@@ -284,8 +418,7 @@ func inspectMariaDB(ctx context.Context, r plugin.Runner, cli string, h plugin.H
 	sort.Strings(databases)
 
 	// List users
-	userCmd := fmt.Sprintf("%s %s -s -N -e 'SELECT User, Host FROM mysql.user;' 2>/dev/null || true", cli, opts)
-	userOut, _ := r.RunCommand(ctx, userCmd)
+	userOut := runMysql("SELECT User, Host FROM mysql.user;")
 	users := make([]EngineUser, 0)
 	for _, l := range strings.Split(userOut, "\n") {
 		fields := strings.Fields(l)
@@ -298,9 +431,7 @@ func inspectMariaDB(ctx context.Context, r plugin.Runner, cli string, h plugin.H
 		}
 	}
 
-	metrics := make(map[string]any)
-	threadCmd := fmt.Sprintf("%s %s -s -N -e \"SHOW GLOBAL STATUS LIKE 'Threads_connected';\" 2>/dev/null || true", cli, opts)
-	if thOut, err := r.RunCommand(ctx, threadCmd); err == nil {
+	if thOut := runMysql("SHOW GLOBAL STATUS LIKE 'Threads_connected';"); strings.TrimSpace(thOut) != "" {
 		thParts := strings.Fields(thOut)
 		if len(thParts) >= 2 {
 			metrics["threads_connected"] = thParts[1]
@@ -317,21 +448,31 @@ func inspectMariaDB(ctx context.Context, r plugin.Runner, cli string, h plugin.H
 	}
 }
 
-func inspectMSSQL(ctx context.Context, r plugin.Runner, cli string, h plugin.HostFacts) *EngineStatus {
+func inspectMSSQL(ctx context.Context, r plugin.Runner, cli string, h plugin.HostFacts, detected bool) *EngineStatus {
 	if cli == "" {
 		cli = "sqlcmd"
+	}
+	port := firstNonEmpty(h.Overrides["mssql_port"], "1433")
+	socketOverride := h.Overrides["mssql_socket"]
+	metrics := map[string]any{"port": port}
+	if socketOverride != "" {
+		metrics["socket"] = socketOverride
 	}
 	opts := buildMSSQLFlags(h)
 
 	cmd := fmt.Sprintf("%s %s -h -1 -W -Q 'SELECT @@VERSION;' 2>/dev/null || true", cli, opts)
 	verOut, err := r.RunCommand(ctx, cmd)
 	if err != nil || strings.TrimSpace(verOut) == "" {
+		status := "inactive"
+		if detected {
+			status = "active"
+		}
 		return &EngineStatus{
 			Engine:    "mssql",
-			Status:    "inactive",
+			Status:    status,
 			Databases: []string{},
 			Users:     []EngineUser{},
-			Metrics:   map[string]any{},
+			Metrics:   metrics,
 		}
 	}
 
@@ -373,7 +514,7 @@ func inspectMSSQL(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 		Version:   version,
 		Databases: databases,
 		Users:     users,
-		Metrics:   map[string]any{},
+		Metrics:   metrics,
 	}
 }
 
@@ -919,4 +1060,30 @@ func truncate(s string, maxLen int) string {
 
 func escapeArg(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func hasListeningPort(ssOut, port string) bool {
+	port = strings.TrimSpace(port)
+	if port == "" || strings.TrimSpace(ssOut) == "" {
+		return false
+	}
+	suffix := ":" + port
+	for _, line := range strings.Split(ssOut, "\n") {
+		fields := strings.Fields(line)
+		for _, f := range fields {
+			if strings.HasSuffix(f, suffix) {
+				return true
+			}
+		}
+	}
+	return false
 }

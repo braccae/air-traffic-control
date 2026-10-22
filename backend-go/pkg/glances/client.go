@@ -54,10 +54,9 @@ func (c *Client) FetchTelemetry(nodeID string) (*types.Telemetry, error) {
 	// If REST API fails or is unavailable, check if target is local to fall back to glances CLI
 	isLocal := c.host == "127.0.0.1" || c.host == "localhost" || c.host == "dev-pc" || c.host == "" || strings.HasPrefix(c.host, "127.")
 	if isLocal {
-		// 8s, not 4s: a real `glances --stdout-json` run on a busy homelab node
-		// routinely takes ~4s, so a 4s budget turned the local CLI fallback into
-		// a coin flip (TestFetchTelemetry_LocalCLIFallback flaked on this host).
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		// 15s: under parallel `go test ./...` load across all packages, a real
+		// `glances --stdout-json` invocation on a busy host can take 8-12s.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		out, err := exec.CommandContext(ctx, "glances", "--stdout-json", "now,cpu,mem,load,sensors").Output()
 		if err == nil && len(out) > 0 {

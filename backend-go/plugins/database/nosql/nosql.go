@@ -52,42 +52,28 @@ func (p *Plugin) Requirements() plugin.Requirements {
 	}
 }
 
-// Probe checks for installed NoSQL engines (Redis/Valkey, MongoDB, CouchDB, RocksDB) on the host.
+// Probe checks for active NoSQL engines (Redis/Valkey, MongoDB, CouchDB, RocksDB) on the host.
 func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (plugin.Detection, error) {
 	if r == nil {
 		return plugin.Detection{Detected: false, Status: "OFFLINE", Error: "runner is nil"}, nil
 	}
 
-	// Probe commands for detected engines
-	cmd := "command -v redis-cli || command -v valkey-cli || command -v mongosh || command -v mongo || command -v couchdb || command -v couchdb-cli || command -v ldb || command -v rocksdb_dump || true"
-	out, err := r.RunCommand(ctx, cmd)
+	redisPort := firstNonEmpty(h.Overrides["redis_port"], "6379")
+	redisSocket := h.Overrides["redis_socket"]
+	valkeyPort := firstNonEmpty(h.Overrides["valkey_port"], "6379")
+	valkeySocket := h.Overrides["valkey_socket"]
+	mongoPort := firstNonEmpty(h.Overrides["mongodb_port"], "27017")
+	mongoSocket := h.Overrides["mongodb_socket"]
+	couchPort := firstNonEmpty(h.Overrides["couchdb_port"], "5984")
+	couchSocket := h.Overrides["couchdb_socket"]
+
+	detectedEngines := make([]string, 0)
+
+	// 1. Probe running server processes (without -f or -a so the subshell never matches itself)
+	psOut, err := r.RunCommand(ctx, "pgrep -l '^(redis-server|valkey-server|mongod|couchdb)$' 2>/dev/null || true")
 	if err != nil {
 		return plugin.Detection{Detected: false, Status: "ERROR", Error: err.Error()}, nil
 	}
-
-	lines := strings.Fields(strings.TrimSpace(out))
-	detectedEngines := make([]string, 0)
-	for _, l := range lines {
-		base := l
-		if idx := strings.LastIndex(l, "/"); idx != -1 {
-			base = l[idx+1:]
-		}
-		switch base {
-		case "redis-cli":
-			detectedEngines = append(detectedEngines, "redis")
-		case "valkey-cli":
-			detectedEngines = append(detectedEngines, "valkey")
-		case "mongosh", "mongo":
-			detectedEngines = append(detectedEngines, "mongodb")
-		case "couchdb", "couchdb-cli":
-			detectedEngines = append(detectedEngines, "couchdb")
-		case "ldb", "rocksdb_dump":
-			detectedEngines = append(detectedEngines, "rocksdb")
-		}
-	}
-
-	// Also check running systemd / port processes if available
-	psOut, _ := r.RunCommand(ctx, "pgrep -a -f 'redis-server|valkey-server|mongod|couchdb' || true")
 	psLower := strings.ToLower(psOut)
 	if strings.Contains(psLower, "redis-server") && !contains(detectedEngines, "redis") {
 		detectedEngines = append(detectedEngines, "redis")
@@ -102,9 +88,88 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		detectedEngines = append(detectedEngines, "couchdb")
 	}
 
-	// Also check host overrides
+	// 2. Probe Unix sockets, listening TCP ports, and RocksDB directory
+	probeCmd := fmt.Sprintf(
+		"for s in %s /run/redis/redis.sock /var/run/redis/redis.sock /run/redis/redis-server.sock /tmp/redis.sock; do [ -n \"$s\" ] && [ -S \"$s\" ] && echo \"REDIS_SOCK:$s\" && break; done; "+
+			"for s in %s /run/valkey/valkey.sock /var/run/valkey/valkey.sock; do [ -n \"$s\" ] && [ -S \"$s\" ] && echo \"VALKEY_SOCK:$s\" && break; done; "+
+			"for s in %s /tmp/mongodb-%s.sock /tmp/mongodb-27017.sock /run/mongodb/mongod.sock /var/run/mongodb/mongod.sock; do [ -n \"$s\" ] && [ -S \"$s\" ] && echo \"MONGO_SOCK:$s\" && break; done; "+
+			"for s in %s /run/couchdb/couchdb.sock; do [ -n \"$s\" ] && [ -S \"$s\" ] && echo \"COUCH_SOCK:$s\" && break; done; "+
+			"[ -d /var/lib/rocksdb ] && echo \"ROCKSDB_DIR:/var/lib/rocksdb\"; "+
+			"echo '===SS==='; ss -ltn 2>/dev/null || true",
+		escapeArg(redisSocket),
+		escapeArg(valkeySocket),
+		escapeArg(mongoSocket), mongoPort,
+		escapeArg(couchSocket),
+	)
+	probeOut, _ := r.RunCommand(ctx, probeCmd)
+	parts := strings.Split(probeOut, "===SS===")
+	sockPart := parts[0]
+	ssPart := ""
+	if len(parts) > 1 {
+		ssPart = parts[1]
+	}
+
+	if strings.Contains(sockPart, "REDIS_SOCK:") || hasListeningPort(ssPart, redisPort) {
+		if !contains(detectedEngines, "redis") && !contains(detectedEngines, "valkey") {
+			detectedEngines = append(detectedEngines, "redis")
+		}
+	}
+	if strings.Contains(sockPart, "VALKEY_SOCK:") || (valkeyPort != redisPort && hasListeningPort(ssPart, valkeyPort)) {
+		if !contains(detectedEngines, "valkey") {
+			detectedEngines = append(detectedEngines, "valkey")
+		}
+	}
+	if strings.Contains(sockPart, "MONGO_SOCK:") {
+		if !contains(detectedEngines, "mongodb") {
+			detectedEngines = append(detectedEngines, "mongodb")
+		}
+	} else if !contains(detectedEngines, "mongodb") && hasListeningPort(ssPart, mongoPort) {
+		if h.Overrides["mongodb_port"] != "" {
+			detectedEngines = append(detectedEngines, "mongodb")
+		} else {
+			// Verify port is backed by an active listener (not a dead pod port-forward)
+			chkOut, _ := r.RunCommand(ctx, fmt.Sprintf("curl -s -m 1 http://127.0.0.1:%s/ >/dev/null 2>&1; rc=$?; [ \"$rc\" -ne 7 ] && echo \"MONGO_ALIVE\" || true", mongoPort))
+			if strings.Contains(chkOut, "MONGO_ALIVE") {
+				detectedEngines = append(detectedEngines, "mongodb")
+			}
+		}
+	}
+	if strings.Contains(sockPart, "COUCH_SOCK:") {
+		if !contains(detectedEngines, "couchdb") {
+			detectedEngines = append(detectedEngines, "couchdb")
+		}
+	} else if !contains(detectedEngines, "couchdb") && hasListeningPort(ssPart, couchPort) {
+		if h.Overrides["couchdb_port"] != "" {
+			detectedEngines = append(detectedEngines, "couchdb")
+		} else {
+			chkOut, _ := r.RunCommand(ctx, fmt.Sprintf("curl -s -m 1 http://127.0.0.1:%s/ >/dev/null 2>&1; rc=$?; [ \"$rc\" -ne 7 ] && echo \"COUCH_ALIVE\" || true", couchPort))
+			if strings.Contains(chkOut, "COUCH_ALIVE") {
+				detectedEngines = append(detectedEngines, "couchdb")
+			}
+		}
+	}
+	if strings.Contains(sockPart, "ROCKSDB_DIR:") && !contains(detectedEngines, "rocksdb") {
+		detectedEngines = append(detectedEngines, "rocksdb")
+	}
+
+	// 3. Also check host overrides
 	if eng, ok := h.Overrides["nosql_engine"]; ok && eng != "" && !contains(detectedEngines, eng) {
 		detectedEngines = append(detectedEngines, eng)
+	}
+	if (h.Overrides["redis_host"] != "" || h.Overrides["redis_port"] != "" || h.Overrides["redis_socket"] != "") && !contains(detectedEngines, "redis") {
+		detectedEngines = append(detectedEngines, "redis")
+	}
+	if (h.Overrides["valkey_host"] != "" || h.Overrides["valkey_port"] != "" || h.Overrides["valkey_socket"] != "") && !contains(detectedEngines, "valkey") {
+		detectedEngines = append(detectedEngines, "valkey")
+	}
+	if (h.Overrides["mongodb_uri"] != "" || h.Overrides["mongodb_host"] != "" || h.Overrides["mongodb_port"] != "" || h.Overrides["mongodb_socket"] != "") && !contains(detectedEngines, "mongodb") {
+		detectedEngines = append(detectedEngines, "mongodb")
+	}
+	if (h.Overrides["couchdb_host"] != "" || h.Overrides["couchdb_port"] != "" || h.Overrides["couchdb_socket"] != "") && !contains(detectedEngines, "couchdb") {
+		detectedEngines = append(detectedEngines, "couchdb")
+	}
+	if h.Overrides["rocksdb_path"] != "" && !contains(detectedEngines, "rocksdb") {
+		detectedEngines = append(detectedEngines, "rocksdb")
 	}
 
 	if len(detectedEngines) == 0 {
@@ -149,11 +214,15 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 
 	engines := make([]EngineStatus, 0)
 
+	det, _ := p.Probe(ctx, r, h)
+	detLower := strings.ToLower(det.Status + " " + det.Details)
+
 	// 1. Inspect Redis / Valkey
 	rCli, _ := r.RunCommand(ctx, "command -v redis-cli || command -v valkey-cli || true")
 	rCli = strings.TrimSpace(rCli)
-	if rCli != "" {
-		st := inspectRedis(ctx, r, rCli, h)
+	isRedisDet := strings.Contains(detLower, "redis") || strings.Contains(detLower, "valkey")
+	if rCli != "" || isRedisDet || h.Overrides["redis_host"] != "" || h.Overrides["redis_port"] != "" || h.Overrides["redis_socket"] != "" || h.Overrides["valkey_port"] != "" || h.Overrides["valkey_socket"] != "" {
+		st := inspectRedis(ctx, r, rCli, h, isRedisDet)
 		if st != nil {
 			engines = append(engines, *st)
 		}
@@ -162,8 +231,9 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	// 2. Inspect MongoDB
 	mCli, _ := r.RunCommand(ctx, "command -v mongosh || command -v mongo || true")
 	mCli = strings.TrimSpace(mCli)
-	if mCli != "" {
-		st := inspectMongo(ctx, r, mCli, h)
+	isMongoDet := strings.Contains(detLower, "mongodb")
+	if mCli != "" || isMongoDet || h.Overrides["mongodb_uri"] != "" || h.Overrides["mongodb_host"] != "" || h.Overrides["mongodb_port"] != "" || h.Overrides["mongodb_socket"] != "" {
+		st := inspectMongo(ctx, r, mCli, h, isMongoDet)
 		if st != nil {
 			engines = append(engines, *st)
 		}
@@ -171,8 +241,9 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 
 	// 3. Inspect CouchDB
 	couchPath, _ := r.RunCommand(ctx, "command -v couchdb || curl -s -m 2 http://127.0.0.1:5984/ 2>/dev/null || true")
-	if strings.TrimSpace(couchPath) != "" && (strings.Contains(couchPath, "couchdb") || strings.Contains(couchPath, "Welcome")) {
-		st := inspectCouchDB(ctx, r, h)
+	isCouchDet := strings.Contains(detLower, "couchdb")
+	if isCouchDet || h.Overrides["couchdb_host"] != "" || h.Overrides["couchdb_port"] != "" || h.Overrides["couchdb_socket"] != "" || (strings.TrimSpace(couchPath) != "" && (strings.Contains(couchPath, "couchdb") || strings.Contains(couchPath, "Welcome"))) {
+		st := inspectCouchDB(ctx, r, h, isCouchDet)
 		if st != nil {
 			engines = append(engines, *st)
 		}
@@ -180,7 +251,8 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 
 	// 4. Inspect RocksDB (CLI / files)
 	rocksCli, _ := r.RunCommand(ctx, "command -v ldb || command -v rocksdb_dump || true")
-	if strings.TrimSpace(rocksCli) != "" || h.Overrides["rocksdb_path"] != "" {
+	isRocksDet := strings.Contains(detLower, "rocksdb")
+	if isRocksDet || strings.TrimSpace(rocksCli) != "" || h.Overrides["rocksdb_path"] != "" {
 		st := inspectRocksDB(ctx, r, strings.TrimSpace(rocksCli), h)
 		if st != nil {
 			engines = append(engines, *st)
@@ -193,36 +265,77 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}, nil
 }
 
-func inspectRedis(ctx context.Context, r plugin.Runner, cli string, h plugin.HostFacts) *EngineStatus {
-	// Execute info command via redis-cli
+func inspectRedis(ctx context.Context, r plugin.Runner, cli string, h plugin.HostFacts, detected bool) *EngineStatus {
+	port := firstNonEmpty(h.Overrides["redis_port"], h.Overrides["valkey_port"], "6379")
+	socketOverride := firstNonEmpty(h.Overrides["redis_socket"], h.Overrides["valkey_socket"])
+	metrics := map[string]any{"port": port}
+	if socketOverride != "" {
+		metrics["socket"] = socketOverride
+	}
+
 	authOpt := ""
-	if pwd := h.Overrides["redis_password"]; pwd != "" {
+	if pwd := firstNonEmpty(h.Overrides["redis_password"], h.Overrides["valkey_password"]); pwd != "" {
 		authOpt = fmt.Sprintf("-a %s ", escapeArg(pwd))
 	}
 	portOpt := ""
-	if p := h.Overrides["redis_port"]; p != "" {
+	if p := firstNonEmpty(h.Overrides["redis_port"], h.Overrides["valkey_port"]); p != "" {
 		portOpt = fmt.Sprintf("-p %s ", p)
 	}
 	hostOpt := ""
-	if host := h.Overrides["redis_host"]; host != "" {
+	if host := firstNonEmpty(h.Overrides["redis_host"], h.Overrides["valkey_host"]); host != "" {
 		hostOpt = fmt.Sprintf("-h %s ", host)
 	}
 
-	infoCmd := fmt.Sprintf("%s %s%s%sINFO 2>/dev/null || true", cli, hostOpt, portOpt, authOpt)
-	out, err := r.RunCommand(ctx, infoCmd)
-	if err != nil || strings.TrimSpace(out) == "" {
-		// Not running or connection failed
+	runRedis := func(redisArgs string) string {
+		if cli != "" {
+			if socketOverride != "" {
+				sockCmd := fmt.Sprintf("%s -s %s %s%s 2>/dev/null || true", cli, escapeArg(socketOverride), authOpt, redisArgs)
+				if out, err := r.RunCommand(ctx, sockCmd); err == nil && strings.TrimSpace(out) != "" {
+					return out
+				}
+			}
+			cmd := fmt.Sprintf("%s %s%s%s%s 2>/dev/null || true", cli, hostOpt, portOpt, authOpt, redisArgs)
+			if out, err := r.RunCommand(ctx, cmd); err == nil && strings.TrimSpace(out) != "" {
+				return out
+			}
+			// Try common Unix sockets
+			for _, sock := range []string{"/run/redis/redis.sock", "/var/run/redis/redis.sock", "/run/redis/redis-server.sock", "/run/valkey/valkey.sock", "/var/run/valkey/valkey.sock", "/tmp/redis.sock"} {
+				tryCmd := fmt.Sprintf("[ -S %s ] && (sudo -n %s -s %s %s%s 2>/dev/null || %s -s %s %s%s 2>/dev/null) || true",
+					escapeArg(sock), cli, escapeArg(sock), authOpt, redisArgs, cli, escapeArg(sock), authOpt, redisArgs)
+				if out, err := r.RunCommand(ctx, tryCmd); err == nil && strings.TrimSpace(out) != "" {
+					metrics["socket"] = sock
+					return out
+				}
+			}
+		}
+		// Container exec fallback
+		ctrCmd := fmt.Sprintf(
+			"for rt in 'sudo -n podman' podman 'sudo -n docker' docker; do "+
+				"cid=$($rt ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -iE 'redis|valkey|keydb|dragonfly' | awk '{print $1}' | head -n1); "+
+				"if [ -n \"$cid\" ]; then $rt exec \"$cid\" sh -c \"(redis-cli %s || valkey-cli %s)\" 2>/dev/null && break; fi; "+
+				"done || true",
+			redisArgs, redisArgs,
+		)
+		out, _ := r.RunCommand(ctx, ctrCmd)
+		return out
+	}
+
+	out := runRedis("INFO")
+	if strings.TrimSpace(out) == "" {
+		status := "inactive"
+		if detected {
+			status = "active"
+		}
 		return &EngineStatus{
 			Engine:     "redis",
-			Status:     "inactive",
+			Status:     status,
 			Databases:  []string{},
 			Users:      []EngineUser{},
-			Metrics:    map[string]any{},
+			Metrics:    metrics,
 			DataFormat: "keyvalue",
 		}
 	}
 
-	metrics := make(map[string]any)
 	version := ""
 	databases := make([]string, 0)
 
@@ -236,7 +349,7 @@ func inspectRedis(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 		if len(parts) == 2 {
 			k := strings.TrimSpace(parts[0])
 			v := strings.TrimSpace(parts[1])
-			if k == "redis_version" {
+			if k == "redis_version" || k == "valkey_version" {
 				version = v
 			}
 			if strings.HasPrefix(k, "db") {
@@ -252,8 +365,7 @@ func inspectRedis(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 	}
 
 	// Fetch ACL list
-	aclCmd := fmt.Sprintf("%s %s%s%sACL LIST 2>/dev/null || true", cli, hostOpt, portOpt, authOpt)
-	aclOut, _ := r.RunCommand(ctx, aclCmd)
+	aclOut := runRedis("ACL LIST")
 	users := make([]EngineUser, 0)
 	for _, l := range strings.Split(strings.TrimSpace(aclOut), "\n") {
 		l = strings.TrimSpace(l)
@@ -284,34 +396,58 @@ func inspectRedis(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 	}
 }
 
-func inspectMongo(ctx context.Context, r plugin.Runner, cli string, h plugin.HostFacts) *EngineStatus {
+func inspectMongo(ctx context.Context, r plugin.Runner, cli string, h plugin.HostFacts, detected bool) *EngineStatus {
 	evalFlag := "--eval"
 	if cli == "mongo" {
 		evalFlag = "--eval"
 	}
+	port := firstNonEmpty(h.Overrides["mongodb_port"], "27017")
+	socketOverride := h.Overrides["mongodb_socket"]
 	uri := h.Overrides["mongodb_uri"]
 	if uri == "" {
 		host := h.Overrides["mongodb_host"]
 		if host == "" {
 			host = "127.0.0.1"
 		}
-		port := h.Overrides["mongodb_port"]
-		if port == "" {
-			port = "27017"
-		}
 		uri = fmt.Sprintf("mongodb://%s:%s", host, port)
+	}
+	metrics := map[string]any{"uri": uri, "port": port}
+	if socketOverride != "" {
+		metrics["socket"] = socketOverride
+	}
+
+	runMongo := func(jsExpr string) string {
+		if cli != "" {
+			cmd := fmt.Sprintf("%s --quiet %s %s %s 2>/dev/null || true", cli, uri, evalFlag, escapeArg(jsExpr))
+			if out, err := r.RunCommand(ctx, cmd); err == nil && strings.TrimSpace(out) != "" {
+				return out
+			}
+		}
+		// Container exec fallback
+		ctrCmd := fmt.Sprintf(
+			"for rt in 'sudo -n podman' podman 'sudo -n docker' docker; do "+
+				"cid=$($rt ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -iE 'mongo' | awk '{print $1}' | head -n1); "+
+				"if [ -n \"$cid\" ]; then $rt exec \"$cid\" sh -c \"(mongosh --quiet --eval %s || mongo --quiet --eval %s)\" 2>/dev/null && break; fi; "+
+				"done || true",
+			escapeArg(jsExpr), escapeArg(jsExpr),
+		)
+		out, _ := r.RunCommand(ctx, ctrCmd)
+		return out
 	}
 
 	// Run db.adminCommand({listDatabases: 1})
-	cmd := fmt.Sprintf("%s --quiet %s %s 'JSON.stringify(db.adminCommand({listDatabases: 1}))' 2>/dev/null || true", cli, uri, evalFlag)
-	out, err := r.RunCommand(ctx, cmd)
-	if err != nil || strings.TrimSpace(out) == "" {
+	out := runMongo("JSON.stringify(db.adminCommand({listDatabases: 1}))")
+	if strings.TrimSpace(out) == "" {
+		status := "inactive"
+		if detected {
+			status = "active"
+		}
 		return &EngineStatus{
 			Engine:     "mongodb",
-			Status:     "inactive",
+			Status:     status,
 			Databases:  []string{},
 			Users:      []EngineUser{},
-			Metrics:    map[string]any{},
+			Metrics:    metrics,
 			DataFormat: "document",
 		}
 	}
@@ -342,8 +478,7 @@ func inspectMongo(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 	}
 
 	// Fetch users via db.getUsers()
-	userCmd := fmt.Sprintf("%s --quiet %s %s 'JSON.stringify(db.getSiblingDB(\"admin\").getUsers())' 2>/dev/null || true", cli, uri, evalFlag)
-	uOut, _ := r.RunCommand(ctx, userCmd)
+	uOut := runMongo("JSON.stringify(db.getSiblingDB(\"admin\").getUsers())")
 	users := make([]EngineUser, 0)
 	var uList []struct {
 		User  string `json:"user"`
@@ -368,8 +503,7 @@ func inspectMongo(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 	}
 
 	// Get server version
-	verCmd := fmt.Sprintf("%s --quiet %s %s 'db.version()' 2>/dev/null || true", cli, uri, evalFlag)
-	verOut, _ := r.RunCommand(ctx, verCmd)
+	verOut := runMongo("db.version()")
 	version := strings.TrimSpace(verOut)
 
 	return &EngineStatus{
@@ -378,21 +512,23 @@ func inspectMongo(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 		Version:    version,
 		Databases:  databases,
 		Users:      users,
-		Metrics:    map[string]any{"uri": uri},
+		Metrics:    metrics,
 		DataFormat: "document",
 	}
 }
 
-func inspectCouchDB(ctx context.Context, r plugin.Runner, h plugin.HostFacts) *EngineStatus {
+func inspectCouchDB(ctx context.Context, r plugin.Runner, h plugin.HostFacts, detected bool) *EngineStatus {
 	host := h.Overrides["couchdb_host"]
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	port := h.Overrides["couchdb_port"]
-	if port == "" {
-		port = "5984"
-	}
+	port := firstNonEmpty(h.Overrides["couchdb_port"], "5984")
+	socketOverride := h.Overrides["couchdb_socket"]
 	base := fmt.Sprintf("http://%s:%s", host, port)
+	metrics := map[string]any{"url": base, "port": port}
+	if socketOverride != "" {
+		metrics["socket"] = socketOverride
+	}
 
 	out, err := r.RunCommand(ctx, fmt.Sprintf("curl -s -m 3 %s/_all_dbs 2>/dev/null || true", base))
 	databases := make([]string, 0)
@@ -407,13 +543,18 @@ func inspectCouchDB(ctx context.Context, r plugin.Runner, h plugin.HostFacts) *E
 	}
 	_ = json.Unmarshal([]byte(strings.TrimSpace(rootOut)), &rootInfo)
 
+	status := "active"
+	if rootInfo.Version == "" && len(databases) == 0 && !detected {
+		status = "inactive"
+	}
+
 	return &EngineStatus{
 		Engine:     "couchdb",
-		Status:     "active",
+		Status:     status,
 		Version:    rootInfo.Version,
 		Databases:  databases,
 		Users:      []EngineUser{{Username: "admin", Roles: []string{"_admin"}}},
-		Metrics:    map[string]any{"url": base},
+		Metrics:    metrics,
 		DataFormat: "document",
 	}
 }
@@ -972,4 +1113,30 @@ func optIntDefault(opts map[string]any, key string, def int) int {
 
 func escapeArg(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func hasListeningPort(ssOut, port string) bool {
+	port = strings.TrimSpace(port)
+	if port == "" || strings.TrimSpace(ssOut) == "" {
+		return false
+	}
+	suffix := ":" + port
+	for _, line := range strings.Split(ssOut, "\n") {
+		fields := strings.Fields(line)
+		for _, f := range fields {
+			if strings.HasSuffix(f, suffix) {
+				return true
+			}
+		}
+	}
+	return false
 }
