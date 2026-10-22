@@ -3,6 +3,7 @@ package plugin_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -316,6 +317,18 @@ func TestAPI_SQLiteNodeResolver(t *testing.T) {
 	}
 	if dbPath == "" {
 		t.Skip("data/hosts-cache.sqlite not found, skipping SQLite resolver test")
+	}
+
+	// Check if the hosts table exists
+	d, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	if err != nil {
+		t.Skip("cannot open sqlite database for table check")
+	}
+	defer d.Close()
+	var tableExists int
+	err = d.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='hosts'").Scan(&tableExists)
+	if err != nil || tableExists == 0 {
+		t.Skip("hosts table not found in SQLite database")
 	}
 
 	resolver, err := plugin.NewSQLiteNodeResolver(dbPath)
