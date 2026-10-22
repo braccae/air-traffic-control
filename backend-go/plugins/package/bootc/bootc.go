@@ -7,14 +7,37 @@ import (
 	"strings"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+var (
+	_ plugin.Plugin                      = (*Plugin)(nil)
+	_ plugin.Reader                      = (*Plugin)(nil)
+	_ plugin.Actor                       = (*Plugin)(nil)
+	_ plugin.SettingsPageProvider        = (*Plugin)(nil)
+	_ newapi.DataCollectionPlugin        = (*Plugin)(nil)
+	_ newapi.ManagementPlugin            = (*Plugin)(nil)
+	_ newapi.CategorizedSettingsProvider = (*Plugin)(nil)
+	_ newapi.ContextMenuProvider         = (*Plugin)(nil)
+	_ newapi.TaskCompileProvider         = (*Plugin)(nil)
+)
+
+// SettingsPageID is the route slug of the datacenter-wide bootc settings page.
+const SettingsPageID = "package/bootc"
+
+// Default settings values for bootc image operations.
+const (
+	DefaultImageRegistry = "quay.io"
+	DefaultRebootPolicy  = "staged"
 )
 
 func init() {
 	_ = plugin.Register(New())
 }
 
-// Plugin implements plugin.Plugin, plugin.Reader and plugin.Actor for bootc
-// bootable container systems.
+// Plugin implements plugin.Plugin, plugin.Reader, plugin.Actor, and v2 newapi
+// contracts for bootc bootable container systems.
 type Plugin struct{}
 
 // New returns a new bootc package plugin.
@@ -33,6 +56,74 @@ func (p *Plugin) Meta() plugin.Meta {
 		Description: "Transactional container-based operating system updater",
 		Order:       10,
 	}
+}
+
+// CollectionSchedule returns the standard polling cadence and cache TTL
+// schedule for bootc deployment inspection.
+func (p *Plugin) CollectionSchedule() newapi.CollectionSchedule {
+	return newapi.DefaultScheduleForKind(p.Meta().Kind)
+}
+
+// CollectionSchema documents the v2 payload structure emitted by Read.
+func (p *Plugin) CollectionSchema() newapi.CollectionSchema {
+	return newapi.CollectionSchema{
+		Version:     "v2",
+		RootKey:     "currentImage",
+		Description: p.Meta().Description,
+	}
+}
+
+// CategorizedSettingsPage declares datacenter-wide bootc image and upgrade
+// defaults via the v2 settings framework.
+func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
+	meta := p.Meta()
+	return settingsframework.NewPageBuilder(SettingsPageID, "bootc Image & Upgrade Defaults").
+		WithIcon(meta.Icon).
+		WithCategory(string(meta.Kind)).
+		WithScope(newapi.SettingsScopeDatacenter).
+		WithOrder(meta.Order).
+		WithDescription("Datacenter-wide bootable container (bootc) registry, default image reference, and staging policy defaults.").
+		StringField("defaultRegistry", "Default Container Registry", DefaultImageRegistry,
+			settingsframework.WithRequired(true),
+			settingsframework.WithPlaceholder(DefaultImageRegistry),
+			settingsframework.WithDescription("Default container registry host for bootable OS images (e.g. quay.io, ghcr.io).")).
+		StringField("defaultImage", "Default OS Image Reference", "",
+			settingsframework.WithPlaceholder("quay.io/org/os:latest"),
+			settingsframework.WithDescription("Optional fallback container image reference used when switching images without an explicit target.")).
+		SelectField("rebootPolicy", "Post-Upgrade Reboot Policy", DefaultRebootPolicy, []plugin.SettingsFieldOption{
+			{Value: "staged", Label: "Stage Only (Reboot Manually)"},
+			{Value: "apply", Label: "Apply Immediately (bootc upgrade --apply)"},
+		}, settingsframework.WithDescription("Controls whether bootc upgrades only stage the next deployment or trigger an immediate reboot.")).
+		BoolField("enforceSignatureVerification", "Enforce Container Signature Verification", true,
+			settingsframework.WithDescription("Require container image signature verification when staging or switching bootc images.")).
+		SecretField("registryAuthVaultVar", "Registry Pull Secret Vault Variable",
+			settingsframework.WithPlaceholder("vault_bootc_registry_auth"),
+			settingsframework.WithDescription("Optional Ansible Vault variable holding registry authentication credentials. Never stored or returned in plaintext.")).
+		BuildCategorized()
+}
+
+// SettingsPage implements plugin.SettingsPageProvider for legacy settings routes.
+func (p *Plugin) SettingsPage() plugin.SettingsPage {
+	return p.CategorizedSettingsPage().SettingsPage
+}
+
+func defaultTargetImage() string {
+	return settingsframework.NewStoreAdapter(nil).StringOrDefault(SettingsPageID, "defaultImage", "")
+}
+
+// ContextMenuEntries provides contextual bootc actions for compatible Linux hosts.
+func (p *Plugin) ContextMenuEntries(ctx context.Context, h plugin.HostFacts) []newapi.ContextMenuEntry {
+	if !p.Compatible(h) {
+		return nil
+	}
+	meta := p.Meta()
+	return newapi.NewContextMenuBuilder(meta.ID).
+		WithTarget(newapi.TargetNode).
+		WithGroup(string(meta.Kind)).
+		AddAction("update", "Upgrade Container Image", "system_update_alt", "update", 10).
+		AddDangerAction("switch", "Switch Container Image", "swap_horiz", "switch",
+			"Rebind this host to a new bootable container image?", 20).
+		Build()
 }
 
 // Compatible checks if the host is Linux and compatible with bootc.
@@ -190,39 +281,93 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}, nil
 }
 
-// Actions enumerates mutation actions supported by bootc.
-func (p *Plugin) Actions() []plugin.ActionSpec {
-	return []plugin.ActionSpec{
+// ManagementActions returns the v2 management action specifications for bootc.
+func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
+	return []newapi.ManagementActionSpec{
 		{
-			Name:        "update",
-			Label:       "Upgrade Container Image",
-			Description: "Pulls and stages the latest bootable container image",
-			Options:     []plugin.OptionSchema{},
+			ActionSpec: plugin.ActionSpec{
+				Name:        "update",
+				Label:       "Upgrade Container Image",
+				Description: "Pulls and stages the latest bootable container image",
+				Options:     []plugin.OptionSchema{},
+			},
+			Category:         newapi.ActionCategoryMaintenance,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindPackage},
 		},
 		{
-			Name:        "switch",
-			Label:       "Switch Container Image",
-			Description: "Rebinds the operating system to a new bootable container image",
-			Options: []plugin.OptionSchema{
-				{
-					Name:        "image",
-					Type:        "string",
-					Required:    true,
-					Description: "Target container image reference (e.g. quay.io/org/os:latest)",
+			ActionSpec: plugin.ActionSpec{
+				Name:        "switch",
+				Label:       "Switch Container Image",
+				Description: "Rebinds the operating system to a new bootable container image",
+				Options: []plugin.OptionSchema{
+					{
+						Name:        "image",
+						Type:        "string",
+						Required:    true,
+						Description: "Target container image reference (e.g. quay.io/org/os:latest)",
+					},
 				},
 			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       true,
+			Dangerous:        true,
+			ConfirmPrompt:    "Rebind this host to a new bootable container image?",
+			InvalidatesKinds: []plugin.Kind{plugin.KindPackage},
 		},
 	}
+}
+
+// Actions enumerates mutation actions supported by bootc.
+func (p *Plugin) Actions() []plugin.ActionSpec {
+	mgmt := p.ManagementActions()
+	specs := make([]plugin.ActionSpec, len(mgmt))
+	for i, m := range mgmt {
+		specs[i] = m.ActionSpec
+	}
+	return specs
+}
+
+// ValidateAction validates options for a declared bootc management action.
+func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
+	for _, spec := range p.ManagementActions() {
+		if strings.EqualFold(spec.Name, action) {
+			return newapi.ValidateManagementOptions(spec, opts)
+		}
+	}
+	return fmt.Errorf("unsupported %s action: %s", p.Meta().Name, action)
+}
+
+// CompileTask adapts a typed v2 TaskRequest to the plugin's declarative
+// Ansible TaskSpec compiler.
+func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
+	action := strings.TrimSpace(req.Action)
+	if action == "" && req.Params != nil {
+		if a, ok := req.Params["action"].(string); ok {
+			action = strings.TrimSpace(a)
+		}
+	}
+	if action == "" {
+		return plugin.TaskSpec{}, fmt.Errorf("action is required for plugin %s", p.Meta().ID)
+	}
+	return p.Compile(h, action, req.Params)
 }
 
 // Compile compiles a bootc action into declarative TaskSpec.
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
 	var cmd string
-	switch action {
+	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "update":
+		action = "update"
 		cmd = "bootc upgrade"
 	case "switch":
+		action = "switch"
 		image, _ := opts["image"].(string)
+		image = strings.TrimSpace(image)
+		if image == "" {
+			image = strings.TrimSpace(defaultTargetImage())
+		}
 		if image == "" {
 			return plugin.TaskSpec{}, fmt.Errorf("image parameter is required for switch")
 		}
