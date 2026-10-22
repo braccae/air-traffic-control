@@ -90,8 +90,17 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		}, nil
 	}
 
+	verOut, _ := r.RunCommand(ctx, "(docker --version 2>&1; readlink /var/run/docker.sock /run/docker.sock 2>/dev/null) || true")
+	if strings.Contains(strings.ToLower(verOut), "podman") {
+		return plugin.Detection{
+			Detected: false,
+			Status:   "UNAVAILABLE",
+			Details:  "podman-docker emulation detected; native Docker Engine not present",
+		}, nil
+	}
+
 	// Count all containers (running and stopped) to report an accurate badge.
-	cntOut, err := r.RunCommand(ctx, "docker ps -a -q 2>/dev/null | wc -l")
+	cntOut, err := r.RunCommand(ctx, "(run0 --background=no docker ps -a -q 2>/dev/null || sudo -n docker ps -a -q 2>/dev/null || docker ps -a -q 2>/dev/null) | wc -l")
 	count := 0
 	if err == nil {
 		if s := strings.TrimSpace(cntOut); s != "" {

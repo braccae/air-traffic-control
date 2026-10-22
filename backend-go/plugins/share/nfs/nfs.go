@@ -53,7 +53,7 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		return plugin.Detection{Detected: false, Status: "OFFLINE", Error: "runner is nil"}, nil
 	}
 
-	out, err := r.RunCommand(ctx, "cat /var/lib/nfs/etab /etc/exports 2>/dev/null || true")
+	out, err := r.RunCommand(ctx, "cat /var/lib/nfs/etab /etc/exports /etc/exports.d/*.exports 2>/dev/null || true")
 	if err == nil && strings.TrimSpace(out) != "" {
 		lines := strings.Split(strings.TrimSpace(out), "\n")
 		var valid int
@@ -72,19 +72,19 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		}
 	}
 
-	cmdOut, err := r.RunCommand(ctx, "command -v exportfs")
-	if err == nil && strings.TrimSpace(cmdOut) != "" {
+	svcOut, err := r.RunCommand(ctx, "systemctl is-active nfs-server 2>/dev/null || true")
+	if err == nil && strings.TrimSpace(svcOut) == "active" {
 		return plugin.Detection{
 			Detected: true,
 			Status:   "ONLINE",
-			Details:  "exportfs available, no active exports",
+			Details:  "nfs-server active, no exports configured",
 		}, nil
 	}
 
 	return plugin.Detection{
 		Detected: false,
 		Status:   "UNAVAILABLE",
-		Error:    "neither /etc/exports nor exportfs found",
+		Error:    "no active NFS exports or nfs-server service found",
 	}, nil
 }
 

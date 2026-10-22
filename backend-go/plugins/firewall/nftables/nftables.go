@@ -79,6 +79,16 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		}, nil
 	}
 
+	ownerOut, _ := r.RunCommand(ctx, "(sudo -n firewall-cmd --state 2>/dev/null || firewall-cmd --state 2>/dev/null || true); (sudo -n ufw status 2>/dev/null || ufw status 2>/dev/null || true)")
+	ownerLower := strings.ToLower(ownerOut)
+	if strings.Contains(ownerLower, "running") || strings.Contains(ownerLower, "status: active") {
+		return plugin.Detection{
+			Detected: false,
+			Status:   "inactive",
+			Details:  "firewalld/ufw owns packet filtering on host",
+		}, nil
+	}
+
 	tablesOut, err := r.RunCommand(ctx, "sudo -n nft list tables 2>/dev/null || nft list tables 2>/dev/null || true")
 	if err != nil {
 		return plugin.Detection{Detected: false, Status: "ERROR", Error: err.Error()}, err
@@ -101,7 +111,7 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 	}
 
 	return plugin.Detection{
-		Detected: true,
+		Detected: false,
 		Status:   "inactive",
 		Details:  "nftables installed but no tables loaded",
 	}, nil

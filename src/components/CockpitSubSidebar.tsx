@@ -120,6 +120,9 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
   // Package manager precedence: bootc > rpmostree/ostree > traditional (dnf/rpm/pacman/apt/apk)
   const packageOrder = ['bootc', 'rpmostree', 'ostree', 'dnf', 'rpm', 'pacman', 'apt', 'apk'];
   let chosenPackagePlugin: NodePluginItem | null = null;
+  // Firewall manager precedence: firewalld > ufw > nftables > iptables
+  const firewallOrder = ['firewalld', 'ufw', 'nftables', 'iptables'];
+  let chosenFirewallPlugin: NodePluginItem | null = null;
   const nonPackagePlugins: NodePluginItem[] = [];
 
   for (const p of activePlugins) {
@@ -149,6 +152,19 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
           chosenPackagePlugin = p;
         }
       }
+    } else if (kindKey === 'firewall' || (p.section || '').toLowerCase() === 'firewall') {
+      if (p.detection?.status?.toLowerCase() === 'inactive') continue;
+      if (!chosenFirewallPlugin) {
+        chosenFirewallPlugin = p;
+      } else {
+        const currentIdx = firewallOrder.indexOf(chosenFirewallPlugin.name.toLowerCase());
+        const candidateIdx = firewallOrder.indexOf(p.name.toLowerCase());
+        const effectiveCurrent = currentIdx === -1 ? 999 : currentIdx;
+        const effectiveCandidate = candidateIdx === -1 ? 999 : candidateIdx;
+        if (effectiveCandidate < effectiveCurrent) {
+          chosenFirewallPlugin = p;
+        }
+      }
     } else {
       // Expand detected database plugins into one entry per real detected engine.
       if (kindKey === 'database' || (p.section || '').toLowerCase() === 'database') {
@@ -159,9 +175,11 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
     }
   }
 
-  const filteredPlugins = chosenPackagePlugin
-    ? [...nonPackagePlugins, chosenPackagePlugin]
-    : nonPackagePlugins;
+  const filteredPlugins = [
+    ...nonPackagePlugins,
+    ...(chosenPackagePlugin ? [chosenPackagePlugin] : []),
+    ...(chosenFirewallPlugin ? [chosenFirewallPlugin] : []),
+  ];
 
   for (const p of filteredPlugins) {
     const kindKey = (p.section || p.kind || '').toLowerCase();
@@ -250,19 +268,20 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
                 {sectionTitle}
               </span>
               <nav className="mt-0.5 flex flex-col gap-0.5">
-                {plugins.map(p => {
-                  // Tab selection ID can match either p.name or p.id for compatibility
-                  const isSelected =
-                    activeItem === p.id ||
-                    activeItem === p.name ||
-                    (p.name === 'zfs' && (activeItem === 'storage' || activeItem === 'zfs')) ||
-                    (p.name === 'interfaces' && activeItem === 'network');
+                {plugins.map((p, idx) => {
+                  const isFirstOfPlugin = plugins.findIndex(x => x.id === p.id) === idx;
+                  const isSelected = p.engine
+                    ? activeItem === `${p.id}:${p.engine}` || ((activeItem === p.id || activeItem === p.name) && isFirstOfPlugin)
+                    : activeItem === p.id ||
+                      activeItem === p.name ||
+                      (p.name === 'zfs' && (activeItem === 'storage' || activeItem === 'zfs')) ||
+                      (p.name === 'interfaces' && activeItem === 'network');
 
                   return (
                     <button
                       key={`${p.id}:${p.engine ?? 'default'}`}
                       type="button"
-                      onClick={() => onSelectItem(p.id)}
+                      onClick={() => onSelectItem(p.engine ? `${p.id}:${p.engine}` : p.id)}
                       className={`w-full flex items-center justify-between px-2 py-1 rounded font-mono text-[11px] leading-tight cursor-pointer transition-colors ${
                         isSelected
                           ? 'bg-[#21263d] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff] shadow-[inset_0_0_12px_rgba(176,201,255,0.08)]'

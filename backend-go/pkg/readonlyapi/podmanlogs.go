@@ -75,7 +75,10 @@ func (a *API) handlePodmanLogs(w http.ResponseWriter, r *http.Request) {
 		cmd = "run0 --background=no podman logs --tail 100 " + target + " 2>&1 || " +
 			"sudo -n podman logs --tail 100 " + target + " 2>&1 || " +
 			"doas -n podman logs --tail 100 " + target + " 2>&1 || " +
-			"podman logs --tail 100 " + target + " 2>&1"
+			"podman logs --tail 100 " + target + " 2>&1 || " +
+			"run0 --background=no docker logs --tail 100 " + target + " 2>&1 || " +
+			"sudo -n docker logs --tail 100 " + target + " 2>&1 || " +
+			"docker logs --tail 100 " + target + " 2>&1"
 	}
 
 	out, err := runNodeCommand(r.Context(), runner, cmd)

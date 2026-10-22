@@ -93,7 +93,7 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 	}
 
 	return plugin.Detection{
-		Detected: true,
+		Detected: false,
 		Status:   "inactive",
 		Details:  "ufw installed but inactive",
 	}, nil

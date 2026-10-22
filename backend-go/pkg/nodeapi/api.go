@@ -53,6 +53,7 @@ type Options struct {
 	Fallback        http.Handler
 	TailscaleStatus func() (*tailscale.Status, error)
 	SeedBaseline    bool
+	OnNodeUpdated   func(nodeID string)
 }
 
 // API handles node CRUD and hardware probing requests.
@@ -64,6 +65,7 @@ type API struct {
 	now             func() time.Time
 	fallback        http.Handler
 	tailscaleStatus func() (*tailscale.Status, error)
+	onNodeUpdated   func(nodeID string)
 }
 
 // New creates and validates a new node API instance.
@@ -87,6 +89,7 @@ func New(opts Options) (*API, error) {
 		now:             now,
 		fallback:        opts.Fallback,
 		tailscaleStatus: tsStatus,
+		onNodeUpdated:   opts.OnNodeUpdated,
 	}
 
 	if opts.SeedBaseline {
@@ -730,6 +733,13 @@ func (a *API) handleUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	if err := a.store.UpsertHost(updatedRec); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
+	}
+
+	_ = a.store.InvalidateHostSections(id)
+	_ = a.store.DeleteHostContainerCache(id)
+	_ = a.store.DeleteHostTelemetry(id)
+	if a.onNodeUpdated != nil {
+		a.onNodeUpdated(id)
 	}
 
 	a.emit(map[string]any{

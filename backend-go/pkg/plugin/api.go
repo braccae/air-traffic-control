@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -85,32 +86,33 @@ func (r *storeNodeResolver) ResolveNode(nodeID string) (HostFacts, bool, error) 
 		return HostFacts{}, false, err
 	}
 	if !ok {
+		all, err := r.Store.GetAllHosts()
+		if err != nil {
+			return HostFacts{}, false, err
+		}
+		q := strings.ToLower(strings.TrimSpace(nodeID))
+		for _, h := range all {
+			if strings.ToLower(h.ID) == q ||
+				strings.ToLower(h.Name) == q ||
+				strings.ToLower(h.ShortName) == q ||
+				strings.ToLower(h.TailscaleHost) == q ||
+				strings.ToLower(h.TailscaleIP) == q ||
+				strings.ToLower(h.IP) == q {
+				record = h
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
 		return HostFacts{}, false, nil
 	}
 
-	// Extract HostFacts from NodeRecord.NodeJSON
-	var nodeJSON struct {
-		NodeID           string            `json:"id"`
-		OSFamily         string            `json:"osFamily"`
-		HostRoute        string            `json:"hostRoute"`
-		ActiveConnection string            `json:"activeConnection"`
-		ActiveElevation  string            `json:"activeElevation"`
-		ActivePackage    string            `json:"activePackage"`
-		Overrides        map[string]string `json:"overrides"`
+	portStr := ""
+	if record.Port > 0 {
+		portStr = fmt.Sprintf("%d", record.Port)
 	}
-	if err := json.Unmarshal(record.NodeJSON, &nodeJSON); err != nil {
-		return HostFacts{}, false, err
-	}
-
-	return HostFacts{
-		NodeID:           nodeJSON.NodeID,
-		OSFamily:         nodeJSON.OSFamily,
-		HostRoute:        nodeJSON.HostRoute,
-		ActiveConnection: nodeJSON.ActiveConnection,
-		ActiveElevation:  nodeJSON.ActiveElevation,
-		ActivePackage:    nodeJSON.ActivePackage,
-		Overrides:        nodeJSON.Overrides,
-	}, true, nil
+	return buildHostFacts(record.ID, record.IP, portStr, record.SSHUser, record.TailscaleIP, record.TailscaleHost, record.NodeJSON), true, nil
 }
 
 
@@ -245,6 +247,130 @@ type sqliteNodeRecord struct {
 	APIPort         int               `json:"apiPort"`
 	APIUser         string            `json:"apiUser"`
 	PluginOverrides map[string]string `json:"pluginOverrides"`
+
+	// Explicit HostFacts fields (supported when NodeJSON carries direct HostFacts)
+	OSFamily         string            `json:"osFamily"`
+	HostRoute        string            `json:"hostRoute"`
+	ActiveConnection string            `json:"activeConnection"`
+	ActiveElevation  string            `json:"activeElevation"`
+	ActivePackage    string            `json:"activePackage"`
+	Overrides        map[string]string `json:"overrides"`
+}
+
+func buildHostFacts(id, ip, portStr, sshUser, tailscaleIP, tailscaleHost string, rawJSON []byte) HostFacts {
+	var parsed sqliteNodeRecord
+	if len(rawJSON) > 0 {
+		_ = json.Unmarshal(rawJSON, &parsed)
+	}
+	if parsed.ID == "" {
+		parsed.ID = id
+	}
+	if parsed.IP == "" {
+		parsed.IP = ip
+	}
+	if parsed.Port <= 0 && portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
+			parsed.Port = p
+		}
+	}
+	if parsed.SSHUser == "" {
+		parsed.SSHUser = sshUser
+	}
+	if parsed.TailscaleIP == "" {
+		parsed.TailscaleIP = tailscaleIP
+	}
+	if parsed.TailscaleHost == "" {
+		parsed.TailscaleHost = tailscaleHost
+	}
+
+	isLocalHost := parsed.IP == "127.0.0.1" ||
+		parsed.IP == "localhost" ||
+		strings.EqualFold(parsed.ShortName, "dev-pc") ||
+		strings.HasPrefix(strings.ToLower(parsed.TailscaleHost), "dev-pc")
+
+	route := strings.TrimSpace(parsed.HostRoute)
+	if route == "" {
+		if isLocalHost {
+			route = "127.0.0.1"
+		} else if parsed.TailscaleIP != "" {
+			route = parsed.TailscaleIP
+		} else if parsed.TailscaleHost != "" {
+			route = parsed.TailscaleHost
+		} else if parsed.IP != "" {
+			route = parsed.IP
+		} else {
+			route = "127.0.0.1"
+		}
+	}
+
+	osFamily := parsed.OSFamily
+	if osFamily == "" {
+		osFamily = "linux"
+		if parsed.NodeType == "windows" {
+			osFamily = "windows"
+		} else if parsed.NodeType == "router_switch" {
+			osFamily = "router_switch"
+		}
+	}
+
+	activeConn := parsed.ActiveConnection
+	if parsed.PluginOverrides != nil && parsed.PluginOverrides["connection"] != "" {
+		activeConn = parsed.PluginOverrides["connection"]
+	} else if activeConn == "" {
+		if isLocalHost || route == "127.0.0.1" || route == "localhost" {
+			activeConn = "connection/local"
+		} else if strings.Contains(route, ".ts.net") || strings.HasPrefix(route, "100.") {
+			activeConn = "connection/tailscale"
+		} else {
+			activeConn = "connection/ssh"
+		}
+	}
+
+	activeElev := parsed.ActiveElevation
+	if parsed.PluginOverrides != nil && parsed.PluginOverrides["elevation"] != "" {
+		activeElev = parsed.PluginOverrides["elevation"]
+	} else if activeElev == "" {
+		if parsed.PrivilegeMethod != "" {
+			activeElev = "elevation/" + parsed.PrivilegeMethod
+		} else {
+			activeElev = "elevation/run0"
+		}
+	}
+
+	activePkg := parsed.ActivePackage
+	if parsed.PluginOverrides != nil && parsed.PluginOverrides["package"] != "" {
+		activePkg = parsed.PluginOverrides["package"]
+	}
+
+	overrides := make(map[string]string)
+	for k, v := range parsed.Overrides {
+		overrides[k] = v
+	}
+	for k, v := range parsed.PluginOverrides {
+		overrides[k] = v
+	}
+	if parsed.SSHUser != "" {
+		overrides["user"] = parsed.SSHUser
+	}
+	if parsed.Port > 0 {
+		overrides["port"] = fmt.Sprintf("%d", parsed.Port)
+	}
+	if parsed.APIPort > 0 {
+		overrides["api_port"] = fmt.Sprintf("%d", parsed.APIPort)
+	}
+	if parsed.APIUser != "" {
+		overrides["api_user"] = parsed.APIUser
+	}
+
+	return HostFacts{
+		NodeID:           parsed.ID,
+		OSFamily:         osFamily,
+		HostRoute:        route,
+		ActiveConnection: activeConn,
+		ActiveElevation:  activeElev,
+		ActivePackage:    activePkg,
+		Overrides:        overrides,
+	}
 }
 
 // ResolveNode queries SQLite for node facts
@@ -264,90 +390,11 @@ func (r *SQLiteNodeResolver) ResolveNode(nodeID string) (HostFacts, bool, error)
 		return HostFacts{}, false, err
 	}
 
-	var parsed sqliteNodeRecord
-	if err := json.Unmarshal([]byte(nodeJSON), &parsed); err != nil {
-		parsed.ID = id
-		parsed.IP = ip
-		parsed.Port = port
-		parsed.SSHUser = sshUser
-		parsed.TailscaleIP = tailscaleIP
-		parsed.TailscaleHost = tailscaleHost
+	portStr := ""
+	if port > 0 {
+		portStr = fmt.Sprintf("%d", port)
 	}
-
-	route := parsed.TailscaleHost
-	if route == "" {
-		route = parsed.TailscaleIP
-	}
-	if route == "" {
-		route = parsed.IP
-	}
-	if route == "" {
-		route = "127.0.0.1"
-	}
-
-	osFamily := "linux"
-	if parsed.NodeType == "windows" {
-		osFamily = "windows"
-	} else if parsed.NodeType == "router_switch" {
-		osFamily = "router_switch"
-	}
-
-	activeConn := ""
-	if parsed.PluginOverrides != nil && parsed.PluginOverrides["connection"] != "" {
-		activeConn = parsed.PluginOverrides["connection"]
-	} else if route == "127.0.0.1" || route == "localhost" {
-		activeConn = "connection/local"
-	} else if strings.Contains(route, ".ts.net") || strings.HasPrefix(route, "100.") {
-		activeConn = "connection/tailscale"
-	} else {
-		activeConn = "connection/ssh"
-	}
-
-	activeElev := ""
-	if parsed.PluginOverrides != nil && parsed.PluginOverrides["elevation"] != "" {
-		activeElev = parsed.PluginOverrides["elevation"]
-	} else if parsed.PrivilegeMethod != "" {
-		activeElev = "elevation/" + parsed.PrivilegeMethod
-	} else {
-		activeElev = "elevation/run0"
-	}
-
-	activePkg := ""
-	if parsed.PluginOverrides != nil && parsed.PluginOverrides["package"] != "" {
-		activePkg = parsed.PluginOverrides["package"]
-	}
-
-	overrides := make(map[string]string)
-	if parsed.PluginOverrides != nil {
-		for k, v := range parsed.PluginOverrides {
-			overrides[k] = v
-		}
-	}
-	if parsed.SSHUser != "" {
-		overrides["user"] = parsed.SSHUser
-	}
-	if parsed.Port > 0 {
-		overrides["port"] = fmt.Sprintf("%d", parsed.Port)
-	}
-	// Surface Proxmox/API connection hints (used by the vm/proxmox plugin).
-	if parsed.APIPort > 0 {
-		overrides["api_port"] = fmt.Sprintf("%d", parsed.APIPort)
-	}
-	if parsed.APIUser != "" {
-		overrides["api_user"] = parsed.APIUser
-	}
-
-	facts := HostFacts{
-		NodeID:           parsed.ID,
-		OSFamily:         osFamily,
-		HostRoute:        route,
-		ActiveConnection: activeConn,
-		ActiveElevation:  activeElev,
-		ActivePackage:    activePkg,
-		Overrides:        overrides,
-	}
-
-	return facts, true, nil
+	return buildHostFacts(id, ip, portStr, sshUser, tailscaleIP, tailscaleHost, []byte(nodeJSON)), true, nil
 }
 
 // In-memory Probe Cache Entry
@@ -933,7 +980,19 @@ func (a *API) handlePluginAction(w http.ResponseWriter, r *http.Request, nodeID 
 
 	var reqBody ActionRequestBody
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		rawBytes, _ := io.ReadAll(r.Body)
+		if len(rawBytes) > 0 {
+			_ = json.Unmarshal(rawBytes, &reqBody)
+			if len(reqBody.Options) == 0 {
+				var flat map[string]any
+				if err := json.Unmarshal(rawBytes, &flat); err == nil {
+					delete(flat, "options")
+					if len(flat) > 0 {
+						reqBody.Options = flat
+					}
+				}
+			}
+		}
 	}
 	if reqBody.Options == nil {
 		reqBody.Options = make(map[string]any)

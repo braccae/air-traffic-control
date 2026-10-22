@@ -277,6 +277,11 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string, 
 			Broadcast:    queueBroadcast,
 			Fallback:     pluginAPI.NodeRoutesHandler(),
 			SeedBaseline: true,
+			OnNodeUpdated: func(nodeID string) {
+				if pluginAPI != nil && pluginAPI.Cache() != nil {
+					pluginAPI.Cache().Invalidate(nodeID)
+				}
+			},
 		}); err != nil {
 			log.Printf("node API disabled: %v", err)
 		} else {

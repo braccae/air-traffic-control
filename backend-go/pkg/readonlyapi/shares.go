@@ -6,13 +6,13 @@ import (
 )
 
 // sharesCmd is the exact command server.ts runs for GET /api/nodes/:id/shares.
-const sharesCmd = "cat /var/lib/nfs/etab /etc/exports 2>/dev/null || echo \"NO_NFS\"; " +
+const sharesCmd = "(cat /var/lib/nfs/etab /etc/exports /etc/exports.d/*.exports 2>/dev/null || true); " +
 	"echo \"===SAMBA===\"; " +
-	"sudo -n testparm -s 2>/dev/null || testparm -s 2>/dev/null || cat /etc/samba/smb.conf 2>/dev/null || echo \"NO_SAMBA\"; " +
+	"(sudo -n testparm -s 2>/dev/null || testparm -s 2>/dev/null || sudo -n cat /etc/samba/smb.conf /etc/samba/smb.conf.d/*.conf 2>/dev/null || cat /etc/samba/smb.conf /etc/samba/smb.conf.d/*.conf 2>/dev/null || echo \"NO_SAMBA\"); " +
 	"echo \"===ZFS_SHARES===\"; " +
-	"sudo -n cat /etc/cockpit/zfs/shares.conf 2>/dev/null || cat /etc/cockpit/zfs/shares.conf 2>/dev/null || echo \"NO_ZFS_SHARES\"; " +
+	"(sudo -n cat /etc/cockpit/zfs/shares.conf 2>/dev/null || cat /etc/cockpit/zfs/shares.conf 2>/dev/null || echo \"NO_ZFS_SHARES\"); " +
 	"echo \"===NET_CONF===\"; " +
-	"sudo -n net conf list 2>/dev/null || echo \"NO_NET_CONF\"; " +
+	"(sudo -n net conf list 2>/dev/null || net conf list 2>/dev/null || echo \"NO_NET_CONF\"); " +
 	"echo \"===SERVICES===\"; " +
 	"systemctl is-active nfs-server smb smbd 2>&1 || true"
 

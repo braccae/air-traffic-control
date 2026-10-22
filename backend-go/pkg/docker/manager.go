@@ -111,6 +111,10 @@ func (m *Manager) Probe() (bool, string) {
 	if err != nil || strings.TrimSpace(out) == "" {
 		return false, ""
 	}
+	verOut, _ := m.run("(docker --version 2>&1; readlink /var/run/docker.sock /run/docker.sock 2>/dev/null) || true")
+	if strings.Contains(strings.ToLower(verOut), "podman") {
+		return false, ""
+	}
 	if v, err := m.run(rootfulCmd("info --format '{{.ServerVersion}}'")); err == nil {
 		if s := strings.TrimSpace(v); s != "" {
 			return true, s

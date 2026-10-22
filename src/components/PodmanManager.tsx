@@ -18,6 +18,7 @@ import { safeFetchJson } from '../utils/apiDefensive.ts';
 
 interface PodmanManagerProps {
   selectedNode?: NodeItem;
+  pluginId?: string;
   onOpenLogs: (target: string, user?: string, uid?: number) => void;
   onOpenExec: (target: string) => void;
   onRestartPod: (podName: string) => void;
@@ -63,16 +64,16 @@ function getPodDisplayRam(pod: PodItem): string {
 
 export const PodmanManager: React.FC<PodmanManagerProps> = ({
   selectedNode,
+  pluginId,
   onOpenLogs,
   onOpenExec,
   onRestartPod,
 }) => {
+  const isDockerMode = pluginId === 'container/docker' || pluginId === 'docker';
   const [filter, setFilter] = useState<'all' | 'running' | 'stopped'>('all');
-  const [activeTab, setActiveTab] = useState<'all' | 'podman' | 'docker'>('all');
   const [probedUsers, setProbedUsers] = useState<UnprivilegedPodmanUser[]>([]);
   const [rootContainers, setRootContainers] = useState<ContainerItem[]>([]);
   const [rootPods, setRootPods] = useState<PodItem[]>([]);
-  const [hasDocker, setHasDocker] = useState(false);
   const [dockerContainers, setDockerContainers] = useState<ContainerItem[]>([]);
   const [customPods, setCustomPods] = useState<PodItem[]>([]);
   const [standaloneState, setStandaloneState] = useState<StandaloneDaemon[]>([]);
@@ -110,7 +111,6 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
         if (Array.isArray(data?.rootPods)) {
           setRootPods(data.rootPods);
         }
-        setHasDocker(Boolean(data?.hasDocker));
         if (Array.isArray(data?.dockerContainers)) {
           setDockerContainers(data.dockerContainers);
         }
@@ -288,16 +288,57 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
     return filter === 'running' ? isRunning : !isRunning;
   });
 
-  const statusCounts = countPodmanStatuses(allPods, standaloneContainers, dockerContainers);
+  // Group Docker containers into Compose stacks vs standalone Docker containers
+  const composeStacksMap = new Map<string, {
+    project: string;
+    configFiles?: string;
+    containers: ContainerItem[];
+    runningCount: number;
+  }>();
+  const standaloneDockerContainers: ContainerItem[] = [];
+
+  for (const dc of filteredDocker) {
+    if (dc.composeProject) {
+      let stack = composeStacksMap.get(dc.composeProject);
+      if (!stack) {
+        stack = {
+          project: dc.composeProject,
+          configFiles: dc.composeConfigFiles,
+          containers: [],
+          runningCount: 0,
+        };
+        composeStacksMap.set(dc.composeProject, stack);
+      }
+      if (!stack.configFiles && dc.composeConfigFiles) {
+        stack.configFiles = dc.composeConfigFiles;
+      }
+      stack.containers.push(dc);
+      const s = (dc.status || '').toLowerCase();
+      if (s.includes('running') || s.startsWith('up ')) {
+        stack.runningCount++;
+      }
+    } else {
+      standaloneDockerContainers.push(dc);
+    }
+  }
+  const composeStacks = Array.from(composeStacksMap.values());
+
+  const statusCounts = isDockerMode
+    ? countPodmanStatuses([], [], dockerContainers)
+    : countPodmanStatuses(allPods, standaloneContainers, []);
 
   return (
     <section className="bg-[#171a2d] rounded p-3 flex flex-col border border-[#26293c]">
       {/* Header bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 pb-2">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="material-symbols-outlined text-[#d9b9ff] text-[20px]">token</span>
+          <span className="material-symbols-outlined text-[#d9b9ff] text-[20px]">
+            {isDockerMode ? 'deployed_code' : 'token'}
+          </span>
           <span className="font-sans text-sm text-[#dfe1fa] font-semibold">
-            Podman &amp; Container Runtime ({selectedNode?.shortName || 'host'})
+            {isDockerMode
+              ? `Docker Containers & Compose Stacks (${selectedNode?.shortName || 'host'})`
+              : `Podman Containers & Pods (${selectedNode?.shortName || 'host'})`}
           </span>
 
           {/* Status filter buttons */}
@@ -354,17 +395,19 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
             <span className="material-symbols-outlined text-[14px]">refresh</span>
             <span>Sync</span>
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setShowCreatePodForm(prev => !prev);
-              setShowRunContainerForm(false);
-            }}
-            className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[14px] text-[#d9b9ff]">add_circle</span>
-            <span>+ Create Pod</span>
-          </button>
+          {!isDockerMode && (
+            <button
+              type="button"
+              onClick={() => {
+                setShowCreatePodForm(prev => !prev);
+                setShowRunContainerForm(false);
+              }}
+              className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[14px] text-[#d9b9ff]">add_circle</span>
+              <span>+ Create Pod</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -490,7 +533,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
       {/* Main Content Area */}
       <div className="space-y-3 mt-1 font-mono text-xs">
         {/* SECTION 1: PODS & MEMBER CONTAINERS */}
-        {(activeTab === 'all' || activeTab === 'podman') && (
+        {!isDockerMode && (
           <div className="space-y-2">
             <div className="flex items-center justify-between pb-1 border-b border-[#26293c]/60">
               <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold text-[#dfe1fa] uppercase tracking-wider">
@@ -646,7 +689,7 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
         )}
 
         {/* SECTION 2: STANDALONE CONTAINERS GROUPED BY USER */}
-        {(activeTab === 'all' || activeTab === 'podman') && (
+        {!isDockerMode && (
           <div className="space-y-2">
             <div className="flex items-center justify-between pb-1 pt-1 border-b border-[#26293c]/60">
               <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold text-[#dfe1fa] uppercase tracking-wider">
@@ -775,105 +818,219 @@ export const PodmanManager: React.FC<PodmanManagerProps> = ({
           </div>
         )}
 
-        {/* SECTION 3: DOCKER ENGINE CONTAINERS */}
-        {(activeTab === 'all' || activeTab === 'docker') && (hasDocker || activeTab === 'docker') && (
-          <div className="bg-[#1b1e31] rounded p-2.5 border border-[#26293c] mt-2">
-            <div className="flex items-center justify-between pb-2 border-b border-[#26293c]/50 flex-wrap gap-2">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-[#b0c9ff] text-[18px]">deployed_code</span>
-                <span className="font-bold text-xs text-[#dfe1fa]">
-                  Docker Engine Containers ({selectedNode?.shortName || 'host'})
-                </span>
-                <span className="px-1.5 py-0.5 bg-[#b0c9ff]/15 text-[#b0c9ff] border border-[#b0c9ff]/30 rounded text-[10px] font-bold">
-                  dockerd (rootful)
-                </span>
-              </div>
-              <div className="flex items-center gap-2 text-[11px] text-[#8d909b]">
-                <span>
-                  Active:{' '}
-                  <strong className="text-[#8cd6cb]">
-                    {
-                      filteredDocker.filter(
-                        c =>
-                          c.status.toLowerCase().includes('running') ||
-                          c.status.toLowerCase().startsWith('up ')
-                      ).length
-                    }
-                  </strong>
-                </span>
-                <span>|</span>
-                <span>
-                  Total: <strong className="text-[#dfe1fa]">{dockerContainers.length}</strong>
+        {/* SECTION 3: DOCKER ENGINE CONTAINERS & COMPOSE STACKS */}
+        {isDockerMode && (
+          <div className="space-y-3 mt-1">
+            {/* Sub-section 3A: DOCKER COMPOSE STACKS */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between pb-1 border-b border-[#26293c]/60">
+                <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold text-[#dfe1fa] uppercase tracking-wider">
+                  <span className="material-symbols-outlined text-[#b0c9ff] text-[16px]">layers</span>
+                  <span>DOCKER COMPOSE STACKS ({composeStacks.length})</span>
+                </div>
+                <span className="text-[10px] text-[#8d909b] font-mono">
+                  {composeStacks.reduce((acc, s) => acc + s.containers.length, 0)} stack containers
                 </span>
               </div>
+
+              {composeStacks.length === 0 ? (
+                <div className="bg-[#1b1e31] rounded p-3 text-[#8d909b] border border-[#26293c] text-center">
+                  No Docker Compose stacks found on {selectedNode?.shortName || 'this node'} for filter &ldquo;{filter}&rdquo;.
+                </div>
+              ) : (
+                composeStacks.map(stack => (
+                  <div key={stack.project} className="bg-[#1b1e31] rounded p-2.5 border border-[#26293c]">
+                    <div className="flex items-center justify-between pb-2 border-b border-[#26293c]/40 flex-wrap gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="material-symbols-outlined text-[#b0c9ff] text-[16px]">layers</span>
+                        <span className="text-[#dfe1fa] font-bold text-xs">compose: {stack.project}</span>
+                        <span className="px-1.5 py-0.2 bg-[#8cd6cb]/20 text-[#8cd6cb] rounded text-[10px] border border-[#8cd6cb]/30">
+                          {stack.runningCount} / {stack.containers.length} Running
+                        </span>
+                        {stack.configFiles && (
+                          <span className="px-1.5 py-0.2 bg-[#26293c] text-[#8d909b] rounded text-[10px] border border-[#434750]/40 truncate max-w-md" title={stack.configFiles}>
+                            {stack.configFiles}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto mt-1">
+                      <table className="w-full text-left font-mono text-xs">
+                        <thead className="bg-[#0a0d1f]/70 text-[#8d909b] text-[10px]">
+                          <tr className="h-6">
+                            <th className="px-2">Container Name</th>
+                            <th className="px-2">Service</th>
+                            <th className="px-2">Image</th>
+                            <th className="px-2">Status</th>
+                            <th className="px-2 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#26293c]/50">
+                          {stack.containers.map(dc => (
+                            <tr key={dc.id || dc.name} className="h-7 hover:bg-[#26293c]/40 transition-colors">
+                              <td className="px-2 text-[#dfe1fa] font-medium flex items-center gap-1.5">
+                                <span
+                                  className={`w-1.5 h-1.5 rounded-full ${
+                                    dc.status.toLowerCase().includes('exited')
+                                      ? 'bg-[#ffb4ab]'
+                                      : 'bg-[#8cd6cb]'
+                                  }`}
+                                ></span>
+                                <span>{dc.name}</span>
+                              </td>
+                              <td className="px-2 text-[#b0c9ff]">{dc.composeService || '-'}</td>
+                              <td className="px-2 text-[#8d909b] truncate max-w-xs">{dc.image}</td>
+                              <td className="px-2">
+                                <span
+                                  className={
+                                    dc.status.toLowerCase().includes('exited')
+                                      ? 'text-[#ffb4ab]'
+                                      : 'text-[#8cd6cb]'
+                                  }
+                                >
+                                  {dc.status}
+                                </span>
+                              </td>
+                              <td className="px-2 text-right space-x-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleContainerAction(dc, 'restart')}
+                                  className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#ffd97d] rounded text-[10px] cursor-pointer"
+                                >
+                                  Restart
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenExec(dc.name)}
+                                  className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#8cd6cb] rounded text-[10px] cursor-pointer"
+                                >
+                                  Exec
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenLogs(dc.name, 'root', 0)}
+                                  className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded text-[10px] cursor-pointer"
+                                >
+                                  Logs
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
 
-            {filteredDocker.length === 0 ? (
-              <div className="p-3 text-center text-[#8d909b] text-xs">
-                {dockerContainers.length === 0
-                  ? `Docker Engine is active on ${selectedNode?.shortName || 'host'}, but no containers are currently running.`
-                  : `No Docker containers matching filter "${filter}".`}
+            {/* Sub-section 3B: STANDALONE DOCKER CONTAINERS */}
+            <div className="bg-[#1b1e31] rounded p-2.5 border border-[#26293c]">
+              <div className="flex items-center justify-between pb-2 border-b border-[#26293c]/50 flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[#b0c9ff] text-[18px]">deployed_code</span>
+                  <span className="font-bold text-xs text-[#dfe1fa] uppercase tracking-wider">
+                    STANDALONE DOCKER CONTAINERS ({standaloneDockerContainers.length})
+                  </span>
+                  <span className="px-1.5 py-0.5 bg-[#b0c9ff]/15 text-[#b0c9ff] border border-[#b0c9ff]/30 rounded text-[10px] font-bold">
+                    dockerd (rootful)
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-[11px] text-[#8d909b]">
+                  <span>
+                    Active:{' '}
+                    <strong className="text-[#8cd6cb]">
+                      {
+                        standaloneDockerContainers.filter(
+                          c =>
+                            c.status.toLowerCase().includes('running') ||
+                            c.status.toLowerCase().startsWith('up ')
+                        ).length
+                      }
+                    </strong>
+                  </span>
+                  <span>|</span>
+                  <span>
+                    Total: <strong className="text-[#dfe1fa]">{standaloneDockerContainers.length}</strong>
+                  </span>
+                </div>
               </div>
-            ) : (
-              <div className="overflow-x-auto mt-1">
-                <table className="w-full text-left font-mono text-xs">
-                  <thead className="bg-[#0a0d1f]/70 text-[#8d909b] text-[10px]">
-                    <tr className="h-6">
-                      <th className="px-2">Container ID</th>
-                      <th className="px-2">Container Name</th>
-                      <th className="px-2">Image</th>
-                      <th className="px-2">Status</th>
-                      <th className="px-2 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#26293c]/50">
-                    {filteredDocker.map(dc => (
-                      <tr key={dc.id || dc.name} className="h-7 hover:bg-[#26293c]/40 transition-colors">
-                        <td className="px-2 text-[#8d909b] font-mono text-[11px]">{dc.id}</td>
-                        <td className="px-2 text-[#dfe1fa] font-medium flex items-center gap-1.5">
-                          <span
-                            className={`w-1.5 h-1.5 rounded-full ${
-                              dc.status.toLowerCase().includes('exited')
-                                ? 'bg-[#ffb4ab]'
-                                : 'bg-[#8cd6cb]'
-                            }`}
-                          ></span>
-                          <span>{dc.name}</span>
-                        </td>
-                        <td className="px-2 text-[#8d909b] truncate max-w-xs">{dc.image}</td>
-                        <td className="px-2">
-                          <span
-                            className={
-                              dc.status.toLowerCase().includes('exited')
-                                ? 'text-[#ffb4ab]'
-                                : 'text-[#8cd6cb]'
-                            }
-                          >
-                            {dc.status}
-                          </span>
-                        </td>
-                        <td className="px-2 text-right space-x-1">
-                          <button
-                            type="button"
-                            onClick={() => onOpenExec(dc.name)}
-                            className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#8cd6cb] rounded text-[10px] cursor-pointer"
-                          >
-                            Exec
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onOpenLogs(dc.name, 'root', 0)}
-                            className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded text-[10px] cursor-pointer"
-                          >
-                            Logs
-                          </button>
-                        </td>
+
+              {standaloneDockerContainers.length === 0 ? (
+                <div className="p-3 text-center text-[#8d909b] text-xs">
+                  {dockerContainers.length === 0
+                    ? `Docker Engine is active on ${selectedNode?.shortName || 'host'}, but no standalone containers are currently running.`
+                    : `No standalone Docker containers matching filter "${filter}".`}
+                </div>
+              ) : (
+                <div className="overflow-x-auto mt-1">
+                  <table className="w-full text-left font-mono text-xs">
+                    <thead className="bg-[#0a0d1f]/70 text-[#8d909b] text-[10px]">
+                      <tr className="h-6">
+                        <th className="px-2">Container ID</th>
+                        <th className="px-2">Container Name</th>
+                        <th className="px-2">Image</th>
+                        <th className="px-2">Status</th>
+                        <th className="px-2 text-right">Actions</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                    </thead>
+                    <tbody className="divide-y divide-[#26293c]/50">
+                      {standaloneDockerContainers.map(dc => (
+                        <tr key={dc.id || dc.name} className="h-7 hover:bg-[#26293c]/40 transition-colors">
+                          <td className="px-2 text-[#8d909b] font-mono text-[11px]">{dc.id}</td>
+                          <td className="px-2 text-[#dfe1fa] font-medium flex items-center gap-1.5">
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                dc.status.toLowerCase().includes('exited')
+                                  ? 'bg-[#ffb4ab]'
+                                  : 'bg-[#8cd6cb]'
+                              }`}
+                            ></span>
+                            <span>{dc.name}</span>
+                          </td>
+                          <td className="px-2 text-[#8d909b] truncate max-w-xs">{dc.image}</td>
+                          <td className="px-2">
+                            <span
+                              className={
+                                dc.status.toLowerCase().includes('exited')
+                                  ? 'text-[#ffb4ab]'
+                                  : 'text-[#8cd6cb]'
+                              }
+                            >
+                              {dc.status}
+                            </span>
+                          </td>
+                          <td className="px-2 text-right space-x-1">
+                            <button
+                              type="button"
+                              onClick={() => handleContainerAction(dc, 'restart')}
+                              className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#ffd97d] rounded text-[10px] cursor-pointer"
+                            >
+                              Restart
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onOpenExec(dc.name)}
+                              className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#8cd6cb] rounded text-[10px] cursor-pointer"
+                            >
+                              Exec
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onOpenLogs(dc.name, 'root', 0)}
+                              className="px-1.5 py-0.5 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] rounded text-[10px] cursor-pointer"
+                            >
+                              Logs
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
