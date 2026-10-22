@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"air-traffic-control/backend/pkg/plugin"
+	"air-traffic-control/backend/pkg/plugin/newapi"
+	"air-traffic-control/backend/pkg/plugin/settingsframework"
 	_ "air-traffic-control/backend/plugins/all"
 )
 
@@ -101,5 +103,115 @@ func TestPodmanPlugin_ReadBothRootfulAndRootlessContainers(t *testing.T) {
 	}
 	if _, hasProbed := data["probedUsers"]; !hasProbed {
 		t.Errorf("expected probedUsers key in Read output")
+	}
+}
+
+func TestPodmanPlugin_V2InterfacesAndCapabilities(t *testing.T) {
+	p, ok := plugin.Get("container/podman")
+	if !ok {
+		t.Fatalf("container/podman not registered")
+	}
+
+	// 1. DataCollectionPlugin
+	dc, ok := p.(newapi.DataCollectionPlugin)
+	if !ok {
+		t.Fatal("container/podman does not implement newapi.DataCollectionPlugin")
+	}
+	sched := dc.CollectionSchedule()
+	if sched.Interval <= 0 || sched.TTL <= 0 {
+		t.Errorf("expected positive collection schedule interval and TTL, got %+v", sched)
+	}
+	schema := dc.CollectionSchema()
+	if schema.Version != "v2" || schema.RootKey != "containers" {
+		t.Errorf("unexpected collection schema: %+v", schema)
+	}
+
+	// 2. CategorizedSettingsProvider
+	csp, ok := p.(newapi.CategorizedSettingsProvider)
+	if !ok {
+		t.Fatal("container/podman does not implement newapi.CategorizedSettingsProvider")
+	}
+	catPage := csp.CategorizedSettingsPage()
+	if catPage.ID != "container/podman" || catPage.Category != "container" || catPage.Scope != newapi.SettingsScopeDatacenter {
+		t.Errorf("unexpected categorized settings page: %+v", catPage)
+	}
+	if err := settingsframework.ValidateSchema(catPage.SettingsPage); err != nil {
+		t.Fatalf("ValidateSchema failed: %v", err)
+	}
+	if err := newapi.ValidateCategorizedSettingsPage(catPage); err != nil {
+		t.Fatalf("ValidateCategorizedSettingsPage failed: %v", err)
+	}
+
+	// 3. ManagementPlugin
+	mp, ok := p.(newapi.ManagementPlugin)
+	if !ok {
+		t.Fatal("container/podman does not implement newapi.ManagementPlugin")
+	}
+	mgmtActions := mp.ManagementActions()
+	if len(mgmtActions) != 5 {
+		t.Fatalf("expected 5 management actions, got %d", len(mgmtActions))
+	}
+	if len(mp.Actions()) != len(mgmtActions) {
+		t.Errorf("Actions() length %d does not match ManagementActions() length %d", len(mp.Actions()), len(mgmtActions))
+	}
+
+	linuxFacts := plugin.HostFacts{NodeID: "node-1", OSFamily: "linux"}
+	if err := mp.ValidateAction(linuxFacts, "restart", map[string]any{"name": "caddy"}); err != nil {
+		t.Errorf("expected valid restart options, got: %v", err)
+	}
+	if err := mp.ValidateAction(linuxFacts, "rm", map[string]any{"container": "caddy"}); err != nil {
+		t.Errorf("expected valid rm alias with container fallback, got: %v", err)
+	}
+	if err := mp.ValidateAction(linuxFacts, "restart", map[string]any{}); err == nil {
+		t.Error("expected validation error when required name option is missing")
+	}
+	if err := mp.ValidateAction(linuxFacts, "nonexistent", map[string]any{"name": "caddy"}); err == nil {
+		t.Error("expected validation error for unsupported action")
+	}
+
+	// 4. ContextMenuProvider
+	cmp, ok := p.(newapi.ContextMenuProvider)
+	if !ok {
+		t.Fatal("container/podman does not implement newapi.ContextMenuProvider")
+	}
+	entries := cmp.ContextMenuEntries(context.Background(), linuxFacts)
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 context menu entries for compatible linux host, got %d", len(entries))
+	}
+	for _, entry := range entries {
+		if entry.PluginID != "container/podman" || entry.Target != newapi.TargetContainer {
+			t.Errorf("unexpected context menu entry metadata: %+v", entry)
+		}
+	}
+	if entries[len(entries)-1].Action != "delete" || !entries[len(entries)-1].Danger {
+		t.Errorf("expected last context menu entry to be danger delete action, got %+v", entries[len(entries)-1])
+	}
+
+	winEntries := cmp.ContextMenuEntries(context.Background(), plugin.HostFacts{NodeID: "win-1", OSFamily: "windows"})
+	if len(winEntries) != 0 {
+		t.Errorf("expected no context menu entries for incompatible windows host, got %+v", winEntries)
+	}
+
+	// 5. TaskCompileProvider
+	tcp, ok := p.(newapi.TaskCompileProvider)
+	if !ok {
+		t.Fatal("container/podman does not implement newapi.TaskCompileProvider")
+	}
+	spec, err := tcp.CompileTask(context.Background(), linuxFacts, newapi.TaskRequest{
+		ID:       "task-1",
+		Type:     newapi.TaskTypePluginAction,
+		NodeID:   "node-1",
+		PluginID: "container/podman",
+		Action:   "restart_pod",
+		Params:   map[string]any{"name": "proxy-pod", "user": "apps"},
+	})
+	if err != nil {
+		t.Fatalf("CompileTask failed: %v", err)
+	}
+	if len(spec.Steps) != 1 || spec.Steps[0].Module != "containers.podman.podman_pod" {
+		t.Errorf("unexpected compiled task steps: %+v", spec.Steps)
+	}
+	if spec.Steps[0].Params["become_user"] != "apps" {
+		t.Errorf("expected become_user=apps in CompileTask step, got %+v", spec.Steps[0].Params)
 	}
 }
