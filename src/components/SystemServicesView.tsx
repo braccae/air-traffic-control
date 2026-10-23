@@ -630,7 +630,7 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
 
                   return (
                     <tr
-                      key={srv.unit}
+                      key={`${srv.unit}-${srv.scope || 'system'}`}
                       className="hover:bg-[#1b1e31] transition-colors group"
                     >
                       <td className="py-2 px-3 font-semibold text-[#dfe1fa] min-w-[220px]">
