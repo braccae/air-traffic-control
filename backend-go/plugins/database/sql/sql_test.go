@@ -2,6 +2,7 @@ package sql_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -201,14 +202,33 @@ func TestSQLPlugin_V2InterfacesAndCapabilities(t *testing.T) {
 		t.Fatal("expected database/sql to implement newapi.ManagementPlugin")
 	}
 	mgmtActions := mgmt.ManagementActions()
-	if len(mgmtActions) != 5 {
-		t.Fatalf("expected 5 management actions, got %d", len(mgmtActions))
+	if len(mgmtActions) != 6 {
+		t.Fatalf("expected 6 management actions, got %d", len(mgmtActions))
 	}
 	if len(mgmt.Actions()) != len(mgmtActions) {
 		t.Errorf("Actions() length %d does not match ManagementActions() length %d", len(mgmt.Actions()), len(mgmtActions))
 	}
 
 	linuxFacts := plugin.HostFacts{NodeID: "node-1", OSFamily: "linux"}
+	if err := mgmt.ValidateAction(linuxFacts, "database_dump", map[string]any{
+		"engine":   "postgres",
+		"database": "app_db",
+		"format":   "custom",
+	}); err != nil {
+		t.Errorf("expected valid database_dump options to pass validation, got: %v", err)
+	}
+	if dumpSpec, err := p.(plugin.Actor).Compile(linuxFacts, "database_dump", map[string]any{
+		"engine":      "postgres",
+		"database":    "app_db",
+		"format":      "custom",
+		"scope":       "schema_only",
+		"clean":       true,
+		"output_path": "/tmp/app_db.dump",
+	}); err != nil {
+		t.Errorf("compile database_dump failed: %v", err)
+	} else if len(dumpSpec.Steps) != 1 || !strings.Contains(fmt.Sprintf("%v", dumpSpec.Steps[0].Params["cmd"]), "pg_dump") {
+		t.Errorf("unexpected database_dump task step: %+v", dumpSpec)
+	}
 	if err := mgmt.ValidateAction(linuxFacts, "query", map[string]any{
 		"engine": "postgres",
 		"query":  "SELECT 1;",

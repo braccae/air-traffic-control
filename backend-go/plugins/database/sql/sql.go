@@ -277,7 +277,7 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	// 1. Inspect PostgreSQL
 	psqlCli, _ := r.RunCommand(ctx, "command -v psql || true")
 	psqlCli = strings.TrimSpace(psqlCli)
-	if psqlCli != "" || strings.Contains(detLower, "postgres") || h.Overrides["postgres_host"] != "" || h.Overrides["postgres_port"] != "" || h.Overrides["postgres_socket"] != "" {
+	if psqlCli != "" || strings.Contains(detLower, "postgres") || h.Overrides["postgres_host"] != "" || h.Overrides["postgres_port"] != "" || h.Overrides["postgres_socket"] != "" || h.Overrides["postgres_user"] != "" || h.Overrides["postgres_database"] != "" {
 		st := inspectPostgres(ctx, r, psqlCli, h, strings.Contains(detLower, "postgres"))
 		if st != nil {
 			engines = append(engines, *st)
@@ -287,7 +287,7 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	// 2. Inspect MariaDB / MySQL
 	mysqlCli, _ := r.RunCommand(ctx, "command -v mariadb || command -v mysql || true")
 	mysqlCli = strings.TrimSpace(mysqlCli)
-	if mysqlCli != "" || strings.Contains(detLower, "mariadb") || h.Overrides["mariadb_host"] != "" || h.Overrides["mariadb_port"] != "" || h.Overrides["mariadb_socket"] != "" || h.Overrides["mysql_port"] != "" || h.Overrides["mysql_socket"] != "" {
+	if mysqlCli != "" || strings.Contains(detLower, "mariadb") || h.Overrides["mariadb_host"] != "" || h.Overrides["mariadb_port"] != "" || h.Overrides["mariadb_socket"] != "" || h.Overrides["mysql_port"] != "" || h.Overrides["mysql_socket"] != "" || h.Overrides["mariadb_user"] != "" || h.Overrides["mariadb_database"] != "" {
 		st := inspectMariaDB(ctx, r, mysqlCli, h, strings.Contains(detLower, "mariadb"))
 		if st != nil {
 			engines = append(engines, *st)
@@ -297,7 +297,7 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	// 3. Inspect MSSQL
 	mssqlCli, _ := r.RunCommand(ctx, "command -v sqlcmd || true")
 	mssqlCli = strings.TrimSpace(mssqlCli)
-	if mssqlCli != "" || strings.Contains(detLower, "mssql") || h.Overrides["mssql_host"] != "" || h.Overrides["mssql_port"] != "" || h.Overrides["mssql_socket"] != "" {
+	if mssqlCli != "" || strings.Contains(detLower, "mssql") || h.Overrides["mssql_host"] != "" || h.Overrides["mssql_port"] != "" || h.Overrides["mssql_socket"] != "" || h.Overrides["mssql_user"] != "" || h.Overrides["mssql_database"] != "" {
 		st := inspectMSSQL(ctx, r, mssqlCli, h, strings.Contains(detLower, "mssql"))
 		if st != nil {
 			engines = append(engines, *st)
@@ -317,11 +317,22 @@ func inspectPostgres(ctx context.Context, r plugin.Runner, cli string, h plugin.
 	if socketOverride != "" {
 		metrics["socket"] = socketOverride
 	}
+	if u := h.Overrides["postgres_user"]; u != "" {
+		metrics["user"] = u
+	}
+	if db := h.Overrides["postgres_database"]; db != "" {
+		metrics["database"] = db
+	}
+
+	pgPwdEnv := ""
+	if pwd := h.Overrides["postgres_password"]; pwd != "" {
+		pgPwdEnv = fmt.Sprintf("PGPASSWORD=%s ", escapeArg(pwd))
+	}
 
 	runPsql := func(sqlQuery string) string {
 		if cli != "" {
 			opts := buildPostgresFlags(h)
-			cmd := fmt.Sprintf("%s %s -t -A -c %s 2>/dev/null || true", cli, opts, escapeArg(sqlQuery))
+			cmd := fmt.Sprintf("%s%s %s -t -A -c %s 2>/dev/null || true", pgPwdEnv, cli, opts, escapeArg(sqlQuery))
 			if out, err := r.RunCommand(ctx, cmd); err == nil && strings.TrimSpace(out) != "" {
 				return out
 			}
@@ -333,8 +344,8 @@ func inspectPostgres(ctx context.Context, r plugin.Runner, cli string, h plugin.
 				}
 			}
 			for _, dir := range sockDirs {
-				tryCmd := fmt.Sprintf("[ -S %s/.s.PGSQL.%s ] && (sudo -n -u postgres %s -h %s -p %s -t -A -c %s 2>/dev/null || %s -h %s -p %s -t -A -c %s 2>/dev/null) || true",
-					escapeArg(dir), port, cli, escapeArg(dir), port, escapeArg(sqlQuery), cli, escapeArg(dir), port, escapeArg(sqlQuery))
+				tryCmd := fmt.Sprintf("[ -S %s/.s.PGSQL.%s ] && (sudo -n -u postgres %s%s -h %s -p %s -t -A -c %s 2>/dev/null || %s%s -h %s -p %s -t -A -c %s 2>/dev/null) || true",
+					escapeArg(dir), port, pgPwdEnv, cli, escapeArg(dir), port, escapeArg(sqlQuery), pgPwdEnv, cli, escapeArg(dir), port, escapeArg(sqlQuery))
 				if out, err := r.RunCommand(ctx, tryCmd); err == nil && strings.TrimSpace(out) != "" {
 					metrics["socket"] = fmt.Sprintf("%s/.s.PGSQL.%s", dir, port)
 					return out
@@ -388,7 +399,7 @@ func inspectPostgres(ctx context.Context, r plugin.Runner, cli string, h plugin.
 	var userOut string
 	if cli != "" {
 		opts := buildPostgresFlags(h)
-		userCmd := fmt.Sprintf("%s %s -t -A -F'|' -c 'SELECT usename, usesuper, usecreatedb FROM pg_user;' 2>/dev/null || true", cli, opts)
+		userCmd := fmt.Sprintf("%s%s %s -t -A -F'|' -c 'SELECT usename, usesuper, usecreatedb FROM pg_user;' 2>/dev/null || true", pgPwdEnv, cli, opts)
 		userOut, _ = r.RunCommand(ctx, userCmd)
 	}
 	if strings.TrimSpace(userOut) == "" {
@@ -432,6 +443,12 @@ func inspectMariaDB(ctx context.Context, r plugin.Runner, cli string, h plugin.H
 	metrics := map[string]any{"port": port}
 	if socketOverride != "" {
 		metrics["socket"] = socketOverride
+	}
+	if u := firstNonEmpty(h.Overrides["mariadb_user"], h.Overrides["mysql_user"]); u != "" {
+		metrics["user"] = u
+	}
+	if db := firstNonEmpty(h.Overrides["mariadb_database"], h.Overrides["mysql_database"]); db != "" {
+		metrics["database"] = db
 	}
 
 	runMysql := func(sqlQuery string) string {
@@ -535,6 +552,12 @@ func inspectMSSQL(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 	metrics := map[string]any{"port": port}
 	if socketOverride != "" {
 		metrics["socket"] = socketOverride
+	}
+	if u := h.Overrides["mssql_user"]; u != "" {
+		metrics["user"] = u
+	}
+	if db := h.Overrides["mssql_database"]; db != "" {
+		metrics["database"] = db
 	}
 	opts := buildMSSQLFlags(h)
 
@@ -680,6 +703,25 @@ func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
 			ConfirmPrompt:    "Permanently drop this database user account?",
 			InvalidatesKinds: []plugin.Kind{plugin.KindDatabase},
 		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "database_dump",
+				Label:       "Dump Database",
+				Description: "Dump an SQL database schema and/or data to a file on the target host",
+				Options: []plugin.OptionSchema{
+					{Name: "engine", Type: "select", Required: true, Enum: []string{"postgres", "mariadb", "mssql"}, Description: "Target SQL engine"},
+					{Name: "database", Type: "string", Required: true, Description: "Database name to dump"},
+					{Name: "format", Type: "string", Required: false, Default: "plain", Description: "Dump format (plain, custom, directory, tar, sql, single-transaction, bak)"},
+					{Name: "scope", Type: "string", Required: false, Default: "full", Description: "Dump scope (full, schema_only, data_only)"},
+					{Name: "clean", Type: "bool", Required: false, Default: false, Description: "Include DROP statements before CREATE"},
+					{Name: "compress", Type: "bool", Required: false, Default: false, Description: "Compress output with gzip (.gz)"},
+					{Name: "output_path", Type: "string", Required: false, Description: "Destination file path on the target host"},
+				},
+			},
+			Category:         newapi.ActionCategoryLifecycle,
+			Idempotent:       false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindDatabase},
+		},
 	}
 }
 
@@ -807,6 +849,13 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 			return plugin.TaskSpec{}, fmt.Errorf("username is required for user_drop")
 		}
 		return compileUserDropTask(engine, username, secretsMasked)
+
+	case "database_dump":
+		db := firstNonEmpty(optString(opts, "database"), optString(opts, "name"))
+		if db == "" {
+			return plugin.TaskSpec{}, fmt.Errorf("database is required for database_dump")
+		}
+		return compileDatabaseDumpTask(h, engine, db, opts, secretsMasked)
 
 	default:
 		return plugin.TaskSpec{}, fmt.Errorf("unsupported sql action: %s", action)
@@ -1128,10 +1177,189 @@ func compileUserDropTask(engine, username string, masked map[string]string) (plu
 	}
 }
 
+func compileDatabaseDumpTask(h plugin.HostFacts, engine, database string, opts map[string]any, masked map[string]string) (plugin.TaskSpec, error) {
+	format := strings.ToLower(optString(opts, "format"))
+	scope := strings.ToLower(optString(opts, "scope"))
+	if scope == "" {
+		scope = "full"
+	}
+	clean := optBool(opts, "clean")
+	compress := optBool(opts, "compress")
+	outPath := optString(opts, "output_path")
+
+	if outPath == "" {
+		ext := ".sql"
+		if engine == "postgres" {
+			switch format {
+			case "custom":
+				ext = ".dump"
+			case "directory":
+				ext = "_dir"
+			case "tar":
+				ext = ".tar"
+			}
+		} else if engine == "mssql" {
+			ext = ".bak"
+		}
+		if compress && ext == ".sql" {
+			ext = ".sql.gz"
+		}
+		outPath = fmt.Sprintf("/tmp/%s_dump%s", database, ext)
+	}
+
+	switch engine {
+	case "mariadb", "mysql":
+		flags := make([]string, 0)
+		if sock := firstNonEmpty(h.Overrides["mariadb_socket"], h.Overrides["mysql_socket"]); sock != "" {
+			flags = append(flags, fmt.Sprintf("-S %s", escapeArg(sock)))
+		} else if host := firstNonEmpty(h.Overrides["mariadb_host"], h.Overrides["mysql_host"]); host != "" {
+			flags = append(flags, fmt.Sprintf("-h %s", escapeArg(host)))
+		}
+		if port := firstNonEmpty(h.Overrides["mariadb_port"], h.Overrides["mysql_port"]); port != "" {
+			flags = append(flags, fmt.Sprintf("-P %s", port))
+		}
+		if user := firstNonEmpty(h.Overrides["mariadb_user"], h.Overrides["mysql_user"]); user != "" {
+			flags = append(flags, fmt.Sprintf("-u %s", escapeArg(user)))
+		}
+		if pwd := firstNonEmpty(h.Overrides["mariadb_password"], h.Overrides["mysql_password"]); pwd != "" {
+			flags = append(flags, fmt.Sprintf("-p%s", escapeArg(pwd)))
+			if masked["db_password"] == "" {
+				masked["db_password"] = "••••••••"
+			}
+		}
+		if format == "single-transaction" {
+			flags = append(flags, "--single-transaction")
+		}
+		if scope == "schema_only" {
+			flags = append(flags, "--no-data")
+		} else if scope == "data_only" {
+			flags = append(flags, "--no-create-info")
+		}
+		if clean {
+			flags = append(flags, "--add-drop-table")
+		}
+		flagStr := strings.Join(flags, " ")
+		if flagStr != "" {
+			flagStr += " "
+		}
+		var cmd string
+		if compress {
+			cmd = fmt.Sprintf("(mariadb-dump %s%s || mysqldump %s%s) | gzip > %s", flagStr, escapeArg(database), flagStr, escapeArg(database), escapeArg(outPath))
+		} else {
+			cmd = fmt.Sprintf("(mariadb-dump %s%s || mysqldump %s%s) > %s", flagStr, escapeArg(database), flagStr, escapeArg(database), escapeArg(outPath))
+		}
+		return plugin.TaskSpec{
+			Name: fmt.Sprintf("Dump MariaDB database %s to %s", database, outPath),
+			Steps: []plugin.TaskStep{
+				{
+					Name:   fmt.Sprintf("Dump database %s to %s", database, outPath),
+					Module: "ansible.builtin.shell",
+					Params: map[string]any{
+						"cmd": cmd,
+					},
+				},
+			},
+			SecretsMasked: masked,
+		}, nil
+
+	case "mssql":
+		flags := buildMSSQLFlags(h)
+		backupSQL := fmt.Sprintf("BACKUP DATABASE [%s] TO DISK = N'%s' WITH FORMAT, INIT;", database, outPath)
+		cmd := fmt.Sprintf("sqlcmd %s -Q %s", flags, escapeArg(backupSQL))
+		return plugin.TaskSpec{
+			Name: fmt.Sprintf("Backup MSSQL database %s to %s", database, outPath),
+			Steps: []plugin.TaskStep{
+				{
+					Name:   fmt.Sprintf("Backup database %s via sqlcmd", database),
+					Module: "ansible.builtin.command",
+					Params: map[string]any{
+						"cmd": cmd,
+					},
+				},
+			},
+			SecretsMasked: masked,
+		}, nil
+
+	case "postgres":
+		fallthrough
+	default:
+		pgFlags := make([]string, 0)
+		if sock := h.Overrides["postgres_socket"]; sock != "" {
+			hostDir := sock
+			if idx := strings.LastIndex(sock, "/"); idx > 0 && strings.Contains(sock[idx+1:], ".s.PGSQL.") {
+				hostDir = sock[:idx]
+			}
+			pgFlags = append(pgFlags, fmt.Sprintf("-h %s", escapeArg(hostDir)))
+		} else if host := h.Overrides["postgres_host"]; host != "" {
+			pgFlags = append(pgFlags, fmt.Sprintf("-h %s", escapeArg(host)))
+		}
+		if port := h.Overrides["postgres_port"]; port != "" {
+			pgFlags = append(pgFlags, fmt.Sprintf("-p %s", port))
+		}
+		if user := h.Overrides["postgres_user"]; user != "" {
+			pgFlags = append(pgFlags, fmt.Sprintf("-U %s", escapeArg(user)))
+		}
+		switch format {
+		case "custom":
+			pgFlags = append(pgFlags, "-Fc")
+		case "directory":
+			pgFlags = append(pgFlags, "-Fd")
+		case "tar":
+			pgFlags = append(pgFlags, "-Ft")
+		default:
+			pgFlags = append(pgFlags, "-Fp")
+		}
+		if scope == "schema_only" {
+			pgFlags = append(pgFlags, "--schema-only")
+		} else if scope == "data_only" {
+			pgFlags = append(pgFlags, "--data-only")
+		}
+		if clean {
+			pgFlags = append(pgFlags, "--clean")
+		}
+		pgPwdEnv := ""
+		if pwd := h.Overrides["postgres_password"]; pwd != "" {
+			pgPwdEnv = fmt.Sprintf("PGPASSWORD=%s ", escapeArg(pwd))
+			if masked["db_password"] == "" {
+				masked["db_password"] = "••••••••"
+			}
+		}
+		flagStr := strings.Join(pgFlags, " ")
+		if flagStr != "" {
+			flagStr += " "
+		}
+		var cmd string
+		if compress && (format == "" || format == "plain") {
+			cmd = fmt.Sprintf("%spg_dump %s%s | gzip > %s", pgPwdEnv, flagStr, escapeArg(database), escapeArg(outPath))
+		} else {
+			cmd = fmt.Sprintf("%spg_dump %s-f %s %s", pgPwdEnv, flagStr, escapeArg(outPath), escapeArg(database))
+		}
+		return plugin.TaskSpec{
+			Name: fmt.Sprintf("Dump PostgreSQL database %s to %s", database, outPath),
+			Steps: []plugin.TaskStep{
+				{
+					Name:   fmt.Sprintf("Dump database %s to %s", database, outPath),
+					Module: "ansible.builtin.shell",
+					Params: map[string]any{
+						"cmd": cmd,
+					},
+				},
+			},
+			SecretsMasked: masked,
+		}, nil
+	}
+}
+
 // Flags builders
 func buildPostgresFlags(h plugin.HostFacts) string {
 	parts := make([]string, 0)
-	if host := h.Overrides["postgres_host"]; host != "" {
+	if sock := h.Overrides["postgres_socket"]; sock != "" {
+		hostDir := sock
+		if idx := strings.LastIndex(sock, "/"); idx > 0 && strings.Contains(sock[idx+1:], ".s.PGSQL.") {
+			hostDir = sock[:idx]
+		}
+		parts = append(parts, fmt.Sprintf("-h %s", escapeArg(hostDir)))
+	} else if host := h.Overrides["postgres_host"]; host != "" {
 		parts = append(parts, fmt.Sprintf("-h %s", escapeArg(host)))
 	}
 	if port := h.Overrides["postgres_port"]; port != "" {
@@ -1139,6 +1367,9 @@ func buildPostgresFlags(h plugin.HostFacts) string {
 	}
 	if user := h.Overrides["postgres_user"]; user != "" {
 		parts = append(parts, fmt.Sprintf("-U %s", escapeArg(user)))
+	}
+	if db := h.Overrides["postgres_database"]; db != "" {
+		parts = append(parts, fmt.Sprintf("-d %s", escapeArg(db)))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -1148,17 +1379,22 @@ func buildPostgresFlags(h plugin.HostFacts) string {
 
 func buildMariaDBFlags(h plugin.HostFacts) string {
 	parts := make([]string, 0)
-	if host := h.Overrides["mariadb_host"]; host != "" {
+	if sock := firstNonEmpty(h.Overrides["mariadb_socket"], h.Overrides["mysql_socket"]); sock != "" {
+		parts = append(parts, fmt.Sprintf("-S %s", escapeArg(sock)))
+	} else if host := firstNonEmpty(h.Overrides["mariadb_host"], h.Overrides["mysql_host"]); host != "" {
 		parts = append(parts, fmt.Sprintf("-h %s", escapeArg(host)))
 	}
-	if port := h.Overrides["mariadb_port"]; port != "" {
+	if port := firstNonEmpty(h.Overrides["mariadb_port"], h.Overrides["mysql_port"]); port != "" {
 		parts = append(parts, fmt.Sprintf("-P %s", port))
 	}
-	if user := h.Overrides["mariadb_user"]; user != "" {
+	if user := firstNonEmpty(h.Overrides["mariadb_user"], h.Overrides["mysql_user"]); user != "" {
 		parts = append(parts, fmt.Sprintf("-u %s", escapeArg(user)))
 	}
-	if pwd := h.Overrides["mariadb_password"]; pwd != "" {
+	if pwd := firstNonEmpty(h.Overrides["mariadb_password"], h.Overrides["mysql_password"]); pwd != "" {
 		parts = append(parts, fmt.Sprintf("-p%s", escapeArg(pwd)))
+	}
+	if db := firstNonEmpty(h.Overrides["mariadb_database"], h.Overrides["mysql_database"]); db != "" {
+		parts = append(parts, fmt.Sprintf("-D %s", escapeArg(db)))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -1169,11 +1405,15 @@ func buildMariaDBFlags(h plugin.HostFacts) string {
 func buildMSSQLFlags(h plugin.HostFacts) string {
 	parts := make([]string, 0)
 	server := "localhost"
-	if host := h.Overrides["mssql_host"]; host != "" {
+	if sock := h.Overrides["mssql_socket"]; sock != "" {
+		server = sock
+	} else if host := h.Overrides["mssql_host"]; host != "" {
 		server = host
 		if port := h.Overrides["mssql_port"]; port != "" {
 			server = fmt.Sprintf("%s,%s", host, port)
 		}
+	} else if port := h.Overrides["mssql_port"]; port != "" && port != "1433" {
+		server = fmt.Sprintf("localhost,%s", port)
 	}
 	parts = append(parts, fmt.Sprintf("-S %s", escapeArg(server)))
 	if user := h.Overrides["mssql_user"]; user != "" {
@@ -1181,6 +1421,9 @@ func buildMSSQLFlags(h plugin.HostFacts) string {
 	}
 	if pwd := h.Overrides["mssql_password"]; pwd != "" {
 		parts = append(parts, fmt.Sprintf("-P %s", escapeArg(pwd)))
+	}
+	if db := h.Overrides["mssql_database"]; db != "" {
+		parts = append(parts, fmt.Sprintf("-d %s", escapeArg(db)))
 	}
 	return strings.Join(parts, " ")
 }
@@ -1203,6 +1446,20 @@ func optString(opts map[string]any, key string) string {
 		return strings.TrimSpace(v)
 	}
 	return ""
+}
+
+func optBool(opts map[string]any, key string) bool {
+	if opts == nil {
+		return false
+	}
+	switch v := opts[key].(type) {
+	case bool:
+		return v
+	case string:
+		low := strings.ToLower(strings.TrimSpace(v))
+		return low == "true" || low == "1" || low == "yes"
+	}
+	return false
 }
 
 func optIntDefault(opts map[string]any, key string, def int) int {

@@ -253,19 +253,19 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 	if eng, ok := h.Overrides["nosql_engine"]; ok && eng != "" && !contains(detectedEngines, eng) {
 		detectedEngines = append(detectedEngines, eng)
 	}
-	if (h.Overrides["redis_host"] != "" || h.Overrides["redis_port"] != "" || h.Overrides["redis_socket"] != "") && !contains(detectedEngines, "redis") {
+	if (h.Overrides["redis_host"] != "" || h.Overrides["redis_port"] != "" || h.Overrides["redis_socket"] != "" || h.Overrides["redis_user"] != "" || h.Overrides["redis_database"] != "") && !contains(detectedEngines, "redis") {
 		detectedEngines = append(detectedEngines, "redis")
 	}
-	if (h.Overrides["valkey_host"] != "" || h.Overrides["valkey_port"] != "" || h.Overrides["valkey_socket"] != "") && !contains(detectedEngines, "valkey") {
+	if (h.Overrides["valkey_host"] != "" || h.Overrides["valkey_port"] != "" || h.Overrides["valkey_socket"] != "" || h.Overrides["valkey_user"] != "" || h.Overrides["valkey_database"] != "") && !contains(detectedEngines, "valkey") {
 		detectedEngines = append(detectedEngines, "valkey")
 	}
-	if (h.Overrides["mongodb_uri"] != "" || h.Overrides["mongodb_host"] != "" || h.Overrides["mongodb_port"] != "" || h.Overrides["mongodb_socket"] != "") && !contains(detectedEngines, "mongodb") {
+	if (h.Overrides["mongodb_uri"] != "" || h.Overrides["mongodb_host"] != "" || h.Overrides["mongodb_port"] != "" || h.Overrides["mongodb_socket"] != "" || h.Overrides["mongodb_user"] != "" || h.Overrides["mongodb_database"] != "") && !contains(detectedEngines, "mongodb") {
 		detectedEngines = append(detectedEngines, "mongodb")
 	}
-	if (h.Overrides["couchdb_host"] != "" || h.Overrides["couchdb_port"] != "" || h.Overrides["couchdb_socket"] != "") && !contains(detectedEngines, "couchdb") {
+	if (h.Overrides["couchdb_host"] != "" || h.Overrides["couchdb_port"] != "" || h.Overrides["couchdb_socket"] != "" || h.Overrides["couchdb_user"] != "" || h.Overrides["couchdb_database"] != "") && !contains(detectedEngines, "couchdb") {
 		detectedEngines = append(detectedEngines, "couchdb")
 	}
-	if h.Overrides["rocksdb_path"] != "" && !contains(detectedEngines, "rocksdb") {
+	if (h.Overrides["rocksdb_path"] != "" || h.Overrides["rocksdb_database"] != "") && !contains(detectedEngines, "rocksdb") {
 		detectedEngines = append(detectedEngines, "rocksdb")
 	}
 
@@ -369,7 +369,20 @@ func inspectRedis(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 	if socketOverride != "" {
 		metrics["socket"] = socketOverride
 	}
+	if host := firstNonEmpty(h.Overrides["redis_host"], h.Overrides["valkey_host"]); host != "" {
+		metrics["host"] = host
+	}
+	if u := firstNonEmpty(h.Overrides["redis_user"], h.Overrides["valkey_user"]); u != "" {
+		metrics["user"] = u
+	}
+	if db := firstNonEmpty(h.Overrides["redis_database"], h.Overrides["valkey_database"]); db != "" {
+		metrics["database"] = db
+	}
 
+	userOpt := ""
+	if u := firstNonEmpty(h.Overrides["redis_user"], h.Overrides["valkey_user"]); u != "" {
+		userOpt = fmt.Sprintf("--user %s ", escapeArg(u))
+	}
 	authOpt := ""
 	if pwd := firstNonEmpty(h.Overrides["redis_password"], h.Overrides["valkey_password"]); pwd != "" {
 		authOpt = fmt.Sprintf("-a %s ", escapeArg(pwd))
@@ -382,23 +395,30 @@ func inspectRedis(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 	if host := firstNonEmpty(h.Overrides["redis_host"], h.Overrides["valkey_host"]); host != "" {
 		hostOpt = fmt.Sprintf("-h %s ", host)
 	}
+	dbOpt := ""
+	if db := firstNonEmpty(h.Overrides["redis_database"], h.Overrides["valkey_database"]); db != "" {
+		dbNum := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(db)), "db")
+		if dbNum != "" {
+			dbOpt = fmt.Sprintf("-n %s ", dbNum)
+		}
+	}
 
 	runRedis := func(redisArgs string) string {
 		if cli != "" {
 			if socketOverride != "" {
-				sockCmd := fmt.Sprintf("%s -s %s %s%s 2>/dev/null || true", cli, escapeArg(socketOverride), authOpt, redisArgs)
+				sockCmd := fmt.Sprintf("%s -s %s %s%s%s%s 2>/dev/null || true", cli, escapeArg(socketOverride), userOpt, authOpt, dbOpt, redisArgs)
 				if out, err := r.RunCommand(ctx, sockCmd); err == nil && strings.TrimSpace(out) != "" {
 					return out
 				}
 			}
-			cmd := fmt.Sprintf("%s %s%s%s%s 2>/dev/null || true", cli, hostOpt, portOpt, authOpt, redisArgs)
+			cmd := fmt.Sprintf("%s %s%s%s%s%s%s 2>/dev/null || true", cli, hostOpt, portOpt, userOpt, authOpt, dbOpt, redisArgs)
 			if out, err := r.RunCommand(ctx, cmd); err == nil && strings.TrimSpace(out) != "" {
 				return out
 			}
 			// Try common Unix sockets
 			for _, sock := range []string{"/run/redis/redis.sock", "/var/run/redis/redis.sock", "/run/redis/redis-server.sock", "/run/valkey/valkey.sock", "/var/run/valkey/valkey.sock", "/tmp/redis.sock"} {
-				tryCmd := fmt.Sprintf("[ -S %s ] && (sudo -n %s -s %s %s%s 2>/dev/null || %s -s %s %s%s 2>/dev/null) || true",
-					escapeArg(sock), cli, escapeArg(sock), authOpt, redisArgs, cli, escapeArg(sock), authOpt, redisArgs)
+				tryCmd := fmt.Sprintf("[ -S %s ] && (sudo -n %s -s %s %s%s%s%s 2>/dev/null || %s -s %s %s%s%s%s 2>/dev/null) || true",
+					escapeArg(sock), cli, escapeArg(sock), userOpt, authOpt, dbOpt, redisArgs, cli, escapeArg(sock), userOpt, authOpt, dbOpt, redisArgs)
 				if out, err := r.RunCommand(ctx, tryCmd); err == nil && strings.TrimSpace(out) != "" {
 					metrics["socket"] = sock
 					return out
@@ -500,22 +520,45 @@ func inspectMongo(ctx context.Context, r plugin.Runner, cli string, h plugin.Hos
 	}
 	port := firstNonEmpty(h.Overrides["mongodb_port"], "27017")
 	socketOverride := h.Overrides["mongodb_socket"]
+	host := firstNonEmpty(h.Overrides["mongodb_host"], "127.0.0.1")
+	defaultDB := h.Overrides["mongodb_database"]
 	uri := h.Overrides["mongodb_uri"]
 	if uri == "" {
-		host := h.Overrides["mongodb_host"]
-		if host == "" {
-			host = "127.0.0.1"
+		if defaultDB != "" {
+			uri = fmt.Sprintf("mongodb://%s:%s/%s", host, port, defaultDB)
+		} else {
+			uri = fmt.Sprintf("mongodb://%s:%s", host, port)
 		}
-		uri = fmt.Sprintf("mongodb://%s:%s", host, port)
 	}
-	metrics := map[string]any{"uri": uri, "port": port}
+	metrics := map[string]any{"uri": uri, "port": port, "host": host}
 	if socketOverride != "" {
 		metrics["socket"] = socketOverride
+	}
+	if u := h.Overrides["mongodb_user"]; u != "" {
+		metrics["user"] = u
+	}
+	if defaultDB != "" {
+		metrics["database"] = defaultDB
+	}
+
+	authFlags := ""
+	if u := h.Overrides["mongodb_user"]; u != "" {
+		authFlags += fmt.Sprintf(" -u %s", escapeArg(u))
+	}
+	if pwd := h.Overrides["mongodb_password"]; pwd != "" {
+		authFlags += fmt.Sprintf(" -p %s", escapeArg(pwd))
 	}
 
 	runMongo := func(jsExpr string) string {
 		if cli != "" {
-			cmd := fmt.Sprintf("%s --quiet %s %s %s 2>/dev/null || true", cli, uri, evalFlag, escapeArg(jsExpr))
+			target := uri
+			if socketOverride != "" && h.Overrides["mongodb_uri"] == "" {
+				target = fmt.Sprintf("--host %s", escapeArg(socketOverride))
+				if defaultDB != "" {
+					target += " " + escapeArg(defaultDB)
+				}
+			}
+			cmd := fmt.Sprintf("%s --quiet %s%s %s %s 2>/dev/null || true", cli, target, authFlags, evalFlag, escapeArg(jsExpr))
 			if out, err := r.RunCommand(ctx, cmd); err == nil && strings.TrimSpace(out) != "" {
 				return out
 			}
@@ -622,19 +665,34 @@ func inspectCouchDB(ctx context.Context, r plugin.Runner, h plugin.HostFacts, de
 	port := firstNonEmpty(h.Overrides["couchdb_port"], "5984")
 	socketOverride := h.Overrides["couchdb_socket"]
 	base := fmt.Sprintf("http://%s:%s", host, port)
-	metrics := map[string]any{"url": base, "port": port}
+	metrics := map[string]any{"url": base, "port": port, "host": host}
 	if socketOverride != "" {
 		metrics["socket"] = socketOverride
 	}
+	if u := h.Overrides["couchdb_user"]; u != "" {
+		metrics["user"] = u
+	}
+	if db := h.Overrides["couchdb_database"]; db != "" {
+		metrics["database"] = db
+	}
 
-	out, err := r.RunCommand(ctx, fmt.Sprintf("curl -s -m 3 %s/_all_dbs 2>/dev/null || true", base))
+	curlExtra := ""
+	if socketOverride != "" {
+		curlExtra += fmt.Sprintf(" --unix-socket %s", escapeArg(socketOverride))
+	}
+	if u := h.Overrides["couchdb_user"]; u != "" {
+		pwd := h.Overrides["couchdb_password"]
+		curlExtra += fmt.Sprintf(" -u %s", escapeArg(fmt.Sprintf("%s:%s", u, pwd)))
+	}
+
+	out, err := r.RunCommand(ctx, fmt.Sprintf("curl -s -m 3%s %s/_all_dbs 2>/dev/null || true", curlExtra, base))
 	databases := make([]string, 0)
 	if err == nil && strings.HasPrefix(strings.TrimSpace(out), "[") {
 		_ = json.Unmarshal([]byte(strings.TrimSpace(out)), &databases)
 	}
 
 	// Root endpoint for version
-	rootOut, _ := r.RunCommand(ctx, fmt.Sprintf("curl -s -m 3 %s/ 2>/dev/null || true", base))
+	rootOut, _ := r.RunCommand(ctx, fmt.Sprintf("curl -s -m 3%s %s/ 2>/dev/null || true", curlExtra, base))
 	var rootInfo struct {
 		Version string `json:"version"`
 	}
@@ -657,9 +715,10 @@ func inspectCouchDB(ctx context.Context, r plugin.Runner, h plugin.HostFacts, de
 }
 
 func inspectRocksDB(ctx context.Context, r plugin.Runner, cli string, h plugin.HostFacts) *EngineStatus {
-	dbPath := h.Overrides["rocksdb_path"]
-	if dbPath == "" {
-		dbPath = "/var/lib/rocksdb"
+	dbPath := firstNonEmpty(h.Overrides["rocksdb_path"], h.Overrides["rocksdb_database"], "/var/lib/rocksdb")
+	metrics := map[string]any{"path": dbPath, "cli": cli}
+	if u := h.Overrides["rocksdb_user"]; u != "" {
+		metrics["user"] = u
 	}
 
 	return &EngineStatus{
@@ -668,7 +727,7 @@ func inspectRocksDB(ctx context.Context, r plugin.Runner, cli string, h plugin.H
 		Version:    "embedded",
 		Databases:  []string{dbPath},
 		Users:      []EngineUser{{Username: "system", Roles: []string{"file_owner"}}},
-		Metrics:    map[string]any{"path": dbPath, "cli": cli},
+		Metrics:    metrics,
 		DataFormat: "text",
 	}
 }
