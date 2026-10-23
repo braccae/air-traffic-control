@@ -32,11 +32,12 @@ func TestSettingsAPIAppliesToPluginConfig(t *testing.T) {
 
 	const authKey = "tskey-auth-integration-key"
 	body, err := json.Marshal(plugin.SettingsValuesBody{Values: map[string]any{
-		FieldAuthKey:    authKey,
-		FieldHostname:   "atc-integration",
-		FieldStateDir:   t.TempDir(),
-		FieldControlURL: "https://cp.integration.internal",
-		FieldEphemeral:  false,
+		FieldAuthKey:            authKey,
+		FieldFallbackHostSocket: false,
+		FieldHostname:           "atc-integration",
+		FieldStateDir:           t.TempDir(),
+		FieldControlURL:         "https://cp.integration.internal",
+		FieldEphemeral:          false,
 	}})
 	if err != nil {
 		t.Fatalf("encode body: %v", err)
@@ -114,7 +115,7 @@ func TestSettingsPageDeclaresMaskedAuthKey(t *testing.T) {
 	for _, f := range page.Fields {
 		byName[f.Name] = f
 	}
-	for _, want := range []string{FieldAuthKey, FieldHostname, FieldStateDir, FieldControlURL, FieldEphemeral} {
+	for _, want := range []string{FieldAuthKey, FieldFallbackHostSocket, FieldHostname, FieldStateDir, FieldControlURL, FieldEphemeral} {
 		if _, ok := byName[want]; !ok {
 			t.Fatalf("settings page has no %q field: %+v", want, page.Fields)
 		}
@@ -141,11 +142,12 @@ func TestEffectiveSettingsAppliesPersistedValues(t *testing.T) {
 	t.Setenv("TS_CONTROL_URL", "")
 
 	if err := store.Save(SettingsPageID, map[string]any{
-		FieldAuthKey:    "tskey-auth-from-settings",
-		FieldHostname:   "atc-from-settings",
-		FieldStateDir:   "/var/lib/atc/tsnet",
-		FieldControlURL: "https://headscale.example.internal",
-		FieldEphemeral:  false,
+		FieldAuthKey:            "tskey-auth-from-settings",
+		FieldFallbackHostSocket: true,
+		FieldHostname:           "atc-from-settings",
+		FieldStateDir:           "/var/lib/atc/tsnet",
+		FieldControlURL:         "https://headscale.example.internal",
+		FieldEphemeral:          false,
 	}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -153,6 +155,9 @@ func TestEffectiveSettingsAppliesPersistedValues(t *testing.T) {
 	cfg := New().effectiveSettings()
 	if cfg.AuthKey != "tskey-auth-from-settings" {
 		t.Fatalf("AuthKey = %q", cfg.AuthKey)
+	}
+	if !cfg.FallbackHostSocket {
+		t.Fatalf("FallbackHostSocket = false, want persisted true")
 	}
 	if cfg.Hostname != "atc-from-settings" {
 		t.Fatalf("Hostname = %q", cfg.Hostname)
@@ -242,8 +247,52 @@ func TestFingerprintTracksEveryAppliedSetting(t *testing.T) {
 		t.Fatalf("fingerprint did not change when ephemeral changed")
 	}
 
+	changed = base
+	changed.FallbackHostSocket = true
+	if changed.fingerprint() == base.fingerprint() {
+		t.Fatalf("fingerprint did not change when the host-socket fallback changed")
+	}
+
 	if base.fingerprint() != base.fingerprint() {
 		t.Fatalf("fingerprint is not stable")
+	}
+}
+
+// TestEffectiveSettingsMigratesLegacyAuthKey proves a secret persisted under the
+// pre-rename "authKey" field is still resolved when the new field is absent.
+func TestEffectiveSettingsMigratesLegacyAuthKey(t *testing.T) {
+	store := withSettingsStore(t)
+	t.Setenv("TS_AUTHKEY", "")
+
+	if err := store.Save(SettingsPageID, map[string]any{
+		FieldAuthKeyLegacy: "tskey-auth-legacy",
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	cfg := New().effectiveSettings()
+	if cfg.AuthKey != "tskey-auth-legacy" {
+		t.Fatalf("AuthKey = %q, want legacy value", cfg.AuthKey)
+	}
+	if cfg.FallbackHostSocket {
+		t.Fatalf("FallbackHostSocket = true, want false by default")
+	}
+}
+
+// TestEnsureTsnetFailsLoudlyWithoutKeyOrFallback proves the daemon refuses to
+// silently borrow the host socket when neither an auth key nor the explicit
+// local-dev fallback is configured.
+func TestEnsureTsnetFailsLoudlyWithoutKeyOrFallback(t *testing.T) {
+	withSettingsStore(t)
+	t.Setenv("TS_AUTHKEY", "")
+
+	p := New(WithStateDir(t.TempDir()))
+	_, err := p.ensureTsnet()
+	if err == nil {
+		t.Fatalf("ensureTsnet returned nil error without an auth key or fallback")
+	}
+	if !strings.Contains(err.Error(), "no auth key configured") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

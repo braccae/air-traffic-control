@@ -83,11 +83,20 @@ const (
 
 // Settings field names, shared between the page schema and the config resolver.
 const (
-	FieldAuthKey    = "authKey"
-	FieldHostname   = "hostname"
-	FieldStateDir   = "stateDir"
-	FieldControlURL = "controlURL"
-	FieldEphemeral  = "ephemeral"
+	FieldAuthKey = "tailscale_auth_key"
+	// FieldAuthKeyLegacy is the pre-rename persisted field name. It is only read
+	// for backward compatibility so existing installs keep their auth key after
+	// the settings page field was renamed to tailscale_auth_key.
+	FieldAuthKeyLegacy = "authKey"
+	// FieldFallbackHostSocket opts in to the local-development host tailscaled
+	// socket fallback. Production deployments leave this false so ATC joins the
+	// mesh directly with its own auth key instead of silently borrowing the
+	// host's Tailscale socket.
+	FieldFallbackHostSocket = "tailscale_fallback_host_socket"
+	FieldHostname           = "hostname"
+	FieldStateDir           = "stateDir"
+	FieldControlURL         = "controlURL"
+	FieldEphemeral          = "ephemeral"
 )
 
 // CategorizedSettingsPage implements newapi.CategorizedSettingsProvider so ATC's
@@ -105,8 +114,15 @@ func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
 			FieldAuthKey,
 			"Tailscale Auth Key",
 			settingsframework.WithPlaceholder("tskey-auth-..."),
-			settingsframework.WithDescription("Auth key used to register ATC's own node. Saving a new key re-registers ATC: "+
-				"the previous tsnet state is discarded so the new key is the one that takes effect."),
+			settingsframework.WithDescription("Auth key used to register ATC's own node and join the mesh directly. "+
+				"Saving a new key re-registers ATC: the previous tsnet state is discarded so the new key is the one that takes effect."),
+		).
+		BoolField(
+			FieldFallbackHostSocket,
+			"Allow Host Socket Fallback",
+			false,
+			settingsframework.WithDescription("Local development only. When enabled and no auth key is configured, ATC borrows the host's "+
+				"system tailscaled socket/network stack. Leave disabled in production so ATC joins the mesh with its own auth key."),
 		).
 		StringField(
 			FieldHostname,
@@ -150,17 +166,25 @@ func (p *Plugin) SettingsPage() plugin.SettingsPage {
 // resolved from explicit plugin options, then persisted settings, then
 // environment variables.
 type tsnetSettings struct {
-	AuthKey    string
-	Hostname   string
-	StateDir   string
-	ControlURL string
-	Ephemeral  bool
+	AuthKey            string
+	Hostname           string
+	StateDir           string
+	ControlURL         string
+	Ephemeral          bool
+	FallbackHostSocket bool
 }
 
 // fingerprint identifies the configuration a cached tsnet.Server was built
 // from, so a settings change actually rebuilds it instead of being inert.
 func (c tsnetSettings) fingerprint() string {
-	return strings.Join([]string{c.Hostname, c.StateDir, c.ControlURL, c.AuthKey, strconv.FormatBool(c.Ephemeral)}, "\x00")
+	return strings.Join([]string{
+		c.Hostname,
+		c.StateDir,
+		c.ControlURL,
+		c.AuthKey,
+		strconv.FormatBool(c.Ephemeral),
+		strconv.FormatBool(c.FallbackHostSocket),
+	}, "\x00")
 }
 
 // persistedSetting reads a string setting written through the settings page
@@ -175,15 +199,23 @@ func persistedSetting(field string) string {
 func (p *Plugin) effectiveSettings() tsnetSettings {
 	adapter := settingsframework.NewStoreAdapter(nil)
 	cfg := tsnetSettings{
-		AuthKey:    strings.TrimSpace(p.authKey),
-		Hostname:   adapter.StringOrDefault(SettingsPageID, FieldHostname, p.hostname),
-		StateDir:   adapter.StringOrDefault(SettingsPageID, FieldStateDir, p.stateDir),
-		ControlURL: adapter.StringOrDefault(SettingsPageID, FieldControlURL, ""),
-		Ephemeral:  adapter.BoolOrDefault(SettingsPageID, FieldEphemeral, p.ephemeral),
+		AuthKey:            strings.TrimSpace(p.authKey),
+		Hostname:           adapter.StringOrDefault(SettingsPageID, FieldHostname, p.hostname),
+		StateDir:           adapter.StringOrDefault(SettingsPageID, FieldStateDir, p.stateDir),
+		ControlURL:         adapter.StringOrDefault(SettingsPageID, FieldControlURL, ""),
+		Ephemeral:          adapter.BoolOrDefault(SettingsPageID, FieldEphemeral, p.ephemeral),
+		FallbackHostSocket: adapter.BoolOrDefault(SettingsPageID, FieldFallbackHostSocket, false),
 	}
 
 	if cfg.AuthKey == "" {
 		if secret, ok := adapter.SecretValue(SettingsPageID, FieldAuthKey); ok {
+			cfg.AuthKey = secret
+		}
+	}
+	// Backward compatibility: rows written before the field rename still carry
+	// the secret under "authKey". Read it only when the new field is empty.
+	if cfg.AuthKey == "" {
+		if secret, ok := adapter.SecretValue(SettingsPageID, FieldAuthKeyLegacy); ok {
 			cfg.AuthKey = secret
 		}
 	}
@@ -604,10 +636,22 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 		return p.dialer, nil
 	}
 
-	// If a host-level system tailscaled is active and no auth key is configured,
-	// direct dial through standard network stack which automatically routes 100.x / MagicDNS.
-	if isSystemTailscaledActive() && cfg.AuthKey == "" {
+	// Host-socket fallback is opt-in and intended for local development only.
+	// In production the auth key is the primary path: ATC joins the mesh as its
+	// own node instead of silently borrowing the host's tailscaled credentials.
+	if cfg.AuthKey == "" && cfg.FallbackHostSocket && isSystemTailscaledActive() {
 		return &systemNetworkDialer{}, nil
+	}
+
+	// Fail loudly instead of hanging on an interactive login when there is no
+	// auth key and the fallback is disabled — unless prior registered node
+	// state exists that tsnet can reuse without a fresh registration.
+	if cfg.AuthKey == "" {
+		statePath := filepath.Join(cfg.StateDir, "tailscaled.state")
+		if _, err := os.Stat(statePath); err != nil {
+			return nil, fmt.Errorf("tailscale: no auth key configured and host socket fallback disabled; " +
+				"set the Tailscale auth key in Datacenter Settings or enable the local-dev host-socket fallback")
+		}
 	}
 
 	// A settings change must reach the live node, not just the database: the

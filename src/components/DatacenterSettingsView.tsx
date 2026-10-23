@@ -20,6 +20,7 @@ import type { AnsibleConfigSettings } from '../utils/ansibleConfigManager.ts';
 import { DatacenterVarsPage } from './DatacenterVarsPage.tsx';
 import { DatacenterPlaybooksPage } from './DatacenterPlaybooksPage.tsx';
 import { RcloneRemotesView } from './RcloneRemotesView.tsx';
+import { DatacenterTailscalePage } from './DatacenterTailscalePage.tsx';
 
 export interface DatacenterSettingsViewProps {
   page: DatacenterSettingPageId;
@@ -1111,6 +1112,13 @@ export const DatacenterSettingsView: React.FC<DatacenterSettingsViewProps> = ({ 
   }
   if (meta.category === 'terminal') {
     return <QuickCommandsSettingsPage page={meta.id} />;
+  }
+  if (meta.id === 'connection/tailscale') {
+    return (
+      <SettingsPageFrame page={meta.id}>
+        <DatacenterTailscalePage />
+      </SettingsPageFrame>
+    );
   }
   if (meta.id === 'ansible-collections') {
     return <AnsibleCollectionsSettingsPage page={meta.id} />;

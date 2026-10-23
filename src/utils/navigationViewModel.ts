@@ -342,7 +342,7 @@ export function getDatacenterNavSections(playbooksCount = 4, tasksCount = 0): Da
  *   #/datacenter/settings/automation/ansible-forks -> single setting page
  * ------------------------------------------------------------------ */
 
-export type DatacenterSettingCategoryId = 'playbooks' | 'automation' | 'variables' | 'storage' | 'terminal';
+export type DatacenterSettingCategoryId = 'playbooks' | 'automation' | 'variables' | 'storage' | 'terminal' | 'connection';
 
 export type DatacenterSettingPageId =
   | 'playbook-editor'
@@ -354,7 +354,8 @@ export type DatacenterSettingPageId =
   | 'ansible-forks'
   | 'ansible-timeout'
   | 'ansible-ssh-transport'
-  | 'quick-commands';
+  | 'quick-commands'
+  | 'connection/tailscale';
 
 export interface DatacenterSettingPage {
   id: DatacenterSettingPageId;
@@ -495,6 +496,22 @@ const DATACENTER_SETTING_CATEGORIES: DatacenterSettingCategory[] = [
         icon: 'bolt',
         description: 'Command shortcuts available in terminal sessions',
         slug: 'quick-commands',
+      },
+    ],
+  },
+  {
+    id: 'connection',
+    title: 'Connection & Mesh',
+    icon: 'hub',
+    description: 'Tailscale mesh identity and connectivity for this datacenter',
+    pages: [
+      {
+        id: 'connection/tailscale',
+        category: 'connection',
+        title: 'Tailscale Mesh',
+        icon: 'hub',
+        description: "Auth key for ATC's own Tailscale node and the local host-socket fallback toggle",
+        slug: 'tailscale',
       },
     ],
   },

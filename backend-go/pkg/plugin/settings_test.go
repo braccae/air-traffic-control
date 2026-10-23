@@ -399,15 +399,31 @@ func TestRealTailscaleModuleContributesSettingsPage(t *testing.T) {
 	}
 
 	authKey := false
+	fallbackHostSocket := false
 	for _, f := range page.Fields {
-		if f.Name == "authKey" {
+		switch f.Name {
+		case "tailscale_auth_key":
 			authKey = true
 			if !plugin.IsSecretField(f) {
-				t.Fatalf("authKey field is not secret: %+v", f)
+				t.Fatalf("tailscale_auth_key field is not secret: %+v", f)
+			}
+			if f.Default != nil {
+				t.Fatalf("tailscale_auth_key must not carry a plaintext default: %v", f.Default)
+			}
+		case "tailscale_fallback_host_socket":
+			fallbackHostSocket = true
+			if f.Type != plugin.SettingsFieldBool {
+				t.Fatalf("tailscale_fallback_host_socket must be a bool field: %+v", f)
+			}
+			if f.Default != false {
+				t.Fatalf("tailscale_fallback_host_socket default = %v, want false", f.Default)
 			}
 		}
 	}
 	if !authKey {
-		t.Fatalf("tailscale settings page has no authKey field: %+v", page.Fields)
+		t.Fatalf("tailscale settings page has no tailscale_auth_key field: %+v", page.Fields)
+	}
+	if !fallbackHostSocket {
+		t.Fatalf("tailscale settings page has no tailscale_fallback_host_socket field: %+v", page.Fields)
 	}
 }

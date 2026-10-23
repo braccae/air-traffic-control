@@ -9,6 +9,13 @@ import {
 export interface GlobalSettingsPanelProps {
   page: GlobalSettingsPage;
   onSaved?: (page: GlobalSettingsPage) => void;
+  /**
+   * Optional persistence hook. When provided it replaces the default
+   * PUT /api/settings/pages/:id call — datacenter-scoped pages pass a hook that
+   * writes to /api/settings/datacenter/:id instead. Values are already filtered
+   * by buildSettingsPayload, so secrets are only sent when genuinely retyped.
+   */
+  save?: (values: Record<string, unknown>) => Promise<GlobalSettingsPage>;
 }
 
 /**
@@ -16,7 +23,7 @@ export interface GlobalSettingsPanelProps {
  * field schema (declared by the addon module) drives the form; values are
  * persisted through PUT /api/settings/pages/:id by the Go daemon.
  */
-export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, onSaved }) => {
+export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, onSaved, save }) => {
   const [values, setValues] = useState<Record<string, unknown>>(page.values || {});
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -31,7 +38,8 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, 
     try {
       // Secret fields are write-only: only genuinely retyped values are sent,
       // never the mask the API returned.
-      const updated = await saveGlobalSettingsPage(page.id, buildSettingsPayload(page.fields, values));
+      const payload = buildSettingsPayload(page.fields, values);
+      const updated = save ? await save(payload) : await saveGlobalSettingsPage(page.id, payload);
       setValues(updated.values || {});
       setFeedback({ type: 'success', message: `Saved ${page.title}.` });
       onSaved?.(updated);
