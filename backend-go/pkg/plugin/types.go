@@ -103,6 +103,49 @@ type Runner interface {
 	RunCommand(ctx context.Context, cmd string) (string, error)
 }
 
+// QueryRequest describes an ad-hoc database query or command.
+//
+// Credentials and connection details are resolved server-side from the node's
+// pluginOverrides whenever the corresponding field is left empty, so the browser
+// does not have to resend secrets on every query. Fields supplied here take
+// precedence over the stored overrides.
+type QueryRequest struct {
+	Engine   string `json:"engine"`             // postgres|postgresql|mysql|mariadb|mssql|redis|mongodb|rocksdb
+	Host     string `json:"host,omitempty"`     // TCP host; defaults to <engine>_host override or HostRoute
+	Port     int    `json:"port,omitempty"`     // TCP port; defaults to the engine's standard port
+	User     string `json:"user,omitempty"`     // defaults to <engine>_user override
+	Password string `json:"password,omitempty"` // defaults to <engine>_password override
+	Database string `json:"database,omitempty"` // defaults to <engine>_database override
+	Socket   string `json:"socket,omitempty"`   // unix socket path; defaults to <engine>_socket override
+	Query    string `json:"query"`              // SQL statement or native command text
+	Limit    int    `json:"limit,omitempty"`    // optional row cap for read queries
+}
+
+// QueryResult is the normalized result returned by a Querier. It is designed to
+// be JSON-serializable and to map cleanly onto the frontend table renderers.
+type QueryResult struct {
+	Engine     string   `json:"engine"`
+	Driver     string   `json:"driver"` // "go" when a native driver executed the query
+	Columns    []string `json:"columns,omitempty"`
+	Rows       [][]any  `json:"rows,omitempty"`
+	Raw        string   `json:"raw,omitempty"`
+	Affected   int64    `json:"affected,omitempty"`
+	DurationMs int64    `json:"durationMs"`
+	Truncated  bool     `json:"truncated,omitempty"`
+	// Fallback is set to "cli" when the native driver could not connect or does
+	// not support the requested command. Callers should then retry through the
+	// vendor CLI transport instead of treating this as a hard failure.
+	Fallback string `json:"fallback,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// Querier is an optional interface implemented by plugins that execute ad-hoc
+// queries against database engines through native Go drivers rather than by
+// shelling out to vendor CLI tools.
+type Querier interface {
+	Query(ctx context.Context, r Runner, h HostFacts, req QueryRequest) (QueryResult, error)
+}
+
 // Dialer provides optional direct network connection dial capabilities (e.g. for connection plugins)
 type Dialer interface {
 	Dial(ctx context.Context, network, address string) (net.Conn, error)

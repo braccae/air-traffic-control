@@ -115,7 +115,6 @@ func (r *storeNodeResolver) ResolveNode(nodeID string) (HostFacts, bool, error) 
 	return buildHostFacts(record.ID, record.IP, portStr, record.SSHUser, record.TailscaleIP, record.TailscaleHost, record.NodeJSON), true, nil
 }
 
-
 // RunnerResolver creates or retrieves a Runner for given HostFacts
 type RunnerResolver interface {
 	ResolveRunner(ctx context.Context, facts HostFacts) (Runner, error)
@@ -711,6 +710,14 @@ func (a *API) handleNodeRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /api/nodes/:id/plugins/:kind/:name/query
+	if len(parts) == 5 && parts[1] == "plugins" && parts[4] == "query" && r.Method == http.MethodPost {
+		kind := Kind(parts[2])
+		name := parts[3]
+		a.handlePluginQuery(w, r, nodeID, kind, name)
+		return
+	}
+
 	// /api/nodes/:id/plugins/:kind/:name/actions/:action
 	if len(parts) == 6 && parts[1] == "plugins" && parts[4] == "actions" && r.Method == http.MethodPost {
 		kind := Kind(parts[2])
@@ -1045,6 +1052,66 @@ func (a *API) handlePluginAction(w http.ResponseWriter, r *http.Request, nodeID 
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(task)
+}
+
+// handlePluginQuery implements POST /api/nodes/:id/plugins/:kind/:name/query
+//
+// It executes an ad-hoc query through a plugin that implements Querier. The
+// handler always answers 200 with a structured QueryResult: when the native
+// driver cannot connect or does not support the statement, the result carries
+// Fallback="cli" so the frontend can retry through the vendor CLI transport.
+func (a *API) handlePluginQuery(w http.ResponseWriter, r *http.Request, nodeID string, kind Kind, name string) {
+	ctx := r.Context()
+	pluginID := fmt.Sprintf("%s/%s", kind, name)
+
+	p, ok := a.registry.Get(pluginID)
+	if !ok {
+		http.Error(w, fmt.Sprintf("plugin %s not found", pluginID), http.StatusNotFound)
+		return
+	}
+
+	querier, ok := p.(Querier)
+	if !ok {
+		http.Error(w, fmt.Sprintf("plugin %s does not implement Querier", pluginID), http.StatusBadRequest)
+		return
+	}
+
+	var req QueryRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+	if strings.TrimSpace(req.Query) == "" {
+		http.Error(w, "query is required", http.StatusBadRequest)
+		return
+	}
+
+	facts, runner, err := a.resolveFactsAndRunner(ctx, nodeID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	result, queryErr := querier.Query(ctx, runner, facts, req)
+	if queryErr != nil {
+		if result.Driver == "" {
+			result.Driver = "go"
+		}
+		if result.Engine == "" {
+			result.Engine = req.Engine
+		}
+		if result.Error == "" {
+			result.Error = queryErr.Error()
+		}
+		if result.Fallback == "" {
+			result.Fallback = "cli"
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 // -------------------------------------------------------------

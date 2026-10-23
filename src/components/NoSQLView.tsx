@@ -458,6 +458,48 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
     setQueryError(null);
     setQueryResult(null);
     try {
+      // Prefer native Go database drivers; fall back to the vendor CLI when the
+      // driver cannot connect or does not support the command.
+      try {
+        const driverRes = await fetch(
+          `/api/nodes/${encodeURIComponent(node.id)}/plugins/database/unified/query`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              engine: activeEngine,
+              database: queryDatabase,
+              host: effectiveOverrides[`${activeEngine}_host`] || undefined,
+              port: Number(effectiveOverrides[`${activeEngine}_port`]) || undefined,
+              user: effectiveOverrides[`${activeEngine}_user`] || undefined,
+              socket: effectiveOverrides[`${activeEngine}_socket`] || undefined,
+              query: queryCommand,
+            }),
+          }
+        );
+        if (driverRes.ok) {
+          const out = await driverRes.json();
+          if (!out.fallback && !out.error) {
+            const raw = String(out.raw ?? '');
+            if (currentEngineData.dataFormat === 'document') {
+              try {
+                setQueryResult(JSON.parse(raw));
+              } catch {
+                setQueryResult(raw);
+              }
+            } else if (currentEngineData.dataFormat === 'keyvalue') {
+              const lines = raw.trim() ? raw.trim().split('\n') : [];
+              setQueryResult(lines);
+            } else {
+              setQueryResult(raw);
+            }
+            return;
+          }
+        }
+      } catch {
+        // Driver endpoint unavailable; continue with the CLI path below.
+      }
+
       const cmd = buildNoSQLClientCommand(
         activeEngine,
         queryCommand,

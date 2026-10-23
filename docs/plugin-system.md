@@ -516,6 +516,7 @@ All plugin system routes are mounted on the Go daemon (`backend-go/main.go`):
 | `POST` | `/api/nodes/:id/plugins/refresh` | Invalidate cached plugin probe detections for `:id`. |
 | `GET` | `/api/nodes/:id/plugins/:kind/:name` | Invoke `Reader.Read` on plugin `<kind>/<name>` for `:id`. |
 | `POST` | `/api/nodes/:id/plugins/:kind/:name/actions/:action` | Validate options and invoke `Actor.Compile` on `<kind>/<name>`, returning a declarative `TaskSpec` and invalidating cache. |
+| `POST` | `/api/nodes/:id/plugins/:kind/:name/query` | Invoke the optional `Querier.Query` interface on `<kind>/<name>`, returning a normalized `QueryResult`. Used by `database/unified` to execute SQL/Redis/Mongo commands through native Go drivers; results with `fallback: "cli"` instruct the caller to retry via the vendor CLI. |
 | `POST` | `/api/nodes/:id/exec` | Execute a command on `:id` via its resolved connection runner. |
 | `GET` | `/api/settings/pages` | List all registered global settings pages with current (secret-masked) values. |
 | `GET` | `/api/settings/pages/:id` | Get a single settings page schema and values (`:id` may contain `/`, e.g. `backup/restic`). |
@@ -531,6 +532,52 @@ All plugin system routes are mounted on the Go daemon (`backend-go/main.go`):
 | `GET` | `/api/task-types` | List all registered `TaskTypeSpec` items (`?type=...&pluginId=...`). |
 | `GET` | `/api/task-types/:type` | Get a specific `TaskTypeSpec` (`?pluginId=...`). |
 | `POST` | `/api/task-types/execute` | Validate and compile/execute a typed `TaskParams` / `TaskRequest`, returning `TaskResult`. |
+
+### 5.1 Unified Database Driver Pattern (`database/unified`)
+
+The `database/unified` plugin provides a single query API across PostgreSQL,
+MySQL/MariaDB, MSSQL, Redis and MongoDB without requiring the vendor CLI to be
+installed on the target host. It implements the optional `plugin.Querier`
+interface in addition to `Plugin`, `Reader` and `Actor`.
+
+```go
+// pkg/plugin/types.go
+type Querier interface {
+	Query(ctx context.Context, r Runner, h HostFacts, req QueryRequest) (QueryResult, error)
+}
+```
+
+Key rules when adding or changing a database driver:
+
+1. **Resolve credentials server-side.** `QueryRequest` carries optional host,
+   port, user, password, database and socket fields. Leave them empty from the
+   browser; `resolveEngineConfig` merges `<engine>_host/_port/_user/_password/
+   _database/_socket` from the node's `pluginOverrides`, so secrets never need to
+   travel with every query. Request values override stored ones when supplied.
+2. **Never fabricate results.** On connection or driver errors return
+   `QueryResult{Driver: "go", Fallback: "cli", Error: err.Error()}` with a nil
+   error. The handler answers HTTP 200 and the frontend retries the existing
+   vendor-CLI path. Genuine request errors (empty query, unsupported engine)
+   still return an explanatory `Fallback` so the UI degrades gracefully.
+3. **Cap result sets.** Read queries default to 1000 rows and set
+   `Truncated: true` when the cap is hit. Redis scans default to 500 keys.
+4. **Prefer native commands.** SQL drivers run the statement directly; Redis uses
+   `Do`/`Scan`; MongoDB supports `db.getCollectionNames()`, raw JSON commands
+   (`{"find":"coll","filter":{}}`), and simple `db.<coll>.find/countDocuments`
+   forms. Unsupported Mongo expressions fall back to the CLI rather than
+   guessing.
+5. **Document fallbacks.** RocksDB has no pure-Go driver in the daemon and always
+   reports `Fallback: "cli"`; do not silently return empty results.
+6. **Probe cheaply.** `Probe`/`Read` only perform short TCP/unix-socket dials and
+   optional `command -v` checks; they never open a pooled connection or run a
+   query.
+7. **Declarative installs.** The plugin's only mutation action,
+   `install_cli_client`, compiles an `ansible.builtin.package` task for the
+   fallback client rather than executing a shell command.
+
+Adding a new engine requires: an `engineSpec` entry (aliases, default port,
+override prefix, driver id), a `query<Engine>` function, DSN/URI construction in
+`query.go`, and tests covering fallback behaviour and configuration merging.
 
 ---
 

@@ -258,6 +258,62 @@ func TestAPI_ReadAndActionEndpoints(t *testing.T) {
 	})
 }
 
+func TestAPI_PluginQueryEndpoint(t *testing.T) {
+	api := plugin.NewAPI(plugin.APIOptions{
+		NodeResolver:   newMemoryNodeResolver(),
+		RunnerResolver: &staticRunnerResolver{runner: &dummyRunner{}},
+	})
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	t.Run("DriverFallback", func(t *testing.T) {
+		body, _ := json.Marshal(plugin.QueryRequest{Engine: "rocksdb", Query: "scan"})
+		req := httptest.NewRequest(http.MethodPost, "/api/nodes/node-test-1/plugins/database/unified/query", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var res plugin.QueryResult
+		if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+			t.Fatalf("failed to decode query response: %v", err)
+		}
+		if res.Fallback != "cli" {
+			t.Errorf("expected cli fallback for rocksdb, got %+v", res)
+		}
+		if res.Driver != "go" {
+			t.Errorf("expected driver=go, got %q", res.Driver)
+		}
+		if res.Error == "" {
+			t.Error("expected an explanatory driver error")
+		}
+	})
+
+	t.Run("EmptyQueryRejected", func(t *testing.T) {
+		body, _ := json.Marshal(plugin.QueryRequest{Engine: "postgres"})
+		req := httptest.NewRequest(http.MethodPost, "/api/nodes/node-test-1/plugins/database/unified/query", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for empty query, got %d", rec.Code)
+		}
+	})
+
+	t.Run("UnknownPlugin", func(t *testing.T) {
+		body, _ := json.Marshal(plugin.QueryRequest{Engine: "postgres", Query: "SELECT 1"})
+		req := httptest.NewRequest(http.MethodPost, "/api/nodes/node-test-1/plugins/database/missing/query", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("expected 404 for unknown plugin, got %d", rec.Code)
+		}
+	})
+}
+
 func TestAPI_CachingAndRefresh(t *testing.T) {
 	nodeResolver := newMemoryNodeResolver()
 	runner := &dummyRunner{

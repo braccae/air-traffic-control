@@ -569,6 +569,45 @@ export const SQLManagementView: React.FC<SQLManagementViewProps> = ({
         queryDatabase ||
         configDatabase ||
         (activeEngine === 'postgres' ? 'postgres' : '');
+
+      // Prefer native Go database drivers; fall back to the vendor CLI when the
+      // driver cannot connect or does not support the statement.
+      try {
+        const driverRes = await fetch(
+          `/api/nodes/${encodeURIComponent(node.id)}/plugins/database/unified/query`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              engine: activeEngine,
+              database: targetDb,
+              host: effectiveOverrides[`${activeEngine}_host`] || undefined,
+              port: Number(effectiveOverrides[`${activeEngine}_port`]) || undefined,
+              user: effectiveOverrides[`${activeEngine}_user`] || undefined,
+              socket: effectiveOverrides[`${activeEngine}_socket`] || undefined,
+              query: sql,
+            }),
+          }
+        );
+        if (driverRes.ok) {
+          const out = await driverRes.json();
+          if (!out.fallback && !out.error) {
+            const driverRows: any[][] = Array.isArray(out.rows) ? out.rows : [];
+            const driverColumns: string[] = Array.isArray(out.columns) ? out.columns : [];
+            setQueryResult({
+              columns: driverColumns,
+              rows: driverRows.map(row => row.map(cell => (cell === null || cell === undefined ? null : String(cell)))),
+              rowCount: driverRows.length,
+              rawText: out.raw || '',
+              isTabular: driverColumns.length > 0,
+            });
+            return;
+          }
+        }
+      } catch {
+        // Driver endpoint unavailable; continue with the CLI path below.
+      }
+
       const cmd = buildSQLClientCommand(activeEngine, sql, targetDb, effectiveOverrides, true);
 
       const res = await fetch('/api/terminal/exec', {

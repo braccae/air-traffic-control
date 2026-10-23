@@ -66,4 +66,5 @@ import (
 	// Database & NoSQL plugins
 	_ "air-traffic-control/backend/plugins/database/nosql"
 	_ "air-traffic-control/backend/plugins/database/sql"
+	_ "air-traffic-control/backend/plugins/database/unified"
 )
