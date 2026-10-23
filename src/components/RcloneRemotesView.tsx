@@ -325,10 +325,69 @@ export const RcloneRemotesView: React.FC<RcloneRemotesViewProps> = ({ node, mode
       )}
 
       {/* Guided remote setup (datacenter-wide rclone.conf wizard) */}
-      <div className={card} data-testid="rclone-guided-setup-card">
+      {effectiveMode === 'datacenter' && (
+        <div className={card} data-testid="rclone-guided-setup-card">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] uppercase font-bold text-[#8d909b]">
+              Guided remote setup (datacenter rclone.conf)
+            </span>
+          </div>
+          <div className="grid grid-cols-1 gap-2">
+            <label className="text-[11px] text-[#8d909b]">
+              Provider
+              <select className={input} value={providerId} onChange={e => setProviderId(e.target.value)}>
+                {providers.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-[11px] text-[#8d909b]">
+              Remote name
+              <input
+                className={input}
+                value={remoteName}
+                placeholder="hetzner"
+                onChange={e => setRemoteName(e.target.value)}
+              />
+            </label>
+            {provider?.fields.map(f => (
+              <label key={f.name} className="text-[11px] text-[#8d909b]">
+                {f.label}
+                {f.required ? ' *' : ''}
+                <input
+                  className={input}
+                  type={f.secret ? 'password' : 'text'}
+                  value={fieldValues[f.name] ?? ''}
+                  placeholder={f.description || ''}
+                  onChange={e => setFieldValues(v => ({ ...v, [f.name]: e.target.value }))}
+                />
+              </label>
+            ))}
+          </div>
+          <div className="flex items-center gap-3 mt-3">
+            <label className="text-[11px] text-[#8d909b] flex items-center gap-1">
+              <input type="checkbox" checked={verifyOnSave} onChange={e => setVerifyOnSave(e.target.checked)} />
+              Verify against the provider before saving
+            </label>
+            <button className={btnPrimary} onClick={saveRemote} disabled={busy || !remoteName}>
+              {verifyOnSave ? 'Verify & Save' : 'Save remote'}
+            </button>
+          </div>
+          <p className="text-[10px] text-[#6f727d] mt-2">
+            Secrets are encrypted in ATC's Ansible Vault store (<code>vault_variables</code>) and masked as{' '}
+            <code>•••••••• (vault: rclone_&lt;remote&gt;_&lt;field&gt;)</code>. Every decryption is logged to the Vault
+            Audit trail.
+          </p>
+        </div>
+      )}
+
+      {/* Remote list */}
+      <div className={card} data-testid="rclone-configured-remotes-card">
         <div className="flex items-center justify-between mb-2">
           <span className="text-[10px] uppercase font-bold text-[#8d909b]">
-            Guided remote setup (datacenter rclone.conf)
+            Configured datacenter remotes
           </span>
           {effectiveMode === 'client' && (
             <a
@@ -339,63 +398,12 @@ export const RcloneRemotesView: React.FC<RcloneRemotesViewProps> = ({ node, mode
             </a>
           )}
         </div>
-        <div className="grid grid-cols-1 gap-2">
-          <label className="text-[11px] text-[#8d909b]">
-            Provider
-            <select className={input} value={providerId} onChange={e => setProviderId(e.target.value)}>
-              {providers.map(p => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-[11px] text-[#8d909b]">
-            Remote name
-            <input
-              className={input}
-              value={remoteName}
-              placeholder="hetzner"
-              onChange={e => setRemoteName(e.target.value)}
-            />
-          </label>
-          {provider?.fields.map(f => (
-            <label key={f.name} className="text-[11px] text-[#8d909b]">
-              {f.label}
-              {f.required ? ' *' : ''}
-              <input
-                className={input}
-                type={f.secret ? 'password' : 'text'}
-                value={fieldValues[f.name] ?? ''}
-                placeholder={f.description || ''}
-                onChange={e => setFieldValues(v => ({ ...v, [f.name]: e.target.value }))}
-              />
-            </label>
-          ))}
-        </div>
-        <div className="flex items-center gap-3 mt-3">
-          <label className="text-[11px] text-[#8d909b] flex items-center gap-1">
-            <input type="checkbox" checked={verifyOnSave} onChange={e => setVerifyOnSave(e.target.checked)} />
-            Verify against the provider before saving
-          </label>
-          <button className={btnPrimary} onClick={saveRemote} disabled={busy || !remoteName}>
-            {verifyOnSave ? 'Verify & Save' : 'Save remote'}
-          </button>
-        </div>
-        <p className="text-[10px] text-[#6f727d] mt-2">
-          Secrets are encrypted in ATC's Ansible Vault store (<code>vault_variables</code>) and masked as{' '}
-          <code>•••••••• (vault: rclone_&lt;remote&gt;_&lt;field&gt;)</code>. Every decryption is logged to the Vault
-          Audit trail.
-        </p>
-      </div>
-
-      {/* Remote list */}
-      <div className={card} data-testid="rclone-configured-remotes-card">
-        <span className="text-[10px] uppercase font-bold text-[#8d909b] block mb-2">
-          Configured datacenter remotes
-        </span>
         {remotes.length === 0 ? (
-          <p className="text-xs text-[#6f727d]">No remotes yet. Create one above.</p>
+          <p className="text-xs text-[#6f727d]">
+            {effectiveMode === 'datacenter'
+              ? 'No remotes yet. Create one above.'
+              : 'No remotes yet. Create one in Datacenter Settings.'}
+          </p>
         ) : (
           <table className="w-full text-xs">
             <thead>

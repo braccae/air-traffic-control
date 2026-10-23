@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToString } from 'react-dom/server';
 import { DatacenterSettingsView } from './DatacenterSettingsView.tsx';
+import { RcloneRemotesView } from './RcloneRemotesView.tsx';
 import { getDatacenterSettingPages } from '../utils/navigationViewModel.ts';
 
 test('each catalog setting renders its own page with a stable deep-link URL', () => {
@@ -60,6 +61,21 @@ test('rclone-remotes datacenter settings page renders guided setup and vault sto
   assert.ok(html.includes('data-testid="datacenter-rclone-remotes-settings"'));
   assert.ok(html.includes('data-testid="rclone-guided-setup-card"'));
   assert.ok(html.includes('vault_variables'));
+});
+
+test('RcloneRemotesView in client mode hides guided setup card and shows link to datacenter settings', () => {
+  const html = renderToString(
+    React.createElement(RcloneRemotesView, {
+      mode: 'client',
+      node: { id: 'node-1', name: 'worker-01', ip: '10.0.0.10', status: 'online' } as any,
+    })
+  );
+  assert.ok(html.includes('data-testid="client-rclone-mounts-view"'));
+  assert.ok(!html.includes('data-testid="rclone-guided-setup-card"'));
+  assert.ok(html.includes('data-testid="rclone-configured-remotes-card"'));
+  assert.ok(html.includes('data-testid="rclone-client-mounts-card"'));
+  assert.ok(html.includes('Open in Datacenter Settings →'));
+  assert.ok(html.includes('#/datacenter/settings/storage/rclone-remotes'));
 });
 
 test('ansible-collections datacenter settings page renders collection manager with install and remove controls', () => {
