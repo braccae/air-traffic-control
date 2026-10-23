@@ -69,37 +69,42 @@ type Telemetry struct {
 
 // PodmanContainer represents an individual container
 type PodmanContainer struct {
-	ID        string `json:"id"`
-	PodID     string `json:"podId,omitempty"`
-	PodName   string `json:"podName,omitempty"`
-	Name      string `json:"name"`
-	Image     string `json:"image"`
-	Status    string `json:"status"` // Running, Exited, Paused
-	CPU       string `json:"cpu"`
-	Memory    string `json:"memory"`
-	Ports     string `json:"ports,omitempty"`
-	GPUAcc    string `json:"gpuAcc,omitempty"`
-	StartedAt string `json:"startedAt"`
-	User      string `json:"user,omitempty"`
-	UID       int    `json:"uid,omitempty"`
-	Rootless  bool   `json:"rootless"`
+	ID                 string `json:"id"`
+	PodID              string `json:"podId,omitempty"`
+	PodName            string `json:"podName,omitempty"`
+	Name               string `json:"name"`
+	Image              string `json:"image"`
+	Status             string `json:"status"` // Running, Exited, Paused
+	CPU                string `json:"cpu"`
+	Memory             string `json:"memory"`
+	Ports              string `json:"ports,omitempty"`
+	GPUAcc             string `json:"gpuAcc,omitempty"`
+	StartedAt          string `json:"startedAt"`
+	User               string `json:"user,omitempty"`
+	UID                int    `json:"uid,omitempty"`
+	Rootless           bool   `json:"rootless"`
+	ComposeProject     string `json:"composeProject,omitempty"`
+	ComposeService     string `json:"composeService,omitempty"`
+	ComposeConfigFiles string `json:"composeConfigFiles,omitempty"`
 }
 
 // PodmanPod represents a group of containers sharing IPC and network
 type PodmanPod struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Status      string            `json:"status"`
-	Containers  []PodmanContainer `json:"containers"`
-	Ports       string            `json:"ports"`
-	TotalCPU    string            `json:"totalCpu"`
-	TotalMemory string            `json:"totalMemory"`
-	GPUInfo     string            `json:"gpuInfo,omitempty"`
-	VRAMUsage   string            `json:"vramUsage,omitempty"`
-	GPUUtil     int               `json:"gpuUtil,omitempty"`
-	User        string            `json:"user,omitempty"`
-	UID         int               `json:"uid,omitempty"`
-	Rootless    bool              `json:"rootless"`
+	ID                     string            `json:"id"`
+	Name                   string            `json:"name"`
+	Status                 string            `json:"status"`
+	ContainersRunningCount int               `json:"containersRunningCount"`
+	Containers             []PodmanContainer `json:"containers"`
+	Ports                  string            `json:"ports"`
+	TotalCPU               string            `json:"totalCpu"`
+	TotalMemory            string            `json:"totalMemory"`
+	TotalRam               string            `json:"totalRam,omitempty"`
+	GPUInfo                string            `json:"gpuInfo,omitempty"`
+	VRAMUsage              string            `json:"vramUsage,omitempty"`
+	GPUUtil                int               `json:"gpuUtil,omitempty"`
+	User                   string            `json:"user,omitempty"`
+	UID                    int               `json:"uid,omitempty"`
+	Rootless               bool              `json:"rootless"`
 }
 
 // UnprivilegedPodmanUser represents an unprivileged (rootless) user running Podman containers

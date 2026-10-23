@@ -74,15 +74,15 @@ func TestPodmanPlugin_ReadBothRootfulAndRootlessContainers(t *testing.T) {
 
 	runner := &mockRunner{
 		responses: map[string]string{
-			"--unix-socket=/run/podman/podman.sock \"http://d/v4.0.0/libpod/containers/json?all=true\"": `[
+			"--unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/containers/json?all=true\"": `[
 				{"Id": "e377a55482d2", "Names": ["systemd-caddy"], "Image": "ghcr.io/braccae/caddy:latest", "State": "running", "Status": "healthy", "IsInfra": false}
 			]`,
-			"--unix-socket=/run/podman/podman.sock \"http://d/v4.0.0/libpod/pods/json\"": `[
+			"--unix-socket /run/podman/podman.sock \"http://d/v4.0.0/libpod/pods/json\"": `[
 				{"Id": "f4e8950bc5d4", "Name": "systemd-proxy", "Status": "Running"}
 			]`,
 			"/etc/passwd": "root:x:0:0:root:/root:/bin/bash\napps:x:2200:2200:Apps:/home/apps:/bin/bash\n",
 			"ls -1d /run/user/*/podman/podman.sock": "/run/user/2200/podman/podman.sock\n",
-			"--unix-socket=/run/user/2200/podman/podman.sock \"http://d/v4.0.0/libpod/containers/json?all=true\"": `[
+			"--unix-socket /run/user/2200/podman/podman.sock \"http://d/v4.0.0/libpod/containers/json?all=true\"": `[
 				{"Id": "869408baab38", "Names": ["FeedCord"], "Image": "docker.io/qolors/feedcord:latest", "State": "running", "Status": "Up 3 days", "IsInfra": false}
 			]`,
 		},

@@ -186,6 +186,33 @@ func TestParseDockerPsOutput(t *testing.T) {
 	if hasDocker || len(containers) != 0 {
 		t.Fatalf("empty host reported docker: %v %+v", hasDocker, containers)
 	}
+
+	// Docker Engine HTTP API JSON array (/containers/json?all=1) with Compose labels
+	socketJSON := `[
+		{
+			"Id": "11223344556677889900",
+			"Names": ["/traefik-reverse-proxy"],
+			"Image": "traefik:v3.1",
+			"State": "running",
+			"Status": "Up 5 hours",
+			"Ports": [{"IP": "0.0.0.0", "PrivatePort": 80, "PublicPort": 80, "Type": "tcp"}],
+			"Labels": {
+				"com.docker.compose.project": "ingress",
+				"com.docker.compose.service": "traefik",
+				"com.docker.compose.project.config_files": "/srv/ingress/compose.yaml"
+			}
+		}
+	]`
+	hasDocker, sockContainers := parseDockerPsOutput(socketJSON, `{"Version":"27.3.1","Platform":{"Name":"Docker Engine"}}`)
+	if !hasDocker || len(sockContainers) != 1 {
+		t.Fatalf("expected 1 container from Docker socket JSON, got hasDocker=%v containers=%+v", hasDocker, sockContainers)
+	}
+	if sockContainers[0].ID != "112233445566" || sockContainers[0].Name != "traefik-reverse-proxy" {
+		t.Fatalf("unexpected container ID/Name: %+v", sockContainers[0])
+	}
+	if sockContainers[0].ComposeProject != "ingress" || sockContainers[0].ComposeService != "traefik" || sockContainers[0].ComposeConfigFiles != "/srv/ingress/compose.yaml" {
+		t.Fatalf("expected compose labels from socket JSON, got %+v", sockContainers[0])
+	}
 }
 
 func TestParseIdentities(t *testing.T) {

@@ -175,22 +175,16 @@ func (p *Plugin) SettingsPage() plugin.SettingsPage {
 }
 
 // Probe determines whether Docker is present and reachable on the host.
+// It queries the Docker Unix socket (/var/run/docker.sock) while elevated to root
+// first (run0 --background=no -> sudo -n -> doas -n -> direct), rejects Podman /
+// Libpod socket emulation, and falls back to CLI inspection if needed.
 func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (plugin.Detection, error) {
 	if r == nil {
 		return plugin.Detection{Detected: false, Status: "OFFLINE", Error: "runner is nil"}, nil
 	}
 
-	out, err := r.RunCommand(ctx, "command -v docker")
-	if err != nil || strings.TrimSpace(out) == "" {
-		return plugin.Detection{
-			Detected: false,
-			Status:   "UNAVAILABLE",
-			Error:    "docker command not found",
-		}, nil
-	}
-
 	verOut, _ := r.RunCommand(ctx, "(docker --version 2>&1; readlink /var/run/docker.sock /run/docker.sock 2>/dev/null) || true")
-	if strings.Contains(strings.ToLower(verOut), "podman") {
+	if pkgdocker.IsPodmanVersionJSON(verOut) {
 		return plugin.Detection{
 			Detected: false,
 			Status:   "UNAVAILABLE",
@@ -198,12 +192,47 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		}, nil
 	}
 
-	// Count all containers (running and stopped) to report an accurate badge.
-	cntOut, err := r.RunCommand(ctx, "(run0 --background=no docker ps -a -q 2>/dev/null || sudo -n docker ps -a -q 2>/dev/null || docker ps -a -q 2>/dev/null) | wc -l")
+	// Probe /version over /var/run/docker.sock while elevated to root.
+	sockVerOut, sockVerErr := r.RunCommand(ctx, pkgdocker.RootSocketOrCLICommand("/version", "info --format '{{.ServerVersion}}'"))
+	if sockVerErr == nil && pkgdocker.IsPodmanVersionJSON(sockVerOut) {
+		return plugin.Detection{
+			Detected: false,
+			Status:   "UNAVAILABLE",
+			Details:  "podman-docker emulation detected on /var/run/docker.sock; native Docker Engine not present",
+		}, nil
+	}
+
+	socketValid, _ := pkgdocker.ParseVersionJSON(sockVerOut)
+	if !socketValid {
+		out, err := r.RunCommand(ctx, "command -v docker")
+		if err != nil || strings.TrimSpace(out) == "" {
+			return plugin.Detection{
+				Detected: false,
+				Status:   "UNAVAILABLE",
+				Error:    "docker socket and command not found",
+			}, nil
+		}
+	}
+
+	// Count all containers (running and stopped) via root-elevated socket query
+	// (/containers/json?all=1), falling back to CLI count.
+	cntOut, err := r.RunCommand(ctx, pkgdocker.RootSocketOrCLICommand("/containers/json?all=1", "ps -a --format '{{json .}}'"))
 	count := 0
 	if err == nil {
-		if s := strings.TrimSpace(cntOut); s != "" {
-			fmt.Sscanf(s, "%d", &count)
+		trimmed := strings.TrimSpace(cntOut)
+		if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
+			count = len(pkgdocker.ParseDockerContainersJSON(trimmed, "root", 0))
+		} else if trimmed != "" {
+			if _, scanErr := fmt.Sscanf(trimmed, "%d", &count); scanErr != nil {
+				count = len(strings.Fields(trimmed))
+			}
+		}
+	}
+	if count == 0 {
+		if fbOut, fbErr := r.RunCommand(ctx, "(run0 --background=no docker ps -a -q 2>/dev/null || sudo -n docker ps -a -q 2>/dev/null || doas -n docker ps -a -q 2>/dev/null || docker ps -a -q 2>/dev/null) | wc -l"); fbErr == nil {
+			if s := strings.TrimSpace(fbOut); s != "" {
+				fmt.Sscanf(s, "%d", &count)
+			}
 		}
 	}
 

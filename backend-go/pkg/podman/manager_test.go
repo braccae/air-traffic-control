@@ -464,18 +464,18 @@ func TestSocketEscalation_QueriesRootfulAndRootlessSocketsWithRun0Preferred(t *t
 			switch {
 			case strings.Contains(cmd, "/run/podman/podman.sock") && strings.Contains(cmd, "/v4.0.0/libpod/containers/json?all=true"):
 				// Verify escalation order in command: run0 -> sudo -n -> doas -n -> none -> CLI fallback
-				idxRun0 := strings.Index(cmd, "run0 --background=no curl -sf --unix-socket=/run/podman/podman.sock")
-				idxSudo := strings.Index(cmd, "sudo -n curl -sf --unix-socket=/run/podman/podman.sock")
-				idxDoas := strings.Index(cmd, "doas -n curl -sf --unix-socket=/run/podman/podman.sock")
-				idxNone := strings.Index(cmd, "|| curl -sf --unix-socket=/run/podman/podman.sock")
+				idxRun0 := strings.Index(cmd, "run0 --background=no curl -s --unix-socket /run/podman/podman.sock")
+				idxSudo := strings.Index(cmd, "sudo -n curl -s --unix-socket /run/podman/podman.sock")
+				idxDoas := strings.Index(cmd, "doas -n curl -s --unix-socket /run/podman/podman.sock")
+				idxNone := strings.Index(cmd, "|| curl -s --unix-socket /run/podman/podman.sock")
 				idxCLI := strings.Index(cmd, "podman ps --all --format json")
 				if idxRun0 < 0 || idxSudo <= idxRun0 || idxDoas <= idxSudo || idxNone <= idxDoas || idxCLI <= idxNone {
 					t.Errorf("invalid escalation order in rootful socket command: %s", cmd)
 				}
 				return `[
-					{"Id": "e377a55482d2c038d414d9eec7b89b52", "Names": ["systemd-caddy"], "Image": "ghcr.io/braccae/caddy:latest", "State": "running", "Status": "healthy", "IsInfra": false},
+					{"Id": "e377a55482d2c038d414d9eec7b89b52", "Names": ["systemd-caddy"], "Image": "ghcr.io/braccae/caddy:latest", "State": "running", "Status": "healthy", "IsInfra": false, "Ports": [{"host_ip":"0.0.0.0","host_port":443,"container_port":443,"protocol":"tcp"}]},
 					{"Id": "2e79f503f9f7adee247a7433dc5601f0", "Names": ["systemd-proxy-infra"], "Image": "", "State": "running", "Status": "", "IsInfra": true, "Pod": "f4e8950bc5d4"},
-					{"Id": "e02b94a88dd845155a56195e978f5dce", "Names": ["systemd-cloudflare"], "Image": "docker.io/cloudflare/cloudflared:latest", "State": "running", "Status": "", "IsInfra": false, "Pod": "f4e8950bc5d4", "PodName": "systemd-proxy"}
+					{"Id": "e02b94a88dd845155a56195e978f5dce", "Names": ["systemd-cloudflare"], "ImageName": "docker.io/cloudflare/cloudflared:latest", "State": "running", "Status": "", "IsInfra": false, "Pod": "f4e8950bc5d4", "PodName": "systemd-proxy"}
 				]`, nil
 			case strings.Contains(cmd, "/run/podman/podman.sock") && strings.Contains(cmd, "/v4.0.0/libpod/containers/stats?stream=false"):
 				return `{"Error":null,"Stats":[{"ContainerID":"e377a55482d2c038d414d9eec7b89b52","Name":"systemd-caddy","CPU":0.18,"MemUsage":182583296,"MemPerc":0.56}]}`, nil
@@ -487,7 +487,7 @@ func TestSocketEscalation_QueriesRootfulAndRootlessSocketsWithRun0Preferred(t *t
 				return "/run/user/2200/podman/podman.sock\n", nil
 			case strings.Contains(cmd, "/run/user/2200/podman/podman.sock") && strings.Contains(cmd, "/v4.0.0/libpod/containers/json?all=true"):
 				return `[
-					{"Id": "869408baab381a89ca9d659032245d08", "Names": ["FeedCord"], "Image": "docker.io/qolors/feedcord:latest", "State": "running", "Status": "", "IsInfra": false}
+					{"Id": "869408baab381a89ca9d659032245d08", "Names": ["FeedCord"], "Image": "docker.io/qolors/feedcord:latest", "State": "running", "Status": "", "IsInfra": false, "Pod": "pod-2200-1", "PodName": "feed-stack"}
 				]`, nil
 			default:
 				return `[]`, nil
@@ -508,6 +508,12 @@ func TestSocketEscalation_QueriesRootfulAndRootlessSocketsWithRun0Preferred(t *t
 	if containers[0].Name != "systemd-caddy" || containers[0].Rootless || containers[0].User != "root" {
 		t.Errorf("expected rootful systemd-caddy container, got %+v", containers[0])
 	}
+	if containers[0].Ports != "0.0.0.0:443->443/tcp" {
+		t.Errorf("expected formatted libpod port '0.0.0.0:443->443/tcp', got %q", containers[0].Ports)
+	}
+	if containers[1].Image != "docker.io/cloudflare/cloudflared:latest" {
+		t.Errorf("expected ImageName fallback on systemd-cloudflare, got %q", containers[1].Image)
+	}
 	if containers[0].Status != "running (healthy)" {
 		t.Errorf("expected combined socket state/status 'running (healthy)', got %q", containers[0].Status)
 	}
@@ -516,6 +522,15 @@ func TestSocketEscalation_QueriesRootfulAndRootlessSocketsWithRun0Preferred(t *t
 	}
 	if containers[2].Name != "FeedCord" || !containers[2].Rootless || containers[2].User != "apps" || containers[2].UID != 2200 {
 		t.Errorf("expected rootless FeedCord container for apps (2200), got %+v", containers[2])
+	}
+
+	// Verify pod synthesis even when pods/json is empty (`[]`)
+	pods, pErr := mgr.ListPods()
+	if pErr != nil {
+		t.Fatalf("ListPods failed: %v", pErr)
+	}
+	if len(pods) != 2 {
+		t.Fatalf("expected 2 synthesized pods (systemd-proxy + feed-stack), got %d: %+v", len(pods), pods)
 	}
 }
 

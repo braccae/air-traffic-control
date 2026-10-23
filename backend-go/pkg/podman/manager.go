@@ -39,26 +39,26 @@ func RootlessSocketPath(uid int) string {
 }
 
 // RootSocketOrCLICommand builds a command that queries the rootful Podman socket
-// (/run/podman/podman.sock) first using the AGENTS.md §3 privilege escalation chain
-// (run0 -> sudo -n -> doas -n -> none), falling back to the native podman CLI with
-// the same escalation chain if the socket is unavailable.
+// (/run/podman/podman.sock) via the Libpod HTTP API (`http://d/v4.0.0/libpod/...`)
+// first using the AGENTS.md §3 privilege escalation chain
+// (run0 --background=no -> sudo -n -> doas -n -> direct), falling back to the
+// native podman CLI with the same escalation chain if the socket is unavailable.
 func RootSocketOrCLICommand(socketEndpoint string, cliCmd string) string {
 	sockURL := fmt.Sprintf("http://d%s", socketEndpoint)
-	const curlBase = "curl -sf"
-	const sockArg = "--unix-socket=" + RootSocketPath
+	const curlBase = "curl -s --unix-socket " + RootSocketPath
 	return fmt.Sprintf(
-		"run0 --background=no %s %s %q 2>/dev/null || "+
-			"sudo -n %s %s %q 2>/dev/null || "+
-			"doas -n %s %s %q 2>/dev/null || "+
-			"%s %s %q 2>/dev/null || "+
+		"run0 --background=no %s %q 2>/dev/null || "+
+			"sudo -n %s %q 2>/dev/null || "+
+			"doas -n %s %q 2>/dev/null || "+
+			"%s %q 2>/dev/null || "+
 			"run0 --background=no %s 2>/dev/null || "+
 			"sudo -n %s 2>/dev/null || "+
 			"doas -n %s 2>/dev/null || "+
 			"%s",
-		curlBase, sockArg, sockURL,
-		curlBase, sockArg, sockURL,
-		curlBase, sockArg, sockURL,
-		curlBase, sockArg, sockURL,
+		curlBase, sockURL,
+		curlBase, sockURL,
+		curlBase, sockURL,
+		curlBase, sockURL,
 		cliCmd,
 		cliCmd,
 		cliCmd,
@@ -67,35 +67,35 @@ func RootSocketOrCLICommand(socketEndpoint string, cliCmd string) string {
 }
 
 // UserSocketOrCLICommand builds a command that queries a rootless user's Podman socket
-// (/run/user/<uid>/podman/podman.sock) first using the AGENTS.md §3 privilege escalation chain
-// (run0 -> sudo -n -> doas -n -> none), falling back to the native podman CLI with
-// the same escalation chain if the socket is unavailable.
+// (/run/user/<uid>/podman/podman.sock) via the Libpod HTTP API (`http://d/v4.0.0/libpod/...`)
+// while elevated to root first (run0 --background=no -> sudo -n -> doas -n) — because
+// root can directly read/write all `/run/user/<uid>/podman/podman.sock` sockets —
+// then user-session curl, falling back to the native podman CLI if the socket is unavailable.
 func UserSocketOrCLICommand(user string, uid int, socketEndpoint string, cliCmd string) string {
 	sockPath := RootlessSocketPath(uid)
 	sockURL := fmt.Sprintf("http://d%s", socketEndpoint)
-	sockArg := "--unix-socket=" + sockPath
-	const curlBase = "curl -sf"
+	curlBase := "curl -s --unix-socket " + sockPath
 	return fmt.Sprintf(
-		"run0 --background=no %s %s %q 2>/dev/null || "+
-			"run0 --background=no --user %s %s %s %q 2>/dev/null || "+
-			"(cd / && sudo -n %s %s %q 2>/dev/null) || "+
-			"(cd / && sudo -n -u %s %s %s %q 2>/dev/null) || "+
-			"(cd / && doas -n %s %s %q 2>/dev/null) || "+
-			"(cd / && doas -n --user %s %s %s %q 2>/dev/null) || "+
-			"%s %s %q 2>/dev/null || "+
+		"run0 --background=no %s %q 2>/dev/null || "+
+			"sudo -n %s %q 2>/dev/null || "+
+			"doas -n %s %q 2>/dev/null || "+
+			"run0 --background=no --user %s %s %q 2>/dev/null || "+
+			"(cd / && sudo -n -u %s %s %q 2>/dev/null) || "+
+			"(cd / && doas -n --user %s %s %q 2>/dev/null) || "+
+			"%s %q 2>/dev/null || "+
 			"run0 --background=no --user %s %s 2>/dev/null || "+
 			"(cd / && sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d %s 2>/dev/null) || "+
 			"(cd / && doas -n --user %s XDG_RUNTIME_DIR=/run/user/%d %s 2>/dev/null) || "+
 			"(cd / && doas -u %s XDG_RUNTIME_DIR=/run/user/%d %s 2>/dev/null) || "+
 			"su - %s -s /bin/sh -c \"XDG_RUNTIME_DIR=/run/user/%d %s\" 2>/dev/null || "+
 			"XDG_RUNTIME_DIR=/run/user/%d %s",
-		curlBase, sockArg, sockURL,
-		user, curlBase, sockArg, sockURL,
-		curlBase, sockArg, sockURL,
-		user, curlBase, sockArg, sockURL,
-		curlBase, sockArg, sockURL,
-		user, curlBase, sockArg, sockURL,
-		curlBase, sockArg, sockURL,
+		curlBase, sockURL,
+		curlBase, sockURL,
+		curlBase, sockURL,
+		user, curlBase, sockURL,
+		user, curlBase, sockURL,
+		user, curlBase, sockURL,
+		curlBase, sockURL,
 		user, cliCmd,
 		user, uid, cliCmd,
 		user, uid, cliCmd,
@@ -170,25 +170,22 @@ func (m *Manager) ProbeUnprivilegedUsers() ([]types.UnprivilegedPodmanUser, erro
 		passwdByUID[uid] = entry
 	}
 
-		// Parse /etc/subuid for rootless namespace mappings.
-		// Note: we only store subuid mappings here to enrich users discovered via
-		// active processes, /var/lib/systemd/linger, or /run/user/<uid>/* sockets/dirs,
-		// avoiding expensive per-user podman spawns for inactive system accounts.
-		subuidByUser := make(map[string]string)
-		for _, line := range strings.Split(subuidOut, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
+	// Parse /etc/subuid for rootless namespace mappings.
+	subuidByUser := make(map[string]string)
+	for _, line := range strings.Split(subuidOut, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, ":")
+		if len(parts) >= 3 {
+			user := parts[0]
+			if user == "root" {
 				continue
 			}
-			parts := strings.Split(line, ":")
-			if len(parts) >= 3 {
-				user := parts[0]
-				if user == "root" {
-					continue
-				}
-				subuidByUser[user] = parts[1] + ":" + parts[2]
-			}
+			subuidByUser[user] = parts[1] + ":" + parts[2]
 		}
+	}
 
 	// Parse linger directory
 	lingerUsers := make(map[string]bool)
@@ -206,7 +203,7 @@ func (m *Manager) ProbeUnprivilegedUsers() ([]types.UnprivilegedPodmanUser, erro
 		}
 	}
 
-	// Parse /run/user/<uid>/* runtime directories
+	// Parse /run/user/<uid>/* runtime directories and sockets (even if user is not in /etc/passwd)
 	for _, line := range strings.Split(runUserOut, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "/run/user/") {
@@ -227,6 +224,14 @@ func (m *Manager) ProbeUnprivilegedUsers() ([]types.UnprivilegedPodmanUser, erro
 				u.Linger = lingerUsers[pw.User]
 				candidates[pw.User] = &u
 			}
+		} else {
+			uidUser := strconv.Itoa(uid)
+			if _, exists := candidates[uidUser]; !exists {
+				candidates[uidUser] = &types.UnprivilegedPodmanUser{
+					User: uidUser,
+					UID:  uid,
+				}
+			}
 		}
 	}
 
@@ -241,7 +246,6 @@ func (m *Manager) ProbeUnprivilegedUsers() ([]types.UnprivilegedPodmanUser, erro
 			continue
 		}
 		user := fields[1]
-		// Resolve truncated usernames (e.g. "longusern+") or numeric user strings via passwdByUID
 		if pw, ok := passwdByUID[uid]; ok {
 			user = pw.User
 		}
@@ -315,17 +319,7 @@ func (m *Manager) ProbeUnprivilegedUsers() ([]types.UnprivilegedPodmanUser, erro
 		if len(containers) > 0 || len(cand.ActiveProcesses) > 0 {
 			pods, _ = m.listUserPods(cand.User, cand.UID)
 		}
-		for pi := range pods {
-			p := &pods[pi]
-			var podContainers []types.PodmanContainer
-			for _, c := range containers {
-				if matchesPod(c, *p) {
-					podContainers = append(podContainers, c)
-				}
-			}
-			p.Containers = podContainers
-			p.TotalCPU, p.TotalMemory = computePodTotals(podContainers)
-		}
+		pods = groupAndSynthesizePods(containers, pods, cand.User, cand.UID)
 
 		if len(containers) > 0 || len(pods) > 0 {
 			cand.Containers = containers
@@ -335,6 +329,73 @@ func (m *Manager) ProbeUnprivilegedUsers() ([]types.UnprivilegedPodmanUser, erro
 	}
 
 	return activeUsers, nil
+}
+
+// groupAndSynthesizePods matches containers to existing pods and synthesizes
+// missing pod entries when containers carry a Pod/PodName field from the
+// Libpod `/v4.0.0/libpod/containers/json?all=true` response even if `pods/json`
+// was empty or failed.
+func groupAndSynthesizePods(containers []types.PodmanContainer, existingPods []types.PodmanPod, user string, uid int) []types.PodmanPod {
+	pods := make([]types.PodmanPod, len(existingPods))
+	copy(pods, existingPods)
+
+	for _, c := range containers {
+		podID := strings.TrimSpace(c.PodID)
+		podName := strings.TrimSpace(c.PodName)
+		if podID == "" && podName == "" {
+			continue
+		}
+		found := false
+		for i := range pods {
+			if matchesPod(c, pods[i]) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			id := podID
+			if id == "" {
+				id = podName
+			}
+			name := podName
+			if name == "" {
+				name = podID
+			}
+			pods = append(pods, types.PodmanPod{
+				ID:       id,
+				Name:     name,
+				Status:   "Running",
+				Ports:    c.Ports,
+				User:     user,
+				UID:      uid,
+				Rootless: uid != 0,
+			})
+		}
+	}
+
+	for pi := range pods {
+		p := &pods[pi]
+		var podContainers []types.PodmanContainer
+		runningCount := 0
+		for _, c := range containers {
+			if matchesPod(c, *p) {
+				podContainers = append(podContainers, c)
+				st := strings.ToLower(c.Status)
+				if strings.Contains(st, "running") || strings.HasPrefix(st, "up ") {
+					runningCount++
+				}
+				if p.Ports == "" && c.Ports != "" {
+					p.Ports = c.Ports
+				}
+			}
+		}
+		p.Containers = podContainers
+		p.ContainersRunningCount = runningCount
+		p.TotalCPU, p.TotalMemory = computePodTotals(podContainers)
+		p.TotalRam = p.TotalMemory
+	}
+
+	return pods
 }
 
 func extractContainersFromProcesses(processes []string, user string, uid int) []types.PodmanContainer {
@@ -390,8 +451,91 @@ func extractContainersFromProcesses(processes []string, user string, uid int) []
 			Rootless: uid != 0,
 		})
 	}
-	// Do not synthesize podman-pause for idle namespaces
 	return containers
+}
+
+// FormatLibpodPorts formats the `Ports` field from a Libpod container or pod JSON object
+// (supporting both Libpod port mappings `host_ip:host_port->container_port/protocol`,
+// Docker-style `PublicPort`/`PrivatePort`, and plain strings).
+func FormatLibpodPorts(rawPorts any) string {
+	switch v := rawPorts.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []any:
+		var parts []string
+		seen := make(map[string]bool)
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				if s, okStr := item.(string); okStr && strings.TrimSpace(s) != "" {
+					s = strings.TrimSpace(s)
+					if !seen[s] {
+						seen[s] = true
+						parts = append(parts, s)
+					}
+				}
+				continue
+			}
+			hostIP := firstStr(m, "host_ip", "HostIP", "IP")
+			proto := firstStr(m, "protocol", "Protocol", "Type")
+			if proto == "" {
+				proto = "tcp"
+			}
+			hostPort := firstInt(m, "host_port", "HostPort", "PublicPort")
+			containerPort := firstInt(m, "container_port", "ContainerPort", "PrivatePort")
+			var formatted string
+			if hostPort > 0 && containerPort > 0 {
+				if hostIP != "" {
+					formatted = fmt.Sprintf("%s:%d->%d/%s", hostIP, hostPort, containerPort, proto)
+				} else {
+					formatted = fmt.Sprintf("%d->%d/%s", hostPort, containerPort, proto)
+				}
+			} else if containerPort > 0 {
+				formatted = fmt.Sprintf("%d/%s", containerPort, proto)
+			} else if hostPort > 0 {
+				formatted = fmt.Sprintf("%d/%s", hostPort, proto)
+			}
+			if formatted != "" && !seen[formatted] {
+				seen[formatted] = true
+				parts = append(parts, formatted)
+			}
+		}
+		return strings.Join(parts, ", ")
+	}
+	return ""
+}
+
+func firstStr(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if val, ok := m[k]; ok {
+			if s, okStr := val.(string); okStr && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+func firstInt(m map[string]any, keys ...string) int {
+	for _, k := range keys {
+		if val, ok := m[k]; ok {
+			switch n := val.(type) {
+			case float64:
+				if int(n) > 0 {
+					return int(n)
+				}
+			case int:
+				if n > 0 {
+					return n
+				}
+			case string:
+				if i, err := strconv.Atoi(strings.TrimSpace(n)); err == nil && i > 0 {
+					return i
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContainer, error) {
@@ -401,17 +545,20 @@ func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContai
 	}
 
 	var rawContainers []struct {
-		ID      string      `json:"Id"`
-		IdAlt   string      `json:"ID"`
-		IdAlt2  string      `json:"id"`
-		Names   interface{} `json:"Names"`
-		Image   string      `json:"Image"`
-		State   string      `json:"State"`
-		Status  string      `json:"Status"`
-		Pod     string      `json:"Pod"`
-		PodName string      `json:"PodName"`
-		PodId   string      `json:"PodId"`
-		IsInfra bool        `json:"IsInfra"`
+		ID        string            `json:"Id"`
+		IdAlt     string            `json:"ID"`
+		IdAlt2    string            `json:"id"`
+		Names     interface{}       `json:"Names"`
+		Image     string            `json:"Image"`
+		ImageName string            `json:"ImageName"`
+		State     string            `json:"State"`
+		Status    string            `json:"Status"`
+		Pod       string            `json:"Pod"`
+		PodName   string            `json:"PodName"`
+		PodId     string            `json:"PodId"`
+		IsInfra   bool              `json:"IsInfra"`
+		Ports     interface{}       `json:"Ports"`
+		Labels    map[string]string `json:"Labels"`
 	}
 
 	if err := json.Unmarshal([]byte(out), &rawContainers); err != nil {
@@ -433,13 +580,18 @@ func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContai
 		case []interface{}:
 			if len(v) > 0 {
 				if s, ok := v[0].(string); ok {
-					name = s
+					name = strings.TrimPrefix(s, "/")
 				}
 			}
 		case string:
 			if v != "" {
-				name = v
+				name = strings.TrimPrefix(v, "/")
 			}
+		}
+
+		image := rc.Image
+		if image == "" {
+			image = rc.ImageName
 		}
 
 		status := rc.Status
@@ -451,7 +603,7 @@ func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContai
 		}
 
 		nameLower := strings.ToLower(name)
-		imgLower := strings.ToLower(rc.Image)
+		imgLower := strings.ToLower(image)
 		if rc.IsInfra || strings.Contains(nameLower, "pause") || strings.HasSuffix(nameLower, "-infra") || strings.Contains(imgLower, "pause") || strings.Contains(imgLower, "podman-pause") {
 			continue
 		}
@@ -462,16 +614,30 @@ func parseContainersJSON(out string, user string, uid int) ([]types.PodmanContai
 		}
 		podName := rc.PodName
 
+		var composeProject, composeService, composeConfigFiles string
+		if rc.Labels != nil {
+			composeProject = strings.TrimSpace(rc.Labels["com.docker.compose.project"])
+			if composeProject == "" {
+				composeProject = strings.TrimSpace(rc.Labels["io.podman.compose.project"])
+			}
+			composeService = strings.TrimSpace(rc.Labels["com.docker.compose.service"])
+			composeConfigFiles = strings.TrimSpace(rc.Labels["com.docker.compose.project.config_files"])
+		}
+
 		containers = append(containers, types.PodmanContainer{
-			ID:       cid,
-			PodID:    podID,
-			PodName:  podName,
-			Name:     name,
-			Image:    rc.Image,
-			Status:   status,
-			User:     user,
-			UID:      uid,
-			Rootless: uid != 0,
+			ID:                 cid,
+			PodID:              podID,
+			PodName:            podName,
+			Name:               name,
+			Image:              image,
+			Status:             status,
+			Ports:              FormatLibpodPorts(rc.Ports),
+			User:               user,
+			UID:                uid,
+			Rootless:           uid != 0,
+			ComposeProject:     composeProject,
+			ComposeService:     composeService,
+			ComposeConfigFiles: composeConfigFiles,
 		})
 	}
 	return containers, nil
@@ -495,8 +661,9 @@ func matchesPod(c types.PodmanContainer, p types.PodmanPod) bool {
 		if podName == pName || podName == pID {
 			return true
 		}
-		cleanName := strings.TrimPrefix(pName, "pod: ")
-		if podName == cleanName {
+		cleanName := strings.TrimSpace(strings.TrimPrefix(pName, "pod:"))
+		cleanPodName := strings.TrimSpace(strings.TrimPrefix(podName, "pod:"))
+		if cleanPodName != "" && cleanPodName == cleanName {
 			return true
 		}
 	}
@@ -678,12 +845,25 @@ func (m *Manager) ListAllContainers() ([]types.PodmanContainer, error) {
 	return all, nil
 }
 
-// ListPods queries podman pods via rootful/rootless sockets first, falling back to podman pod ps --format json
+// ListPods queries podman pods via rootful/rootless Libpod sockets first, falling back to podman pod ps --format json
+// and synthesizing pod membership from container Pod/PodName fields when pods/json is empty.
 func (m *Manager) ListPods() ([]types.PodmanPod, error) {
 	var pods []types.PodmanPod
 
 	cmd := RootSocketOrCLICommand("/v4.0.0/libpod/pods/json", "podman pod ps --format json")
 	out, rootErr := m.sshMgr.RunCommand(m.cfg, cmd)
+
+	rootContainersCmd := RootSocketOrCLICommand("/v4.0.0/libpod/containers/json?all=true", "podman ps --all --format json")
+	rootContainersOut, rcErr := m.sshMgr.RunCommand(m.cfg, rootContainersCmd)
+	var rootContainers []types.PodmanContainer
+	if rcErr == nil {
+		rootContainers, _ = parseContainersJSON(rootContainersOut, "root", 0)
+		if rootStats, sErr := m.CollectStats("root", 0); sErr == nil && len(rootStats) > 0 {
+			EnrichContainersWithStats(rootContainers, rootStats)
+		}
+	}
+
+	var rootPods []types.PodmanPod
 	if rootErr == nil {
 		var rawPods []struct {
 			ID     string `json:"Id"`
@@ -692,16 +872,9 @@ func (m *Manager) ListPods() ([]types.PodmanPod, error) {
 			Name   string `json:"Name"`
 			Status string `json:"Status"`
 		}
-		if parseErr := json.Unmarshal([]byte(out), &rawPods); parseErr != nil {
+		if parseErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &rawPods); parseErr != nil && strings.TrimSpace(out) != "" {
 			rootErr = fmt.Errorf("failed to parse pods json: %w", parseErr)
 		} else {
-			rootContainersCmd := RootSocketOrCLICommand("/v4.0.0/libpod/containers/json?all=true", "podman ps --all --format json")
-			rootContainersOut, _ := m.sshMgr.RunCommand(m.cfg, rootContainersCmd)
-			rootContainers, _ := parseContainersJSON(rootContainersOut, "root", 0)
-			if rootStats, sErr := m.CollectStats("root", 0); sErr == nil && len(rootStats) > 0 {
-				EnrichContainersWithStats(rootContainers, rootStats)
-			}
-
 			for _, rp := range rawPods {
 				pid := rp.ID
 				if pid == "" {
@@ -710,25 +883,22 @@ func (m *Manager) ListPods() ([]types.PodmanPod, error) {
 				if pid == "" {
 					pid = rp.IdAlt2
 				}
-				pod := types.PodmanPod{
+				rootPods = append(rootPods, types.PodmanPod{
 					ID:       pid,
 					Name:     rp.Name,
 					Status:   rp.Status,
 					User:     "root",
 					UID:      0,
 					Rootless: false,
-				}
-				var podContainers []types.PodmanContainer
-				for _, c := range rootContainers {
-					if matchesPod(c, pod) {
-						podContainers = append(podContainers, c)
-					}
-				}
-				pod.Containers = podContainers
-				pod.TotalCPU, pod.TotalMemory = computePodTotals(podContainers)
-				pods = append(pods, pod)
+				})
 			}
 		}
+	}
+
+	mergedRootPods := groupAndSynthesizePods(rootContainers, rootPods, "root", 0)
+	if len(mergedRootPods) > 0 {
+		pods = append(pods, mergedRootPods...)
+		rootErr = nil
 	}
 
 	// Probe unprivileged users for rootless pods and containers
@@ -750,10 +920,10 @@ func (m *Manager) ListPods() ([]types.PodmanPod, error) {
 func (m *Manager) RestartPod(podName string) error {
 	sockURL := fmt.Sprintf("http://d/v4.0.0/libpod/pods/%s/restart", podName)
 	cmd := fmt.Sprintf(
-		"run0 --background=no curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-			"sudo -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-			"doas -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-			"curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+		"run0 --background=no curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+			"sudo -n curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+			"doas -n curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+			"curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
 			"run0 --background=no podman pod restart %s 2>/dev/null || "+
 			"sudo -n podman pod restart %s 2>/dev/null || "+
 			"doas -n podman pod restart %s 2>/dev/null || "+
@@ -775,19 +945,19 @@ func (m *Manager) RestartPod(podName string) error {
 				if p.Name == podName || p.ID == podName {
 					uSock := RootlessSocketPath(u.UID)
 					userCmd := fmt.Sprintf(
-						"run0 --background=no curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-							"run0 --background=no --user %s curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-							"sudo -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-							"doas -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-							"curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+						"run0 --background=no curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+							"sudo -n curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+							"doas -n curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+							"run0 --background=no --user %s curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+							"curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
 							"run0 --background=no --user %s podman pod restart %s 2>/dev/null || "+
 							"sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman pod restart %s 2>/dev/null || "+
 							"doas -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman pod restart %s 2>/dev/null || "+
 							"XDG_RUNTIME_DIR=/run/user/%d podman pod restart %s",
 						uSock, sockURL,
+						uSock, sockURL,
+						uSock, sockURL,
 						u.User, uSock, sockURL,
-						uSock, sockURL,
-						uSock, sockURL,
 						uSock, sockURL,
 						u.User, podName,
 						u.User, u.UID, podName,
@@ -807,10 +977,10 @@ func (m *Manager) RestartPod(podName string) error {
 func (m *Manager) ContainerAction(containerName, action string) error {
 	sockURL := fmt.Sprintf("http://d/v4.0.0/libpod/containers/%s/%s", containerName, action)
 	cmd := fmt.Sprintf(
-		"run0 --background=no curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-			"sudo -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-			"doas -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-			"curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+		"run0 --background=no curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+			"sudo -n curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+			"doas -n curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+			"curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
 			"run0 --background=no podman %s %s 2>/dev/null || "+
 			"sudo -n podman %s %s 2>/dev/null || "+
 			"doas -n podman %s %s 2>/dev/null || "+
@@ -835,19 +1005,19 @@ func (m *Manager) ContainerAction(containerName, action string) error {
 				if c.Name == containerName || c.ID == containerName {
 					uSock := RootlessSocketPath(u.UID)
 					userCmd := fmt.Sprintf(
-						"run0 --background=no curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-							"run0 --background=no --user %s curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-							"sudo -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-							"doas -n curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
-							"curl -sf -X POST --unix-socket %s %q 2>/dev/null || "+
+						"run0 --background=no curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+							"sudo -n curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+							"doas -n curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+							"run0 --background=no --user %s curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
+							"curl -s -f -X POST --unix-socket %s %q 2>/dev/null || "+
 							"run0 --background=no --user %s podman %s %s 2>/dev/null || "+
 							"sudo -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman %s %s 2>/dev/null || "+
 							"doas -n -u %s XDG_RUNTIME_DIR=/run/user/%d podman %s %s 2>/dev/null || "+
 							"XDG_RUNTIME_DIR=/run/user/%d podman %s %s",
 						uSock, sockURL,
+						uSock, sockURL,
+						uSock, sockURL,
 						u.User, uSock, sockURL,
-						uSock, sockURL,
-						uSock, sockURL,
 						uSock, sockURL,
 						u.User, action, containerName,
 						u.User, u.UID, action, containerName,

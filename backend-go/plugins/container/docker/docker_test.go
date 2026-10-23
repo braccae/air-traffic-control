@@ -46,7 +46,14 @@ func TestDockerPlugin_ProbeAndCompile(t *testing.T) {
 	runner := &mockRunner{
 		responses: map[string]string{
 			"command -v docker": "/usr/bin/docker",
-			"docker ps -a -q":   "5\n",
+			"/version":          `{"Platform":{"Name":"Docker Engine"},"Version":"27.3.1"}`,
+			"--unix-socket /var/run/docker.sock http://localhost/containers/json?all=1": `[
+				{"Id":"c1","Names":["/a"],"Image":"alpine","State":"running","Status":"Up 1h"},
+				{"Id":"c2","Names":["/b"],"Image":"alpine","State":"running","Status":"Up 1h"},
+				{"Id":"c3","Names":["/c"],"Image":"alpine","State":"running","Status":"Up 1h"},
+				{"Id":"c4","Names":["/d"],"Image":"alpine","State":"running","Status":"Up 1h"},
+				{"Id":"c5","Names":["/e"],"Image":"alpine","State":"running","Status":"Up 1h"}
+			]`,
 		},
 	}
 
@@ -56,6 +63,20 @@ func TestDockerPlugin_ProbeAndCompile(t *testing.T) {
 	}
 	if !det.Detected || !strings.Contains(det.Status, "5 container") {
 		t.Errorf("unexpected probe result: %+v", det)
+	}
+
+	// Verify Podman-emulated /var/run/docker.sock is rejected
+	podmanRunner := &mockRunner{
+		responses: map[string]string{
+			"/version": `{"Platform":{"Name":"Podman Engine"},"Version":"5.2.0"}`,
+		},
+	}
+	podmanDet, err := p.Probe(context.Background(), podmanRunner, plugin.HostFacts{OSFamily: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if podmanDet.Detected {
+		t.Errorf("expected Podman-emulated socket to be rejected by Docker plugin Probe, got %+v", podmanDet)
 	}
 
 	actor, ok := p.(plugin.Actor)
