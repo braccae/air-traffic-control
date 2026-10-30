@@ -25,6 +25,16 @@ func (f *fakeRunner) RunCommand(ctx context.Context, cmd string) (string, error)
 	return f.output, f.err
 }
 
+// blockingRunner simulates a bootc/registry call that never returns until the
+// context deadline fires. It proves Read/Probe enforce their internal timeout
+// even when the caller's context is long-lived.
+type blockingRunner struct{}
+
+func (b *blockingRunner) RunCommand(ctx context.Context, cmd string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
 // realHostStatusJSON is the verbatim `sudo -n bootc status --json` document
 // captured from a real bootc host (core@likes-it-cold). It has a booted
 // deployment, a rollback deployment and no staged deployment.
@@ -67,7 +77,7 @@ func TestRead_RealHost_BootedAndFallback(t *testing.T) {
 	assertField(t, got, "fallbackImageDigest", "sha256:9cb3a3941ee4fd1cf3b5cb837ddf9cb6009435dfd9c770b9a95e98ed0c4c38d3")
 
 	// The plugin must query real bootc status, with a passwordless-sudo path.
-	if !strings.Contains(r.lastCmd, "bootc status --json") {
+	if !strings.Contains(r.lastCmd, "bootc status --format json") {
 		t.Errorf("Read did not run `bootc status --json`; ran %q", r.lastCmd)
 	}
 }
@@ -124,6 +134,45 @@ func TestRead_EmptyOutput_Errors(t *testing.T) {
 	_, err := New().Read(context.Background(), r, plugin.HostFacts{})
 	if err == nil {
 		t.Fatal("expected error for empty bootc status output, got nil")
+	}
+}
+
+// TestRead_ContextTimeout_ReturnsTimeoutError proves Read honors the caller's
+// deadline and surfaces a timeout instead of blocking forever.
+func TestRead_ContextTimeout_ReturnsTimeoutError(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := New().Read(parent, &blockingRunner{}, plugin.HostFacts{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "timed out") && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("Read did not honor the caller deadline promptly; took %s", elapsed)
+	}
+}
+
+// TestProbe_ContextTimeout_ReportsOffline proves Probe reports OFFLINE rather
+// than hanging when the bootc binary verification stalls.
+func TestProbe_ContextTimeout_ReportsOffline(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	d, err := New().Probe(parent, &blockingRunner{}, plugin.HostFacts{})
+	if err != nil {
+		t.Fatalf("Probe returned error: %v", err)
+	}
+	if d.Detected {
+		t.Fatal("expected Detected=false on probe timeout")
+	}
+	if d.Status != "OFFLINE" {
+		t.Fatalf("expected OFFLINE status on probe timeout, got %q", d.Status)
 	}
 }
 

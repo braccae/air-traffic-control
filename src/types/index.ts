@@ -28,7 +28,7 @@ export interface NodeItem {
   hypervisorHost?: string;
   vmId?: number;
   osDescription: string;
-  status: 'online' | 'stopped' | 'degraded';
+  status: 'online' | 'stopped' | 'degraded' | 'unmonitored';
   uptime: string;
   hasGlances: boolean;
   hasCockpit: boolean;
@@ -95,26 +95,26 @@ export interface PrivilegeStatus {
 }
 
 export interface TelemetryData {
-  cpuUsage: number;
-  cpuModel: string;
-  vCpus: number;
-  memoryUsedGiB: number;
-  memoryTotalGiB: number;
-  arcCacheGiB: number;
-  zfsTankUsedTb: number;
-  zfsTankTotalTb: number;
-  zfsRaidType: string;
-  zfsScrubStatus: string;
-  loadAvg1m: number;
-  loadAvg5m: number;
-  loadAvg15m: number;
-  ioDelayPercent: number;
-  cpuTempC: number;
-  fanSpeedRpm: number;
-  packageWatts: number;
+  cpuUsage: number | null;
+  cpuModel: string | null;
+  vCpus: number | null;
+  memoryUsedGiB: number | null;
+  memoryTotalGiB: number | null;
+  arcCacheGiB: number | null;
+  zfsTankUsedTb: number | null;
+  zfsTankTotalTb: number | null;
+  zfsRaidType: string | null;
+  zfsScrubStatus: string | null;
+  loadAvg1m: number | null;
+  loadAvg5m: number | null;
+  loadAvg15m: number | null;
+  ioDelayPercent: number | null;
+  cpuTempC: number | null;
+  fanSpeedRpm: number | null;
+  packageWatts: number | null;
   sparkline: number[];
   metricsSource?: 'glances' | 'pcp' | 'cockpit-bridge' | 'kernel';
-  buffCacheGiB?: number;
+  buffCacheGiB?: number | null;
 }
 
 export interface ContainerItem {

@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,9 @@ type Store interface {
 	SaveTask(t hostcache.Task) error
 	AddCustomIdentity(hostID string, identityJSON json.RawMessage) error
 	UpsertHostSection(hostID, section string, dataJSON json.RawMessage) error
+	UpsertFirewallRule(rule hostcache.FirewallRule) error
+	ListFirewallRules(hostID string) ([]hostcache.FirewallRule, error)
+	DeleteFirewallRule(hostID, id string) error
 }
 
 // Options configures the node API surface.
@@ -54,6 +58,7 @@ type Options struct {
 	TailscaleStatus func() (*tailscale.Status, error)
 	SeedBaseline    bool
 	OnNodeUpdated   func(nodeID string)
+	EnsureLocalhost func(opts Options) error
 }
 
 // API handles node CRUD and hardware probing requests.
@@ -66,6 +71,7 @@ type API struct {
 	fallback        http.Handler
 	tailscaleStatus func() (*tailscale.Status, error)
 	onNodeUpdated   func(nodeID string)
+	ensureLocalhost func(opts Options) error
 }
 
 // New creates and validates a new node API instance.
@@ -90,10 +96,15 @@ func New(opts Options) (*API, error) {
 		fallback:        opts.Fallback,
 		tailscaleStatus: tsStatus,
 		onNodeUpdated:   opts.OnNodeUpdated,
+		ensureLocalhost: opts.EnsureLocalhost,
 	}
 
 	if opts.SeedBaseline {
 		_ = api.SeedAndSyncBaseline()
+	}
+
+	if api.ensureLocalhost != nil {
+		_ = api.ensureLocalhost(opts)
 	}
 
 	return api, nil
@@ -237,6 +248,10 @@ func (a *API) handleNodesSubtree(w http.ResponseWriter, r *http.Request) {
 
 	// 3. POST /api/nodes/:id/firewall/rules
 	// 4. DELETE /api/nodes/:id/firewall/rules/:ruleId
+	if rest == "firewall/adopt" && r.Method == http.MethodPost {
+		a.handleFirewallAdopt(w, r, nodeID)
+		return
+	}
 	if rest == "firewall/rules" && r.Method == http.MethodPost {
 		a.handleFirewallAddRule(w, r, nodeID)
 		return
@@ -244,6 +259,11 @@ func (a *API) handleNodesSubtree(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(rest, "firewall/rules/") && r.Method == http.MethodDelete {
 		ruleID := strings.TrimPrefix(rest, "firewall/rules/")
 		a.handleFirewallDeleteRule(w, r, nodeID, ruleID)
+		return
+	}
+	// POST /api/nodes/:id/firewall/masquerade
+	if rest == "firewall/masquerade" && r.Method == http.MethodPost {
+		a.handleFirewallMasquerade(w, r, nodeID)
 		return
 	}
 
@@ -376,6 +396,17 @@ func (a *API) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		body = parsed
 	}
 
+	// Reject references to vault variables that do not exist before persisting.
+	if ref, ok := body.GetString("vaultSecretId"); ok {
+		if err := validateVaultSecretRef(ref); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"success": false,
+				"error":   err.Error(),
+			})
+			return
+		}
+	}
+
 	newNode := NewObject()
 
 	// 1. id
@@ -469,11 +500,12 @@ func (a *API) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	newNode.SetString("authMethod", authMethod)
 
 	// 13. tags
+	// Never invent a Tailscale tag: a host only belongs to tag groups the
+	// netmap actually reports for it, otherwise the inventory lies.
 	if rawTags, ok := body.Get("tags"); ok && string(rawTags) != "null" {
 		newNode.Set("tags", rawTags)
 	} else {
-		fallbackGroup := group
-		newNode.SetJSON("tags", []string{fallbackGroup})
+		newNode.SetJSON("tags", []string{})
 	}
 
 	// 14. sshConnected
@@ -482,21 +514,17 @@ func (a *API) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	// 15. rttMs
 	newNode.SetString("rttMs", "2.0ms")
 
-	// 16. tailscaleIp
-	tailscaleIp := "100.100.100.100"
+	// 16. tailscaleIp — only a real CGNAT address counts as a tailnet address.
+	tailscaleIp := ""
 	if s, ok := body.GetString("tailscaleIp"); ok && s != "" {
 		tailscaleIp = s
-	} else if s, ok := body.GetString("ip"); ok && s != "" {
+	} else if s, ok := body.GetString("ip"); ok && isTailscaleCGNAT(s) {
 		tailscaleIp = s
 	}
 	newNode.SetString("tailscaleIp", tailscaleIp)
 
-	// 17. tailscaleHost
-	nameForTsHost := "node"
-	if s, ok := body.GetString("name"); ok && s != "" {
-		nameForTsHost = s
-	}
-	tailscaleHost := fmt.Sprintf("%s.leo-banjo.ts.net", strings.ToLower(nameForTsHost))
+	// 17. tailscaleHost — derived by the tailnet sync, never fabricated here.
+	tailscaleHost := ""
 	if s, ok := body.GetString("tailscaleHost"); ok && s != "" {
 		tailscaleHost = s
 	}
@@ -645,6 +673,18 @@ func (a *API) handleUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// Reject references to vault variables that do not exist before persisting.
+	if bodyObj.Has("vaultSecretId") {
+		ref, _ := bodyObj.GetString("vaultSecretId")
+		if err := validateVaultSecretRef(ref); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"success": false,
+				"error":   err.Error(),
+			})
+			return
+		}
+	}
+
 	// Capture existing name and specs before spreading updates
 	existingName, _ := nodeObj.GetString("name")
 	origSpecsObj := NewObject()
@@ -753,6 +793,24 @@ func (a *API) handleUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	})
 }
 
+// isTailscaleCGNAT reports whether an address belongs to the 100.64.0.0/10
+// range Tailscale allocates, so onboarding can tell a real tailnet address from
+// an arbitrary LAN IP.
+func isTailscaleCGNAT(ip string) bool {
+	if !strings.HasPrefix(ip, "100.") {
+		return false
+	}
+	octets := strings.Split(ip, ".")
+	if len(octets) != 4 {
+		return false
+	}
+	second, err := strconv.Atoi(octets[1])
+	if err != nil {
+		return false
+	}
+	return second >= 64 && second <= 127
+}
+
 // ---------------------------------------------------------------------------
 // DELETE /api/nodes/:id — Remove Node
 // ---------------------------------------------------------------------------
@@ -800,10 +858,11 @@ func (a *API) handleDelete(w http.ResponseWriter, r *http.Request, id string) {
 // ---------------------------------------------------------------------------
 
 type probeHostRequest struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	SSHUser    string `json:"sshUser"`
-	AuthMethod string `json:"authMethod"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	SSHUser       string `json:"sshUser"`
+	AuthMethod    string `json:"authMethod"`
+	VaultSecretID string `json:"vaultSecretId"`
 }
 
 func (a *API) handleProbeHostUnbound(w http.ResponseWriter, r *http.Request) {
@@ -846,6 +905,9 @@ func (a *API) handleProbeHostUnbound(w http.ResponseWriter, r *http.Request) {
 					if req.AuthMethod != "" {
 						targetNode.SetString("authMethod", req.AuthMethod)
 					}
+					if req.VaultSecretID != "" {
+						targetNode.SetString("vaultSecretId", req.VaultSecretID)
+					}
 					break
 				}
 			}
@@ -857,8 +919,6 @@ func (a *API) handleProbeHostUnbound(w http.ResponseWriter, r *http.Request) {
 		targetNode.SetString("id", fmt.Sprintf("probe-%d", a.now().UnixMilli()))
 		targetNode.SetString("name", host)
 		targetNode.SetString("shortName", strings.Split(host, ".")[0])
-		targetNode.SetString("group", "tag:host")
-		targetNode.SetString("datacenter", "leo-banjo.ts.net")
 		targetNode.SetString("nodeType", "linux")
 		targetNode.SetString("ip", host)
 
@@ -880,38 +940,19 @@ func (a *API) handleProbeHostUnbound(w http.ResponseWriter, r *http.Request) {
 		}
 		targetNode.SetString("authMethod", authMethod)
 
-		tailscaleIp := ""
+		if req.VaultSecretID != "" {
+			targetNode.SetString("vaultSecretId", req.VaultSecretID)
+		}
+
 		if strings.HasPrefix(host, "100.") {
-			tailscaleIp = host
+			targetNode.SetString("tailscaleIp", host)
 		}
-		targetNode.SetString("tailscaleIp", tailscaleIp)
 
-		tailscaleHost := host
-		if !strings.Contains(host, ".") {
-			tailscaleHost = fmt.Sprintf("%s.leo-banjo.ts.net", host)
-		}
-		targetNode.SetString("tailscaleHost", tailscaleHost)
-
+		// Zero-Mock: no group, datacenter, status, capabilities, or specs are
+		// invented here. They are only populated from a successful probe
+		// (ApplyProbe) or from the values the operator supplied.
 		targetNode.SetString("osDescription", "Probing...")
-		targetNode.SetString("status", "online")
-		targetNode.SetString("uptime", "unknown")
-		targetNode.SetJSON("hasGlances", false)
-		targetNode.SetJSON("hasCockpit", true)
-		targetNode.SetJSON("hasPodman", true)
-		targetNode.SetJSON("hasRestic", true)
-
-		specsObj := NewObject()
-		specsObj.SetString("cpu", "")
-		specsObj.SetJSON("vcpus", 1)
-		specsObj.SetJSON("ramGiB", 1)
-		specsObj.SetString("motherboard", "")
-		specsObj.SetString("bios", "")
-		specsObj.SetString("ipmi", "DHCP")
-		specsObj.SetString("ecc", "Active")
-		specsObj.SetString("secureBoot", "Enabled")
-		specsObj.SetString("iommu", "Enabled")
-		specsBytes, _ := specsObj.MarshalJSON()
-		targetNode.Set("specs", specsBytes)
+		targetNode.SetString("status", "unmonitored")
 	}
 
 	if a.runner == nil {

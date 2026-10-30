@@ -4,13 +4,19 @@ export function filterNodesBySearchQuery(nodes: NodeItem[], query: string): Node
   const normalized = query.trim().toLowerCase();
   if (!normalized) return nodes;
 
+  // Locally-managed nodes and freshly onboarded hosts may not have a Tailscale
+  // IP (or an OS description) yet. Treat missing fields as empty instead of
+  // crashing the search modal with `undefined.toLowerCase()`.
+  const matches = (value: unknown) =>
+    typeof value === 'string' && value.toLowerCase().includes(normalized);
+
   return nodes.filter(
     n =>
-      n.name.toLowerCase().includes(normalized) ||
-      n.ip.toLowerCase().includes(normalized) ||
-      n.tailscaleIp.toLowerCase().includes(normalized) ||
-      n.group.toLowerCase().includes(normalized) ||
-      (n.osDescription && n.osDescription.toLowerCase().includes(normalized))
+      matches(n.name) ||
+      matches(n.ip) ||
+      matches(n.tailscaleIp) ||
+      matches(n.group) ||
+      matches(n.osDescription),
   );
 }
 
@@ -31,10 +37,28 @@ export interface ClusterNodeGroup {
   nodes: NodeItem[];
 }
 
+/**
+ * The Tailscale tag a node actually carries. `node.tags` is the netmap truth;
+ * `group` is a free-form display field and must not be used as a fallback, or
+ * the inventory claims tags the host never had.
+ */
+export function resolveNodeTag(node: NodeItem): string {
+  const tags = Array.isArray(node.tags) ? node.tags.filter(Boolean) : null;
+  if (tags && tags.length > 0) {
+    return tags.find(t => t.startsWith('tag:')) || tags[0];
+  }
+  if (tags) {
+    // Known-empty tag list: the peer genuinely carries no tags.
+    return node.followedTag || 'untagged';
+  }
+  // Legacy payload without a tags array: fall back to the display group.
+  return node.followedTag || node.group || 'untagged';
+}
+
 export function groupNodesByDynamicCluster(nodes: NodeItem[]): ClusterNodeGroup[] {
   const byGroup = new Map<string, NodeItem[]>();
   for (const node of nodes) {
-    const grp = node.group || 'tag:host';
+    const grp = resolveNodeTag(node);
     const list = byGroup.get(grp) || [];
     list.push(node);
     byGroup.set(grp, list);
@@ -48,7 +72,7 @@ export function groupNodesByDynamicCluster(nodes: NodeItem[]): ClusterNodeGroup[
 export function buildHostGroupPills(nodes: NodeItem[]): Array<{ id: string; name: string }> {
   const counts = new Map<string, number>();
   for (const node of nodes) {
-    const grp = node.group || 'tag:host';
+    const grp = resolveNodeTag(node);
     counts.set(grp, (counts.get(grp) || 0) + 1);
   }
 
@@ -88,57 +112,52 @@ export function buildProvisionedNode(
   const name = input.name?.trim() || 'New Node';
   const shortName = input.shortName || name.split(' ')[0];
   const nodeType: NodeType = input.nodeType || 'linux';
-  const supportsLinuxStack =
-    nodeType === 'linux' || nodeType === 'lxc' || nodeType === 'k3s';
 
-  const normalizedSlug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  const tailscaleHost =
-    input.tailscaleHost && input.tailscaleHost.trim()
-      ? input.tailscaleHost.trim()
-      : `${normalizedSlug || 'node'}.ts.net`;
+  // Zero-Mock: never invent a MagicDNS name. A Tailscale host only exists if
+  // the caller supplied one.
+  const tailscaleHost = input.tailscaleHost?.trim() || '';
 
   const suffix = idSuffix !== undefined ? String(idSuffix) : String(Date.now());
   const id = input.id || (suffix.startsWith('node-') ? suffix : `node-${suffix}`);
 
+  // Zero-Mock: a provisioned node starts unmonitored. Addresses, credentials,
+  // telemetry, capabilities and specs are only populated once a real probe
+  // succeeds; they are never invented here.
   return {
     id,
     name,
     shortName,
-    group: input.group || 'tag:host',
-    datacenter: input.datacenter || 'leo-banjo.ts.net',
+    group: input.group || '',
+    datacenter: input.datacenter || (tailscaleHost ? tailscaleHost.split('.').slice(1).join('.') : ''),
     nodeType,
     badge: input.badge,
     badgeColor: input.badgeColor,
-    ip: input.ip || '192.168.1.180',
+    ip: input.ip || '',
     port: input.port || 22,
     sshUser: input.sshUser || 'core',
-    authMethod: input.authMethod || 'ssh-ed25519',
-    tags: input.tags || [input.group || 'tag:host'],
-    sshConnected: input.sshConnected,
+    authMethod: input.authMethod || 'ssh-agent',
+    tags: input.tags || (input.group ? [input.group] : []),
+    sshConnected: input.sshConnected ?? false,
     rttMs: input.rttMs,
-    tailscaleIp: input.tailscaleIp || '100.97.159.180',
+    tailscaleIp: input.tailscaleIp || '',
     tailscaleHost,
-    osDescription: input.osDescription || 'Linux (SSH)',
-    status: input.status || 'online',
-    uptime: input.uptime || '1m',
-    hasGlances: input.hasGlances ?? supportsLinuxStack,
-    hasCockpit: input.hasCockpit ?? supportsLinuxStack,
-    hasPodman: input.hasPodman ?? supportsLinuxStack,
-    hasRestic: input.hasRestic ?? (nodeType !== 'router_switch'),
+    osDescription: input.osDescription || 'Pending probe',
+    status: input.status || 'unmonitored',
+    uptime: input.uptime || '--',
+    hasGlances: input.hasGlances ?? false,
+    hasCockpit: input.hasCockpit ?? false,
+    hasPodman: input.hasPodman ?? false,
+    hasRestic: input.hasRestic ?? false,
     specs: input.specs || {
-      cpu: 'Intel Core / AMD EPYC',
-      vcpus: 8,
-      ramGiB: 16,
-      motherboard: 'Enterprise Platform',
-      bios: '2.8',
-      ipmi: 'DHCP',
-      ecc: 'Active',
-      secureBoot: 'Enabled',
-      iommu: 'Enabled',
+      cpu: '',
+      vcpus: 0,
+      ramGiB: 0,
+      motherboard: '',
+      bios: '',
+      ipmi: '',
+      ecc: '',
+      secureBoot: '',
+      iommu: '',
     },
     ...(input.connectionProtocol ? { connectionProtocol: input.connectionProtocol } : {}),
     ...(input.vaultSecretId ? { vaultSecretId: input.vaultSecretId } : {}),
@@ -171,15 +190,15 @@ export function getSubSidebarWrapperClasses(width: SubSidebarWidth): string {
       ? 'col-span-12 lg:col-span-2 xl:col-span-2'
       : 'col-span-12 lg:col-span-3 xl:col-span-2';
 
-  return `${columnClasses} lg:col-start-1 lg:row-start-1 lg:row-end-2 flex flex-col h-[calc(100vh-120px)] overflow-y-auto overflow-x-hidden scrollbar-thin shrink-0`.trim();
+  return `${columnClasses} lg:col-start-1 lg:row-start-1 lg:row-end-2 flex flex-col h-[calc(100vh-40px-var(--console-height,176px))] overflow-y-auto overflow-x-hidden scrollbar-thin shrink-0`.trim();
 }
 
 export function getWorkspaceWrapperClasses(width: SubSidebarWidth): string {
   return width === 'wide'
-    ? 'col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-2 min-w-0 h-[calc(100vh-120px)] overflow-y-auto'
+    ? 'col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-2 min-w-0 h-[calc(100vh-40px-var(--console-height,176px))] overflow-y-auto'
     : width === 'compact'
-    ? 'col-span-12 lg:col-span-10 xl:col-span-10 flex flex-col gap-2 min-w-0 h-[calc(100vh-120px)] overflow-y-auto'
-    : 'col-span-12 lg:col-span-9 xl:col-span-10 flex flex-col gap-2 min-w-0 h-[calc(100vh-120px)] overflow-y-auto';
+    ? 'col-span-12 lg:col-span-10 xl:col-span-10 flex flex-col gap-2 min-w-0 h-[calc(100vh-40px-var(--console-height,176px))] overflow-y-auto'
+    : 'col-span-12 lg:col-span-9 xl:col-span-10 flex flex-col gap-2 min-w-0 h-[calc(100vh-40px-var(--console-height,176px))] overflow-y-auto';
 }
 
 export interface FormattedNodeBadge {
@@ -277,7 +296,7 @@ export function formatNodeIpBadge(node: NodeItem): string {
 
 export type SidebarViewMode = 'nodes' | 'datacenter';
 
-export type DatacenterSection = 'overview' | 'playbooks' | 'vars_vault' | 'tasks' | 'schedules' | 'storage';
+export type DatacenterSection = 'overview' | 'playbooks' | 'vars_vault' | 'tasks' | 'storage';
 
 export interface DatacenterNavSection {
   id: DatacenterSection;
@@ -317,12 +336,6 @@ export function getDatacenterNavSections(playbooksCount = 4, tasksCount = 0): Da
       badge: tasksCount > 0 ? `${tasksCount} active` : undefined,
     },
     {
-      id: 'schedules',
-      title: 'Scheduled Jobs',
-      icon: 'schedule',
-      description: 'Cron-scheduled playbooks & tasks',
-    },
-    {
       id: 'storage',
       title: 'Cluster Storage & Pools',
       icon: 'storage',
@@ -354,8 +367,10 @@ export type DatacenterSettingPageId =
   | 'ansible-forks'
   | 'ansible-timeout'
   | 'ansible-ssh-transport'
+  | 'ansible-schedules'
   | 'quick-commands'
-  | 'connection/tailscale';
+  | 'connection/tailscale'
+  | 'ssh-vault';
 
 export interface DatacenterSettingPage {
   id: DatacenterSettingPageId;
@@ -449,6 +464,14 @@ const DATACENTER_SETTING_CATEGORIES: DatacenterSettingCategory[] = [
         description: 'Host key checking and SSH pipelining',
         slug: 'ansible-ssh-transport',
       },
+      {
+        id: 'ansible-schedules',
+        category: 'automation',
+        title: 'Scheduled Jobs',
+        icon: 'schedule',
+        description: 'Cron-scheduled playbooks and mutations owned by the in-process scheduler',
+        slug: 'ansible-schedules',
+      },
     ],
   },
   {
@@ -464,6 +487,14 @@ const DATACENTER_SETTING_CATEGORIES: DatacenterSettingCategory[] = [
         icon: 'data_object',
         description: 'List, add, edit and remove group_vars entries persisted in the vars store',
         slug: 'vars',
+      },
+      {
+        id: 'ssh-vault',
+        category: 'variables',
+        title: 'SSH Vault Secrets',
+        icon: 'vpn_key',
+        description: 'Manage SSH private keys and secrets encrypted with ansible-vault',
+        slug: 'ssh-vault',
       },
     ],
   },
@@ -697,6 +728,7 @@ export function buildInventoryTree(
   const shortName =
     defaultTailnet ||
     nodes.find(n => Boolean(n.datacenter))?.datacenter ||
+    nodes[0]?.tailscaleHost?.split('.').slice(1).join('.') ||
     'leo-banjo.ts.net';
 
   // Tailscale nodes: Boolean(node.tailscaleIp || node.isDynamicTagMember || node.followedTag || (node.group && node.group.startsWith('tag:')) || (Array.isArray(node.tags) && node.tags.length > 0))
@@ -712,7 +744,22 @@ export function buildInventoryTree(
   const tailscaleNodes: NodeItem[] = [];
   const nonTailscaleNodes: NodeItem[] = [];
 
+  // Folders claim nodes before any automatic grouping: dropping a host into a
+  // folder must move it there even when it is a Tailscale peer.
+  const folderMap = new Map<string, InventoryFolderGroup>();
+  for (const folder of folders) {
+    folderMap.set(folder.id, { folder, nodes: [] });
+  }
+
+  const standalone: NodeItem[] = [];
   for (const node of nodes) {
+    if (node.folder) {
+      const matchedFolder = folders.find(f => f.id === node.folder || f.name === node.folder);
+      if (matchedFolder && folderMap.has(matchedFolder.id)) {
+        folderMap.get(matchedFolder.id)!.nodes.push(node);
+        continue;
+      }
+    }
     if (isTailscaleNode(node)) {
       tailscaleNodes.push(node);
     } else {
@@ -720,7 +767,9 @@ export function buildInventoryTree(
     }
   }
 
-  // Group Tailscale nodes by their tag (prefer node.followedTag || node.group || node.tags?.[0] || 'tag:host')
+  // Group Tailscale nodes by the tag the peer actually carries. `node.tags` is
+  // the netmap truth; `group` is a legacy default that can claim "tag:host"
+  // for hosts that never had it.
   const tagMap = new Map<string, { chunk?: TagInventoryChunk; nodes: NodeItem[] }>();
 
   // Ensure any active TagInventoryChunk is listed even if currently 0 members
@@ -731,13 +780,7 @@ export function buildInventoryTree(
   }
 
   for (const node of tailscaleNodes) {
-    const tag =
-      node.followedTag ||
-      (node.group && node.group.startsWith('tag:') ? node.group : undefined) ||
-      (Array.isArray(node.tags) && node.tags.find(t => t.startsWith('tag:'))) ||
-      node.group ||
-      (Array.isArray(node.tags) && node.tags[0]) ||
-      'tag:host';
+    const tag = resolveNodeTag(node);
 
     const existing = tagMap.get(tag);
     if (existing) {
@@ -753,28 +796,8 @@ export function buildInventoryTree(
     nodes: data.nodes,
   }));
 
-  // Partition non-Tailscale into folders and standalone
-  const folderMap = new Map<string, InventoryFolderGroup>();
-
-  // Include all folders from folders input even if empty
-  for (const folder of folders) {
-    folderMap.set(folder.id, { folder, nodes: [] });
-  }
-
-  const standalone: NodeItem[] = [];
   for (const node of nonTailscaleNodes) {
-    if (node.folder) {
-      const matchedFolder = folders.find(
-        f => f.id === node.folder || f.name === node.folder
-      );
-      if (matchedFolder && folderMap.has(matchedFolder.id)) {
-        folderMap.get(matchedFolder.id)!.nodes.push(node);
-      } else {
-        standalone.push(node);
-      }
-    } else {
-      standalone.push(node);
-    }
+    standalone.push(node);
   }
 
   const folderGroups: InventoryFolderGroup[] = folders.map(f => folderMap.get(f.id)!);

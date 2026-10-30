@@ -31,8 +31,8 @@ export interface StorageLike {
 export interface ElementLike {
   setAttribute(name: string, value: string): void;
   classList?: {
-    add(token: string): void;
-    remove(token: string): void;
+    add(...tokens: string[]): void;
+    remove(...tokens: string[]): void;
   };
 }
 
@@ -124,12 +124,15 @@ export function applyThemeToDocument(
   el.setAttribute('data-theme-choice', theme);
 
   if (el.classList) {
+    // `theme-*` drives legacy app selectors; the bare flavour classes are the
+    // scoping hooks published by `@catppuccin/tailwindcss`, which is what
+    // resolves every `--catppuccin-color-*` token for the active flavour.
     if (resolved === 'latte') {
-      el.classList.add('theme-latte');
-      el.classList.remove('theme-macchiato');
+      el.classList.add('theme-latte', 'latte');
+      el.classList.remove('theme-macchiato', 'macchiato');
     } else {
-      el.classList.add('theme-macchiato');
-      el.classList.remove('theme-latte');
+      el.classList.add('theme-macchiato', 'macchiato');
+      el.classList.remove('theme-latte', 'latte');
     }
   }
 

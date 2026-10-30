@@ -441,3 +441,102 @@ func TestTaskJSONIsAcceptedByEncoder(t *testing.T) {
 		t.Fatalf("round-trip changed the title: %q", back.Title)
 	}
 }
+
+// A single-host mutation must never be limited against the shared tailnet
+// inventory: that file names hosts by MagicDNS name, so `--limit <node>` found
+// nothing and the run failed with "no hosts to target".
+func TestExecuteTaskMutationIgnoresSharedInventoryPath(t *testing.T) {
+	workdir := t.TempDir()
+	task := minimalTask()
+	task.ID = "task-mutation"
+	task.TargetNodeID = "node-fred"
+	task.TargetNodeName = "fred"
+	task.TargetHostRoute = "fred.leo-banjo.ts.net"
+	task.Connection = &Connection{Plugin: "connection/tailscale", Host: "fred.leo-banjo.ts.net", Port: 22, User: "root"}
+
+	shared := filepath.Join(workdir, "inventory", "tailscale_inventory.py")
+	if err := os.MkdirAll(filepath.Dir(shared), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shared, []byte("#!/usr/bin/env python3\nprint('{}')\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var invPath, limit string
+	opts := Options{
+		WorkDir:       workdir,
+		TaskID:        task.ID,
+		InventoryPath: shared,
+		Exec: func(_ context.Context, _ string, args []string, _ ExecOptions) (ExecResult, error) {
+			invPath = args[1]
+			for i := range args {
+				if args[i] == "--limit" && i+1 < len(args) {
+					limit = args[i+1]
+				}
+			}
+			data, err := os.ReadFile(invPath)
+			if err != nil {
+				t.Fatalf("per-task inventory not written: %v", err)
+			}
+			if !strings.Contains(string(data), `"fred"`) {
+				t.Fatalf("inventory must name the task host: %s", data)
+			}
+			if !strings.Contains(string(data), `"fred.leo-banjo.ts.net"`) {
+				t.Fatalf("inventory must carry the host route: %s", data)
+			}
+			return ExecResult{Stdout: okPayload, ExitCode: 0}, nil
+		},
+	}
+
+	if _, err := ExecuteTaskOneByOne(context.Background(), task, opts); err != nil {
+		t.Fatal(err)
+	}
+	if invPath == shared {
+		t.Fatalf("mutation ran against the shared inventory %s instead of a per-task inventory", shared)
+	}
+	if limit != "fred" {
+		t.Fatalf("--limit = %q, want %q", limit, "fred")
+	}
+}
+
+// A step marked IgnoreErrors must surface its failure but keep the queue going:
+// the playbook carries `ignore_errors: true` and a failed-but-ignored host
+// result must not mark the task failed.
+func TestIgnoredStepFailureDoesNotHaltTheTask(t *testing.T) {
+	task := minimalTask()
+	task.Steps = []Step{{
+		Name:         "guard",
+		Module:       "ansible.builtin.shell",
+		Parameters:   map[string]any{"cmd": "exit 1"},
+		IgnoreErrors: true,
+	}}
+
+	playbook := CompileOnTheFlyPlaybook(task)
+	if !strings.Contains(playbook, "ignore_errors: true") {
+		t.Fatalf("compiled playbook must ignore the guard failure:\n%s", playbook)
+	}
+
+	output := map[string]any{
+		"plays": []any{map[string]any{
+			"tasks": []any{map[string]any{
+				"hosts": map[string]any{
+					"a": map[string]any{"failed": true, "ignored": true, "msg": "nftables.service is disabled"},
+				},
+			}},
+		}},
+		"stats": map[string]any{"a": map[string]any{"failures": 0, "ignored": 1}},
+	}
+	changed, failed, errText := deriveOutcome(output, 0, "")
+	if failed {
+		t.Fatalf("an ignored failure must not fail the task (err=%q)", errText)
+	}
+	if changed {
+		t.Fatalf("no changes were reported")
+	}
+
+	// The same payload without the ignored flag is still fatal.
+	output["plays"].([]any)[0].(map[string]any)["tasks"].([]any)[0].(map[string]any)["hosts"].(map[string]any)["a"].(map[string]any)["ignored"] = false
+	if _, failed, _ := deriveOutcome(output, 0, ""); !failed {
+		t.Fatal("a genuine failure must still fail the task")
+	}
+}

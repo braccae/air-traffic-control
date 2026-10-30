@@ -4,7 +4,7 @@ import type {
   CronSchedule,
   CronScopeKind,
   CronTaskKind,
-} from '../utils/cronScheduleStore.ts';
+} from '../types/cron.ts';
 
 export interface CronSchedulesPanelProps {
   nodes: NodeItem[];

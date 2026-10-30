@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"air-traffic-control/backend/pkg/hostcache"
+	"air-traffic-control/backend/pkg/plugin"
 )
 
 // ExecOptions is the process shape handed to an ExecFunc seam.
@@ -136,6 +138,19 @@ func ExecuteTaskOneByOne(ctx context.Context, task Task, opts Options) (Executio
 	var ephemeralFile string
 	var runPlaybookPath string
 
+	// Single-host mutations over a tailnet route are bridged through ATC's own
+	// transport: ansible-playbook then talks plain TCP to 127.0.0.1. The
+	// rewritten task feeds both the generated playbook and its inventory so the
+	// play's `ansible_host` var cannot override the loopback target.
+	bridged, stopForward, bridgeErr := bridgeTaskToLoopback(task)
+	if bridgeErr != nil {
+		return ExecutionResult{}, fmt.Errorf("ansqueue: open transport bridge: %w", bridgeErr)
+	}
+	if stopForward != nil {
+		defer stopForward()
+	}
+	task = bridged
+
 	if task.PlaybookRun != nil {
 		validName, err := validateQueuePlaybookName(task.PlaybookRun.Playbook)
 		if err != nil {
@@ -190,8 +205,26 @@ func ExecuteTaskOneByOne(ctx context.Context, task Task, opts Options) (Executio
 		}
 	}()
 
+	// A single-host mutation always uses its own generated inventory: the host
+	// name in that file is the task's node name, so `--limit <node>` resolves.
+	// The shared tailnet inventory names hosts by MagicDNS name instead, which
+	// is why limiting a mutation against it failed with "no hosts to target".
 	inventoryPath := opts.InventoryPath
-	if inventoryPath == "" {
+	if task.PlaybookRun == nil && task.Connection != nil {
+		inventoryDir := filepath.Join(workdir, "ansible", "inventory")
+		if err := os.MkdirAll(inventoryDir, 0o755); err != nil {
+			return ExecutionResult{}, fmt.Errorf("ansqueue: create inventory dir %s: %w", inventoryDir, err)
+		}
+		content, err := GenerateTaskInventory(task)
+		if err != nil {
+			return ExecutionResult{}, fmt.Errorf("ansqueue: generate inventory: %w", err)
+		}
+		ephemeralInventory = filepath.Join(inventoryDir, ".inv-"+id+".json")
+		if err := os.WriteFile(ephemeralInventory, []byte(content), 0o600); err != nil {
+			return ExecutionResult{}, fmt.Errorf("ansqueue: write inventory %s: %w", ephemeralInventory, err)
+		}
+		inventoryPath = ephemeralInventory
+	} else if inventoryPath == "" {
 		if task.Connection != nil {
 			inventoryDir := filepath.Join(workdir, "ansible", "inventory")
 			if err := os.MkdirAll(inventoryDir, 0o755); err != nil {
@@ -251,6 +284,14 @@ func ExecuteTaskOneByOne(ctx context.Context, task Task, opts Options) (Executio
 	}
 
 	env := buildEnv(workdir, opts)
+	// ansible only reports has_tty when -tt is present in the ssh args, and the
+	// host-var form is not visible to the pre-connect TTY check. Export it for
+	// run0 tasks so community.general.run0 (require_tty) can actually run.
+	if !taskRunsAsRoot(task) && strings.Contains(becomeMethodFor(task), "run0") {
+		if strings.TrimSpace(env["ANSIBLE_SSH_COMMON_ARGS"]) == "" {
+			env["ANSIBLE_SSH_COMMON_ARGS"] = "-tt"
+		}
+	}
 	ansibleBin := opts.AnsibleBinary
 	if ansibleBin == "" {
 		venvDir := os.Getenv("ANSIBLE_VENV_PATH")
@@ -359,6 +400,17 @@ func buildEnv(workdir string, opts Options) map[string]string {
 		}
 	}
 	env["ANSIBLE_STDOUT_CALLBACK"] = "json"
+	// ansible-core no longer ships the `json` callback (gone in 2.19+), so the
+	// repo carries its own implementation and points ansible at it.
+	callbackDir := filepath.Join(workdir, "ansible", "plugins", "callback")
+	if _, err := os.Stat(callbackDir); err == nil {
+		existing := strings.TrimSpace(env["ANSIBLE_CALLBACK_PLUGINS"])
+		if existing == "" {
+			env["ANSIBLE_CALLBACK_PLUGINS"] = callbackDir
+		} else {
+			env["ANSIBLE_CALLBACK_PLUGINS"] = callbackDir + string(os.PathListSeparator) + existing
+		}
+	}
 	for k, v := range opts.Env {
 		env[k] = v
 	}
@@ -430,6 +482,11 @@ func deriveOutcome(jsonOutput any, exitCode int, stderr string) (changed, failed
 					if hostRes, ok := rawHost.(map[string]any); ok {
 						hostFailed, _ := hostRes["failed"].(bool)
 						hostUnreachable, _ := hostRes["unreachable"].(bool)
+						if ignored, _ := hostRes["ignored"].(bool); ignored {
+							// Deliberately non-halting failure (ignore_errors).
+							hostFailed = false
+							hostUnreachable = false
+						}
 						if hostFailed || hostUnreachable {
 							failed = true
 							if errText == "" {
@@ -760,4 +817,76 @@ func (s *Store) ExecuteNext(ctx context.Context, opts Options) (Outcome, error) 
 // "exited with code N" text.
 func formatExitError(code int) string {
 	return "Ansible playbook exited with code " + strconv.Itoa(code)
+}
+
+// taskRunsAsRoot reports whether the task logs in as root, in which case become
+// is pointless and run0's TTY requirement must not be forced.
+func taskRunsAsRoot(task Task) bool {
+	user := ""
+	if task.Connection != nil {
+		user = strings.TrimSpace(task.Connection.User)
+	}
+	if user == "" {
+		user = strings.TrimSpace(task.TargetSSHUser)
+	}
+	return strings.EqualFold(user, "root")
+}
+
+// becomeMethodFor resolves the become method a task will run with.
+func becomeMethodFor(task Task) string {
+	if task.Connection != nil {
+		if m := strings.TrimSpace(task.Connection.BecomeMethod); m != "" {
+			return qualifyBecomeMethod(m)
+		}
+	}
+	return qualifyBecomeMethod(task.BecomeMethod)
+}
+
+// bridgeTaskToLoopback rewrites a single-host task so ansible connects to a
+// loopback port served by ATC, when the target is only reachable through a
+// plugin transport (tsnet). Without this, ansible's ssh client dials the
+// tailnet address from the controller's host stack, which has no route to it.
+//
+// The returned stop function must be called once the run finishes.
+func bridgeTaskToLoopback(task Task) (Task, func(), error) {
+	if task.Connection == nil || task.PlaybookRun != nil {
+		return task, nil, nil
+	}
+	route := strings.TrimSpace(task.Connection.Host)
+	if route == "" {
+		route = strings.TrimSpace(task.TargetHostRoute)
+	}
+	if !isTailnetAddress(route) {
+		return task, nil, nil
+	}
+
+	port := task.Connection.Port
+	if port == 0 {
+		port = task.TargetSSHPort
+	}
+	if port == 0 {
+		port = 22
+	}
+
+	dialer, err := plugin.ResolveDialer(plugin.HostFacts{NodeID: task.TargetNodeID, HostRoute: route})
+	if err != nil {
+		// No transport plugin can be resolved: leave the task untouched so the
+		// failure is reported by ansible against the real route.
+		return task, nil, nil
+	}
+
+	forwarder, err := startLoopbackForwarder(dialer, net.JoinHostPort(route, strconv.Itoa(port)))
+	if err != nil {
+		return task, nil, err
+	}
+
+	rewritten := task
+	conn := *task.Connection
+	conn.Host = "127.0.0.1"
+	conn.Port = forwarder.port
+	conn.ProxyCommand = ""
+	rewritten.Connection = &conn
+	rewritten.TargetHostRoute = "127.0.0.1"
+
+	return rewritten, forwarder.Close, nil
 }

@@ -1,6 +1,7 @@
 package hostcache
 
 import (
+	"database/sql"
 	"encoding/json"
 	"io"
 	"os"
@@ -198,7 +199,7 @@ func TestSchemaParity(t *testing.T) {
 
 	assertColumns(t, store, "hosts", []string{
 		"id", "name", "short_name", "group_name", "ip", "port", "ssh_user",
-		"tailscale_ip", "tailscale_host", "status", "sort_order", "node_json", "updated_at",
+		"tailscale_ip", "tailscale_host", "status", "sort_order", "vault_secret_id", "node_json", "updated_at",
 	})
 	assertColumns(t, store, "host_containers_cache", []string{
 		"host_id", "probed_users_json", "identities_json", "custom_identities_json",
@@ -424,5 +425,381 @@ func TestTaskCrashRecoveryOnStartup(t *testing.T) {
 	}
 	if completed.Status != "OK" {
 		t.Errorf("expected completed OK task to remain OK, got %q", completed.Status)
+	}
+}
+
+// TestInMemoryBackupToDisk verifies that Backup() on an in-memory store creates a valid
+// SQLite database file on disk with all tables, including hosts, host_telemetry_cache,
+// and schema_version.
+func TestInMemoryBackupToDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+	backupPath := filepath.Join(tmpDir, "data", "hosts-cache-backup.sqlite")
+
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open(:memory:): %v", err)
+	}
+	defer store.Close()
+
+	var initialMode string
+	if err := store.db.QueryRow("PRAGMA journal_mode;").Scan(&initialMode); err != nil {
+		t.Fatalf("query initial journal_mode: %v", err)
+	}
+	t.Logf("Initial journal mode: %q", initialMode)
+
+	// Override backupPath to isolated temporary file
+	store.backupPath = backupPath
+
+	// Populate data into the in-memory database
+	testHost := NodeRecord{
+		ID:        "node-backup-test",
+		Name:      "Backup Target Node",
+		ShortName: "backup-test",
+		Group:     "test-servers",
+		IP:        "192.168.1.100",
+		Port:      22,
+		SSHUser:   "core",
+		Status:    "online",
+		NodeJSON:  json.RawMessage(`{"id":"node-backup-test","name":"Backup Target Node"}`),
+	}
+	if err := store.UpsertHost(testHost); err != nil {
+		t.Fatalf("UpsertHost: %v", err)
+	}
+
+	telemJSON := json.RawMessage(`{"cpu_pct":12.5,"mem_used_pct":45.2}`)
+	if err := store.UpsertHostTelemetry("node-backup-test", telemJSON); err != nil {
+		t.Fatalf("UpsertHostTelemetry: %v", err)
+	}
+
+	// First backup execution
+	if err := store.Backup(); err != nil {
+		t.Fatalf("first Backup() failed: %v", err)
+	}
+
+	// Verify file was created on disk
+	fi, err := os.Stat(backupPath)
+	if err != nil {
+		t.Fatalf("stat backup file: %v", err)
+	}
+	if fi.Size() == 0 {
+		t.Fatalf("backup file is empty")
+	}
+
+	// Verify content of the backup file directly via SQLite
+	db, err := sql.Open("sqlite", "file:"+backupPath+"?mode=ro")
+	if err != nil {
+		t.Fatalf("open backup db: %v", err)
+	}
+	defer db.Close()
+
+	// 1. Verify schema_version table
+	var version int
+	if err := db.QueryRow("SELECT version FROM schema_version WHERE id = 1").Scan(&version); err != nil {
+		t.Fatalf("query schema_version from backup: %v", err)
+	}
+	if version != SchemaVersion {
+		t.Errorf("schema_version in backup = %d, want %d", version, SchemaVersion)
+	}
+
+	// 2. Verify hosts table
+	var hostID, hostName string
+	if err := db.QueryRow("SELECT id, name FROM hosts WHERE id = 'node-backup-test'").Scan(&hostID, &hostName); err != nil {
+		t.Fatalf("query hosts from backup: %v", err)
+	}
+	if hostID != "node-backup-test" || hostName != "Backup Target Node" {
+		t.Errorf("host data mismatch: id=%q, name=%q", hostID, hostName)
+	}
+
+	// 3. Verify host_telemetry_cache table
+	var telemID string
+	if err := db.QueryRow("SELECT host_id FROM host_telemetry_cache WHERE host_id = 'node-backup-test'").Scan(&telemID); err != nil {
+		t.Fatalf("query host_telemetry_cache from backup: %v", err)
+	}
+	if telemID != "node-backup-test" {
+		t.Errorf("telemetry host_id mismatch: got %q, want node-backup-test", telemID)
+	}
+
+	// 4. Test second backup execution (overwriting existing file)
+	testHost2 := NodeRecord{
+		ID:        "node-backup-test-2",
+		Name:      "Backup Target Node 2",
+		ShortName: "backup-test-2",
+		Group:     "test-servers",
+		IP:        "192.168.1.101",
+		Port:      22,
+		SSHUser:   "core",
+		Status:    "online",
+		NodeJSON:  json.RawMessage(`{"id":"node-backup-test-2","name":"Backup Target Node 2"}`),
+	}
+	if err := store.UpsertHost(testHost2); err != nil {
+		t.Fatalf("UpsertHost #2: %v", err)
+	}
+
+	if err := store.Backup(); err != nil {
+		t.Fatalf("second Backup() failed: %v", err)
+	}
+
+	// Reopen and verify second host is present in the updated backup
+	db2, err := sql.Open("sqlite", "file:"+backupPath+"?mode=ro")
+	if err != nil {
+		t.Fatalf("reopen backup db: %v", err)
+	}
+	defer db2.Close()
+
+	var count int
+	if err := db2.QueryRow("SELECT COUNT(*) FROM hosts").Scan(&count); err != nil {
+		t.Fatalf("count hosts in second backup: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 hosts in second backup, got %d", count)
+	}
+
+	// Verify store is still usable for reads and writes
+	hosts, err := store.GetAllHosts()
+	if err != nil {
+		t.Fatalf("GetAllHosts after backup: %v", err)
+	}
+	if len(hosts) != 2 {
+		t.Errorf("expected 2 hosts in store, got %d", len(hosts))
+	}
+}
+
+// TestBackupInMemory verifies that an in-memory database is correctly
+// persisted to disk by Backup(). The backup file must contain the same
+// data as the in-memory database.
+func TestBackupInMemory(t *testing.T) {
+	// Open an in-memory store with a disk backup path
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open :memory: failed: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	// Write test data
+	store.UpsertHost(NodeRecord{
+		ID:        "node-1",
+		Name:      "test-node",
+		ShortName: "node",
+		Group:     "tag:test",
+		IP:        "10.0.0.1",
+		Port:      22,
+		SSHUser:   "core",
+		Status:    "online",
+		NodeJSON:  json.RawMessage(`{"id":"node-1","name":"test-node"}`),
+	})
+	store.UpsertHostTelemetry("node-1", json.RawMessage(`{"cpu":12.5}`))
+	store.UpsertHostSection("node-1", "interfaces", json.RawMessage(`[{"iface":"eth0"}]`))
+
+	// Verify data is in memory
+	hosts, err := store.GetAllHosts()
+	if err != nil {
+		t.Fatalf("GetAllHosts: %v", err)
+	}
+	if len(hosts) != 1 {
+		t.Fatalf("expected 1 host, got %d", len(hosts))
+	}
+
+	// Perform backup
+	if err := store.Backup(); err != nil {
+		t.Fatalf("Backup() failed: %v", err)
+	}
+
+	// Verify backup file exists and is non-empty
+	backupPath := store.backupPath
+	info, err := os.Stat(backupPath)
+	if err != nil {
+		t.Fatalf("backup file not created: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("backup file is empty")
+	}
+
+	// Verify backup file contains the data by opening it
+	backupStore, err := Open(backupPath)
+	if err != nil {
+		t.Fatalf("Open backup file: %v", err)
+	}
+	defer func() { _ = backupStore.Close() }()
+
+	backupHosts, err := backupStore.GetAllHosts()
+	if err != nil {
+		t.Fatalf("GetAllHosts from backup: %v", err)
+	}
+	if len(backupHosts) != 1 {
+		t.Fatalf("expected 1 host in backup, got %d", len(backupHosts))
+	}
+	if backupHosts[0].ID != "node-1" {
+		t.Errorf("expected node-1 in backup, got %s", backupHosts[0].ID)
+	}
+
+	// Verify telemetry in backup
+	telemetry, ok, err := backupStore.GetHostTelemetry("node-1")
+	if err != nil {
+		t.Fatalf("GetHostTelemetry from backup: %v", err)
+	}
+	if !ok {
+		t.Fatal("telemetry not found in backup")
+	}
+	if string(telemetry.TelemetryJSON) != `{"cpu":12.5}` {
+		t.Errorf("telemetry mismatch: got %s", telemetry.TelemetryJSON)
+	}
+
+	// Verify section in backup
+	section, ok, err := backupStore.GetHostSection("node-1", "interfaces")
+	if err != nil {
+		t.Fatalf("GetHostSection from backup: %v", err)
+	}
+	if !ok {
+		t.Fatal("section not found in backup")
+	}
+	if string(section.DataJSON) != `[{"iface":"eth0"}]` {
+		t.Errorf("section mismatch: got %s", section.DataJSON)
+	}
+}
+
+// TestOpenSnapshotsLegacySchemaBeforeReset guards against silent inventory
+// loss: a legacy database with real rows but no schema_version used to be
+// dropped wholesale by the schema reset. Open() must snapshot it first.
+func TestOpenSnapshotsLegacySchemaBeforeReset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hosts-cache.sqlite")
+
+	legacy, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE hosts (id TEXT PRIMARY KEY, name TEXT NOT NULL)`); err != nil {
+		t.Fatalf("create legacy hosts table: %v", err)
+	}
+	if _, err := legacy.Exec(`INSERT INTO hosts (id, name) VALUES ('node-legacy', 'legacy-host')`); err != nil {
+		t.Fatalf("seed legacy host: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open legacy database: %v", err)
+	}
+	defer store.Close()
+
+	snapshots, err := filepath.Glob(filepath.Join(dir, "hosts-cache.pre-reset-*.sqlite"))
+	if err != nil {
+		t.Fatalf("glob snapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("expected exactly one pre-reset snapshot, got %v", snapshots)
+	}
+
+	snap, err := sql.Open("sqlite", "file:"+snapshots[0]+"?mode=ro")
+	if err != nil {
+		t.Fatalf("open snapshot: %v", err)
+	}
+	defer snap.Close()
+	var name string
+	if err := snap.QueryRow(`SELECT name FROM hosts WHERE id = 'node-legacy'`).Scan(&name); err != nil {
+		t.Fatalf("legacy row missing from snapshot: %v", err)
+	}
+	if name != "legacy-host" {
+		t.Fatalf("snapshot name = %q, want legacy-host", name)
+	}
+
+	// The live database is reset to the current schema and version.
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM hosts WHERE id = 'node-legacy'`).Scan(&count); err != nil {
+		t.Fatalf("query reset db: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("legacy row still present after reset")
+	}
+	version, err := GetCurrentSchemaVersion(store.db)
+	if err != nil {
+		t.Fatalf("schema version after reset: %v", err)
+	}
+	if version != SchemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, SchemaVersion)
+	}
+}
+
+// TestUpsertHostPersistsVaultSecretID guards the credential reference column.
+// The value used to live only inside node_json, so GetHostByID (and every
+// reader that trusts the column) saw an empty reference and SSH fell back to
+// "no authentication methods".
+func TestUpsertHostPersistsVaultSecretID(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "hosts-cache.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	blob := json.RawMessage(`{"id":"node-keyed","name":"keyed","shortName":"keyed","ip":"10.0.0.5","sshUser":"core","vaultSecretId":"ssh_key"}`)
+	if err := store.UpsertHost(NodeRecord{
+		ID: "node-keyed", Name: "keyed", ShortName: "keyed", IP: "10.0.0.5", SSHUser: "core",
+		VaultSecretID: "ssh_key", NodeJSON: blob,
+	}); err != nil {
+		t.Fatalf("upsert host: %v", err)
+	}
+
+	rec, ok, err := store.GetHostByID("node-keyed")
+	if err != nil || !ok {
+		t.Fatalf("get host: ok=%v err=%v", ok, err)
+	}
+	if rec.VaultSecretID != "ssh_key" {
+		t.Fatalf("VaultSecretID = %q, want ssh_key", rec.VaultSecretID)
+	}
+
+	var column sql.NullString
+	if err := store.db.QueryRow(`SELECT vault_secret_id FROM hosts WHERE id = 'node-keyed'`).Scan(&column); err != nil {
+		t.Fatalf("query column: %v", err)
+	}
+	if !column.Valid || column.String != "ssh_key" {
+		t.Fatalf("vault_secret_id column = %+v, want ssh_key", column)
+	}
+
+	// Clearing the reference must clear the column too, not just the blob.
+	cleared := json.RawMessage(`{"id":"node-keyed","name":"keyed","shortName":"keyed","ip":"10.0.0.5","sshUser":"core"}`)
+	if err := store.UpsertHost(NodeRecord{
+		ID: "node-keyed", Name: "keyed", ShortName: "keyed", IP: "10.0.0.5", SSHUser: "core",
+		NodeJSON: cleared,
+	}); err != nil {
+		t.Fatalf("upsert cleared host: %v", err)
+	}
+	rec, ok, err = store.GetHostByID("node-keyed")
+	if err != nil || !ok {
+		t.Fatalf("get cleared host: ok=%v err=%v", ok, err)
+	}
+	if rec.VaultSecretID != "" {
+		t.Fatalf("VaultSecretID = %q after clearing, want empty", rec.VaultSecretID)
+	}
+}
+
+// A caller that holds a decoded record plus a blob which omits vaultSecretId
+// must still persist the record's reference.
+func TestUpsertHostKeepsRecordVaultSecretIDWhenBlobOmitsIt(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "hosts-cache.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.UpsertHost(NodeRecord{
+		ID:            "node-blob",
+		Name:          "blob",
+		ShortName:     "blob",
+		IP:            "10.0.0.6",
+		SSHUser:       "core",
+		VaultSecretID: "ssh_key",
+		NodeJSON:      json.RawMessage(`{"id":"node-blob","name":"blob"}`),
+	}); err != nil {
+		t.Fatalf("upsert host: %v", err)
+	}
+
+	rec, ok, err := store.GetHostByID("node-blob")
+	if err != nil || !ok {
+		t.Fatalf("get host: ok=%v err=%v", ok, err)
+	}
+	if rec.VaultSecretID != "ssh_key" {
+		t.Fatalf("VaultSecretID = %q, want ssh_key from the record", rec.VaultSecretID)
 	}
 }

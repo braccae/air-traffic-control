@@ -42,13 +42,13 @@ func (m *mutationStubRunner) RunNodeCommand(ctx context.Context, node *nodeapi.O
 }
 
 type testHarness struct {
-	ts        *httptest.Server
-	store     *hostcache.Store
-	qStore    *ansqueue.Store
-	api       *nodeapi.API
-	runner    *mutationStubRunner
-	events    *[]map[string]any
-	eventsMu  *sync.Mutex
+	ts       *httptest.Server
+	store    *hostcache.Store
+	qStore   *ansqueue.Store
+	api      *nodeapi.API
+	runner   *mutationStubRunner
+	events   *[]map[string]any
+	eventsMu *sync.Mutex
 }
 
 func setupMutationTestHarness(t *testing.T) *testHarness {
@@ -214,8 +214,13 @@ func TestMutationRoutes_16RoutesParityAndQueueStaging(t *testing.T) {
 			"protocol": "tcp",
 			"zone":     "public",
 		})
-		if resp.StatusCode != http.StatusOK || data["success"] != true {
-			t.Errorf("Firewall add failed: %d, %+v", resp.StatusCode, data)
+		// Firewall mutations are Ansible-only: the route must accept the change
+		// and stage it. Applying it needs a reachable host, which the stub is not.
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("Firewall add failed: %d, %+v", resp.StatusCode, data)
+		}
+		if data["staged"] != true {
+			t.Errorf("firewall rule must be staged as an Ansible task: %+v", data)
 		}
 	})
 
@@ -559,8 +564,8 @@ func TestMutationRoutes_16RoutesParityAndQueueStaging(t *testing.T) {
 
 		// Execute next task with a runner that simulates failure
 		runnerOpts := ansqueue.Options{
-			WorkDir:     t.TempDir(),
-			Invalidator: ansqueue.NewCacheInvalidator(h.store),
+			WorkDir:       t.TempDir(),
+			Invalidator:   ansqueue.NewCacheInvalidator(h.store),
 			AnsibleBinary: "/bin/false", // Guaranteed to fail execution
 		}
 		execResult, err := h.qStore.ExecuteNextTask(context.Background(), runnerOpts)
@@ -627,6 +632,18 @@ func TestMutationRoutes_16RoutesParityAndQueueStaging(t *testing.T) {
 	})
 
 	t.Run("Route19_PackagesCheckAndApply", func(t *testing.T) {
+		// The shared stub runner may still hold a runFn from a previous subtest;
+		// reset it to a realistic bootc host for this route.
+		h.runner.runFn = func(ctx context.Context, node *nodeapi.Object, cmd string, timeout time.Duration) (string, error) {
+			if strings.Contains(cmd, "which bootc") {
+				return "/usr/bin/bootc", nil
+			}
+			if strings.Contains(cmd, "bootc status --json") {
+				return `{"status":{"booted":{"image":{"image":{"image":"quay.io/org/os:latest"},"version":"1.0"}},"staged":null,"rollback":null}}`, nil
+			}
+			return "ok", nil
+		}
+
 		// GET check
 		resp, chkRes := doJSONRequest(t, h.ts.URL+"/api/nodes/node-1/packages/check", http.MethodGet, nil)
 		if resp.StatusCode != http.StatusOK {
@@ -642,4 +659,26 @@ func TestMutationRoutes_16RoutesParityAndQueueStaging(t *testing.T) {
 			t.Fatalf("expected 200, got %d", respApply.StatusCode)
 		}
 	})
+}
+
+func TestPackagesCheck_TimeoutReturnsOffline(t *testing.T) {
+	h := setupMutationTestHarness(t)
+	h.runner.runFn = func(ctx context.Context, node *nodeapi.Object, cmd string, timeout time.Duration) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	resp, data := doJSONRequest(t, h.ts.URL+"/api/nodes/node-1/packages/check?timeout=1", http.MethodGet, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if data["success"] != false {
+		t.Fatalf("expected success=false on timeout, got %+v", data)
+	}
+	if data["offline"] != true || data["unmonitored"] != true {
+		t.Fatalf("expected offline/unmonitored markers, got %+v", data)
+	}
+	if msg, _ := data["error"].(string); !strings.Contains(strings.ToLower(msg), "timed out") {
+		t.Fatalf("expected timeout error message, got %q", msg)
+	}
 }

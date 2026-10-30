@@ -14,8 +14,39 @@ import {
 } from '../utils/zfsParser.ts';
 import { safeFetchJson } from '../utils/apiDefensive.ts';
 
+export interface LvmPhysicalVolume {
+  name: string;
+  vg?: string;
+  size?: string;
+  free?: string;
+}
+
+export interface LvmVolumeGroup {
+  name: string;
+  pvCount?: string;
+  lvCount?: string;
+  size?: string;
+  free?: string;
+}
+
+export interface LvmLogicalVolume {
+  name: string;
+  vg?: string;
+  size?: string;
+  attr?: string;
+}
+
+export interface LvmReport {
+  present: boolean;
+  physicalVolumes?: LvmPhysicalVolume[];
+  volumeGroups?: LvmVolumeGroup[];
+  logicalVolumes?: LvmLogicalVolume[];
+  message?: string;
+  errors?: string[];
+}
+
 interface ZfsManagementViewProps {
-  node: NodeItem;
+  node: NodeItem | null;
   onEngineDetected?: (engine: StorageEngineType) => void;
   targetType?: 'zfs' | 'btrfs' | 'lvm' | 'all';
 }
@@ -25,6 +56,15 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({
   onEngineDetected,
   targetType = 'all',
 }) => {
+  if (!node) {
+    return (
+      <div className="flex flex-col gap-3 font-mono">
+        <div className="bg-[#171a2d] border border-[#26293c] rounded p-3">
+          <div className="text-[11px] text-[#8d909b]">No node selected</div>
+        </div>
+      </div>
+    );
+  }
   const [loading, setLoading] = useState(false);
   const [pools, setPools] = useState<ZfsPoolItem[]>([]);
   const [datasets, setDatasets] = useState<ZfsDatasetItem[]>([]);
@@ -32,6 +72,12 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({
   const [mounts, setMounts] = useState<StorageMountItem[]>([]);
   const [engine, setEngine] = useState<StorageEngineType>('none');
   const [notice, setNotice] = useState<string>('');
+  // Real LVM report data from the storage/lvm plugin (vgs/lvs/pvs). The generic
+  // storage probe only returns findmnt output, which is why the LVM page used
+  // to show nothing but ordinary mounts.
+  const [lvmData, setLvmData] = useState<LvmReport | null>(null);
+  const [lvmError, setLvmError] = useState<string | null>(null);
+  const [lvmLoading, setLvmLoading] = useState(false);
 
   const handleScrubPool = async (poolName: string) => {
     try {
@@ -47,6 +93,28 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({
       }
     } catch (err: any) {
       setNotice(`Failed to start scrub on pool ${poolName}: ${err?.message || 'Network error'}`);
+    }
+  };
+
+  const loadLvm = async () => {
+    setLvmLoading(true);
+    setLvmError(null);
+    try {
+      const res = await safeFetchJson<LvmReport>(`/api/nodes/${encodeURIComponent(node.id)}/plugins/storage/lvm`);
+      if (!res.success || !res.data) {
+        setLvmData(null);
+        setLvmError(res.error || 'LVM report could not be read from the host.');
+        return;
+      }
+      setLvmData(res.data);
+      if (Array.isArray(res.data.errors) && res.data.errors.length > 0) {
+        setLvmError(res.data.errors.join(' · '));
+      }
+    } catch (err: any) {
+      setLvmData(null);
+      setLvmError(err?.message || 'Failed to read LVM report');
+    } finally {
+      setLvmLoading(false);
     }
   };
 
@@ -139,6 +207,15 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({
   useEffect(() => {
     loadStorage(false);
   }, [node.id, node.shortName, targetType]);
+
+  useEffect(() => {
+    if (targetType === 'lvm' || targetType === 'all') {
+      loadLvm();
+    } else {
+      setLvmData(null);
+      setLvmError(null);
+    }
+  }, [node.id, targetType]);
 
   const displayIcon =
     targetType === 'btrfs'
@@ -438,6 +515,144 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({
             </div>
           )}
 
+          {/* LVM volume groups, logical volumes and physical volumes (real vgs/lvs/pvs) */}
+          {(targetType === 'lvm' || (targetType === 'all' && lvmData?.present)) && (
+            <div className="space-y-3" data-testid="lvm-report">
+              {lvmLoading && !lvmData && (
+                <div className="bg-[#0a0d1f] p-3 rounded border border-[#26293c] font-mono text-[11px] text-[#8d909b]">
+                  Reading LVM metadata (vgs / lvs / pvs)…
+                </div>
+              )}
+              {lvmError && (
+                <div className="bg-[#311c1c] border border-[#ffb4ab]/30 rounded p-2.5 font-mono text-[11px] text-[#ffb4ab]">
+                  LVM report unavailable: {lvmError}
+                </div>
+              )}
+
+              {lvmData && !lvmData.present && (
+                <div className="bg-[#0a0d1f] p-3 rounded border border-[#26293c] font-mono text-[11px] text-[#8d909b]">
+                  {lvmData.message || 'No LVM physical volumes, volume groups, or logical volumes detected on this host.'}
+                </div>
+              )}
+
+              {lvmData && lvmData.present && (
+                <>
+                  {(lvmData.volumeGroups ?? []).length > 0 && (
+                    <div>
+                      <h5 className="font-mono text-xs text-[#b0c9ff] font-semibold pb-2 flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-[15px] text-[#8cd6cb]">layers</span>
+                        <span>Volume Groups ({(lvmData.volumeGroups ?? []).length})</span>
+                      </h5>
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+                        {(lvmData.volumeGroups ?? []).map(vg => (
+                          <div
+                            key={vg.name}
+                            data-testid={`lvm-vg-${vg.name}`}
+                            className="bg-[#0a0d1f] p-3 rounded-lg border border-[#26293c] font-mono"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm font-bold text-[#dfe1fa] flex items-center gap-1.5">
+                                <span className="material-symbols-outlined text-[15px] text-[#8cd6cb]">dns</span>
+                                {vg.name}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#1b2a38] text-[#8cd6cb] border border-[#8cd6cb]/30">
+                                LVM
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 mt-2 text-[11px]">
+                              <div>
+                                <span className="text-[#8d909b] text-[10px] block uppercase">Size</span>
+                                <span className="text-[#dfe1fa] font-bold">{vg.size || '—'}</span>
+                              </div>
+                              <div>
+                                <span className="text-[#8d909b] text-[10px] block uppercase">Free</span>
+                                <span className="text-[#8cd6cb] font-bold">{vg.free || '—'}</span>
+                              </div>
+                              <div>
+                                <span className="text-[#8d909b] text-[10px] block uppercase">PVs</span>
+                                <span className="text-[#c3c6d2]">{vg.pvCount || '—'}</span>
+                              </div>
+                              <div>
+                                <span className="text-[#8d909b] text-[10px] block uppercase">LVs</span>
+                                <span className="text-[#c3c6d2]">{vg.lvCount || '—'}</span>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {(lvmData.logicalVolumes ?? []).length > 0 && (
+                    <div>
+                      <h5 className="font-mono text-xs text-[#b0c9ff] font-semibold pb-1">
+                        Logical Volumes ({(lvmData.logicalVolumes ?? []).length})
+                      </h5>
+                      <div className="overflow-x-auto font-mono text-xs rounded border border-[#26293c]">
+                        <table className="w-full text-left">
+                          <thead className="bg-[#0a0d1f] text-[#8d909b] text-[10px] uppercase border-b border-[#26293c]">
+                            <tr className="h-7">
+                              <th className="px-3">Logical Volume</th>
+                              <th className="px-3">Volume Group</th>
+                              <th className="px-3">Size</th>
+                              <th className="px-3">Attributes</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-[#26293c]/60">
+                            {(lvmData.logicalVolumes ?? []).map(lv => (
+                              <tr key={`${lv.vg}-${lv.name}`} className="h-8 hover:bg-[#26293c]/40 transition-colors">
+                                <td className="px-3 font-semibold text-[#dfe1fa] flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-[13px] text-[#d9b9ff]">album</span>
+                                  {lv.name}
+                                </td>
+                                <td className="px-3 text-[#b0c9ff]">{lv.vg || '—'}</td>
+                                <td className="px-3 text-[#8cd6cb] font-bold">{lv.size || '—'}</td>
+                                <td className="px-3 text-[#c3c6d2]">{lv.attr || '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {(lvmData.physicalVolumes ?? []).length > 0 && (
+                    <div>
+                      <h5 className="font-mono text-xs text-[#b0c9ff] font-semibold pb-1">
+                        Physical Volumes ({(lvmData.physicalVolumes ?? []).length})
+                      </h5>
+                      <div className="overflow-x-auto font-mono text-xs rounded border border-[#26293c]">
+                        <table className="w-full text-left">
+                          <thead className="bg-[#0a0d1f] text-[#8d909b] text-[10px] uppercase border-b border-[#26293c]">
+                            <tr className="h-7">
+                              <th className="px-3">Device</th>
+                              <th className="px-3">Volume Group</th>
+                              <th className="px-3">Size</th>
+                              <th className="px-3">Free</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-[#26293c]/60">
+                            {(lvmData.physicalVolumes ?? []).map(pv => (
+                              <tr key={pv.name} className="h-8 hover:bg-[#26293c]/40 transition-colors">
+                                <td className="px-3 font-semibold text-[#dfe1fa] flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-[13px] text-[#8cd6cb]">hard_drive</span>
+                                  {pv.name}
+                                </td>
+                                <td className="px-3 text-[#b0c9ff]">{pv.vg || '—'}</td>
+                                <td className="px-3 text-[#dfe1fa]">{pv.size || '—'}</td>
+                                <td className="px-3 text-[#8cd6cb]">{pv.free || '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           {/* Mounted Filesystems Table */}
           {mounts.length > 0 && (
             <div>
@@ -480,7 +695,7 @@ export const ZfsManagementView: React.FC<ZfsManagementViewProps> = ({
             </div>
           )}
 
-          {!loading && btrfsFilesystems.length === 0 && mounts.length === 0 && (
+          {!loading && !lvmLoading && btrfsFilesystems.length === 0 && mounts.length === 0 && !lvmData?.present && (
             <div className="bg-[#0a0d1f] p-6 rounded border border-[#26293c] text-center font-mono text-xs text-[#8d909b]">
               No active filesystems or storage pools detected on this host.
             </div>

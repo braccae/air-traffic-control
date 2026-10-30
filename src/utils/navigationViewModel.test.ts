@@ -166,6 +166,25 @@ test('filterNodesBySearchQuery filters case-insensitively by name, ip, tailscale
   assert.equal(filterNodesBySearchQuery(sampleNodes, 'nonexistent-host').length, 0);
 });
 
+test('filterNodesBySearchQuery tolerates nodes missing Tailscale/group/OS fields', () => {
+  // `node-localhost` (and fresh nodes that have not been probed yet) only has
+  // an id, name and ip. Searching must not throw on the missing fields.
+  const sparse = [
+    { id: 'node-localhost', name: 'hermes (local)', ip: '127.0.0.1' },
+    { id: 'node-new', name: 'e2e-new-host', ip: '192.168.8.3', group: 'tag:host' },
+  ] as NodeItem[];
+
+  const byName = filterNodesBySearchQuery(sparse, 'hermes');
+  assert.equal(byName.length, 1);
+  assert.equal(byName[0].id, 'node-localhost');
+
+  const byIp = filterNodesBySearchQuery(sparse, '192.168.8.3');
+  assert.equal(byIp.length, 1);
+  assert.equal(byIp[0].id, 'node-new');
+
+  assert.equal(filterNodesBySearchQuery(sparse, '100.64.0.1').length, 0);
+});
+
 test('groupNodesByCluster groups nodes into coldWar, noodle, and other clusters', () => {
   const grouped = groupNodesByCluster(sampleNodes);
   assert.equal(grouped.coldWar.length, 2);
@@ -181,7 +200,7 @@ test('groupNodesByCluster groups nodes into coldWar, noodle, and other clusters'
   assert.equal(grouped.other[0].id, 'node-edge-1');
 });
 
-test('buildProvisionedNode normalizes tailscaleHost and sets capabilities based on nodeType', () => {
+test('buildProvisionedNode stays unmonitored and invents no telemetry', () => {
   const linuxNode = buildProvisionedNode(
     {
       name: '155 (Docker Prod)',
@@ -193,31 +212,40 @@ test('buildProvisionedNode normalizes tailscaleHost and sets capabilities based 
 
   assert.equal(linuxNode.id, 'node-test-155');
   assert.equal(linuxNode.shortName, '155');
-  assert.equal(linuxNode.tailscaleHost, '155-docker-prod.ts.net');
-  assert.equal(linuxNode.hasGlances, true);
-  assert.equal(linuxNode.hasCockpit, true);
-  assert.equal(linuxNode.hasPodman, true);
+  // No MagicDNS name is invented when the caller did not supply one.
+  assert.equal(linuxNode.tailscaleHost, '');
+  // Zero-Mock: a brand-new node is not presumed online, connected, monitored,
+  // or capable until a real probe says so.
+  assert.equal(linuxNode.status, 'unmonitored');
+  assert.equal(linuxNode.sshConnected, false);
+  assert.equal(linuxNode.ip, '');
+  assert.equal(linuxNode.tailscaleIp, '');
+  assert.equal(linuxNode.osDescription, 'Pending probe');
+  assert.equal(linuxNode.uptime, '--');
+  assert.equal(linuxNode.hasGlances, false);
+  assert.equal(linuxNode.hasCockpit, false);
+  assert.equal(linuxNode.hasPodman, false);
+  assert.equal(linuxNode.hasRestic, false);
+  assert.equal(linuxNode.specs.cpu, '');
+  assert.equal(linuxNode.specs.vcpus, 0);
+  assert.equal(linuxNode.specs.ramGiB, 0);
 
-  const k3sNode = buildProvisionedNode({ name: 'k3s-worker-02', nodeType: 'k3s' }, 200);
-  assert.equal(k3sNode.id, 'node-200');
-  assert.equal(k3sNode.hasGlances, true);
-  assert.equal(k3sNode.hasCockpit, true);
-  assert.equal(k3sNode.hasPodman, true);
-
-  const lxcNode = buildProvisionedNode({ name: 'lxc-dns', nodeType: 'lxc' }, 201);
-  assert.equal(lxcNode.hasGlances, true);
-  assert.equal(lxcNode.hasCockpit, true);
-  assert.equal(lxcNode.hasPodman, true);
-
-  const routerNode = buildProvisionedNode({ name: 'core-sw-01', nodeType: 'router_switch' }, 202);
-  assert.equal(routerNode.hasGlances, false);
-  assert.equal(routerNode.hasCockpit, false);
-  assert.equal(routerNode.hasPodman, false);
-
-  const winNode = buildProvisionedNode({ name: 'win-dc-01', nodeType: 'windows' }, 203);
-  assert.equal(winNode.hasGlances, false);
-  assert.equal(winNode.hasCockpit, false);
-  assert.equal(winNode.hasPodman, false);
+  const explicit = buildProvisionedNode(
+    {
+      name: 'k3s-worker-02',
+      nodeType: 'k3s',
+      tailscaleHost: '  k3s-worker-02.leo-banjo.ts.net  ',
+      ip: '100.70.1.2',
+      status: 'online',
+      sshConnected: true,
+    },
+    200
+  );
+  assert.equal(explicit.id, 'node-200');
+  assert.equal(explicit.tailscaleHost, 'k3s-worker-02.leo-banjo.ts.net');
+  assert.equal(explicit.ip, '100.70.1.2');
+  assert.equal(explicit.status, 'online');
+  assert.equal(explicit.sshConnected, true);
 });
 
 test('resolveNodeIcon returns accurate Material Symbol icon names', () => {
@@ -277,7 +305,7 @@ test('getSubSidebarWrapperClasses generates responsive full-height flex column c
   for (const width of ['compact', 'normal', 'wide'] as const) {
     const classes = getSubSidebarWrapperClasses(width);
     assert.ok(classes.includes('flex flex-col'), `Expected flex flex-col for ${width}`);
-    assert.ok(classes.includes('h-[calc(100vh-120px)]'), `Expected h-[calc(100vh-120px)] for ${width}`);
+    assert.ok(classes.includes('h-[calc(100vh-40px-var(--console-height,176px))]'), `Expected console-aware height for ${width}`);
     assert.ok(classes.includes('overflow-y-auto'), `Expected overflow-y-auto for ${width}`);
     assert.ok(classes.includes('shrink-0'), `Expected shrink-0 for ${width}`);
     assert.ok(classes.includes('scrollbar-thin'), `Expected scrollbar-thin for ${width}`);
@@ -901,3 +929,53 @@ test('datacenter routes format to stable deep-linkable hashes and round-trip', a
 });
 
 
+
+test('folder assignment wins over Tailscale tag grouping', async () => {
+  const { buildInventoryTree } = await import('./navigationViewModel.ts');
+
+  const folders = [{ id: 'folder-1', name: 'Cold Storage', createdAt: 1 }];
+  const nodes: NodeItem[] = [
+    {
+      ...sampleNodes[0],
+      id: 'node-ts-foldered',
+      group: 'tag:host',
+      tailscaleIp: '100.64.0.9',
+      tags: ['tag:host'],
+      folder: 'folder-1',
+    },
+  ];
+
+  const tree = buildInventoryTree(nodes, [], folders, 'leo-banjo.ts.net');
+
+  assert.equal(tree.nonTailscale.folders[0].nodes.length, 1);
+  assert.equal(tree.nonTailscale.folders[0].nodes[0].id, 'node-ts-foldered');
+  assert.equal(
+    tree.tailscale.tags.some(t => t.nodes.some(n => n.id === 'node-ts-foldered')),
+    false,
+    'a folder-assigned host must not also appear under its tag',
+  );
+});
+
+test('tag grouping follows the netmap tags, never the display group', async () => {
+  const { buildInventoryTree } = await import('./navigationViewModel.ts');
+
+  const nodes: NodeItem[] = [
+    // Real netmap tag differs from the legacy `group` value.
+    { ...sampleNodes[0], id: 'node-dev-pc', group: 'tag:host', tags: ['tag:admin'], tailscaleIp: '100.64.0.10' },
+    // Known-empty tag list: the peer genuinely carries no tag.
+    { ...sampleNodes[0], id: 'node-untagged', group: 'tag:host', tags: [], tailscaleIp: '100.64.0.11' },
+  ];
+
+  const tree = buildInventoryTree(nodes, [], [], 'leo-banjo.ts.net');
+
+  const admin = tree.tailscale.tags.find(t => t.tag === 'tag:admin');
+  assert.ok(admin, 'tag:admin group must exist');
+  assert.deepEqual(admin?.nodes.map(n => n.id), ['node-dev-pc']);
+
+  const untagged = tree.tailscale.tags.find(t => t.tag === 'untagged');
+  assert.ok(untagged, 'untyped peers belong to the untagged group');
+  assert.deepEqual(untagged?.nodes.map(n => n.id), ['node-untagged']);
+
+  const host = tree.tailscale.tags.find(t => t.tag === 'tag:host');
+  assert.equal(host, undefined, 'no host must be claimed by tag:host without carrying it');
+});

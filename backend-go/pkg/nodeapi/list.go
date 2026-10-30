@@ -131,7 +131,7 @@ var LiveTailnetNodes = []BaselineNode{
 	},
 	{
 		ID:            "node-dev-pc",
-		Name:          "dev-pc (local)",
+		Name:          "dev-pc",
 		ShortName:     "dev-pc",
 		Group:         "tag:host",
 		Datacenter:    "leo-banjo.ts.net",
@@ -141,10 +141,10 @@ var LiveTailnetNodes = []BaselineNode{
 		IP:            "127.0.0.1",
 		Port:          22,
 		SSHUser:       "pants",
-		AuthMethod:    "local-socket / ssh-agent",
+		AuthMethod:    "ssh-ed25519 (ssh-agent)",
 		Tags:          []string{"tag:admin", "tag:host"},
 		SSHConnected:  true,
-		RTTMs:         "0.1ms",
+		RTTMs:         "1.0ms",
 		TailscaleIP:   "100.97.159.101",
 		TailscaleHost: "dev-pc.leo-banjo.ts.net",
 		OSDescription: "CachyOS Linux (6.19.11-1-cachyos)",
@@ -442,15 +442,13 @@ func ensureNodeNormalized(obj *Object, liveDef *BaselineNode) {
 	}
 
 	// tags
-	if rawTags, ok := obj.Get("tags"); !ok || len(rawTags) == 0 || string(rawTags) == "null" {
+	// Leave tags alone when the node has none: inventing `tag:host` from the
+	// display group put hosts into Tailscale groups they never carried.
+	if rawTags, ok := obj.Get("tags"); !ok || string(rawTags) == "null" {
 		if liveDef != nil && len(liveDef.Tags) > 0 {
 			_ = obj.SetJSON("tags", liveDef.Tags)
 		} else {
-			grp, _ := obj.GetString("group")
-			if grp == "" {
-				grp = "tag:host"
-			}
-			_ = obj.SetJSON("tags", []string{grp})
+			_ = obj.SetJSON("tags", []string{})
 		}
 	}
 
@@ -754,16 +752,16 @@ func (a *API) refreshFromTailscale() {
 				obj.SetString("tailscaleHost", dns)
 			}
 
+			isSelf := strings.EqualFold(peer.HostName, tsStatus.Self.HostName)
+
 			lanIp, _ := obj.GetString("ip")
-			if len(peer.Addrs) > 0 {
+			if !isSelf && len(peer.Addrs) > 0 {
 				addrIp := strings.Split(peer.Addrs[0], ":")[0]
 				if addrIp != "" && !strings.HasPrefix(addrIp, "127.") {
 					lanIp = addrIp
 				}
 			}
 			obj.SetString("ip", lanIp)
-
-			isSelf := strings.EqualFold(peer.HostName, tsStatus.Self.HostName)
 			if peer.Online || isSelf {
 				obj.SetString("status", "online")
 			} else {
@@ -811,7 +809,36 @@ func (a *API) refreshFromTailscale() {
 		processedKeys := make(map[string]bool)
 		var added []*Object
 
+		// Derive the real tailnet shortname (e.g. leo-banjo.ts.net) from the
+		// controller's own MagicDNS name; never hardcode one.
+		tailnet := tailnetSuffix(tsStatus.Self.DNSName)
+
 		for _, chunk := range chunks {
+			chunkUser := strings.TrimSpace(chunk.SSHUser)
+			if chunkUser == "" {
+				chunkUser = "core"
+			}
+			chunkAuth := strings.TrimSpace(chunk.AuthMethod)
+			if chunkAuth == "" {
+				chunkAuth = "tailscale-ssh"
+			}
+			chunkTailnet := tailnet
+
+			// applyChunkAuth writes the chunk's credential identity onto a
+			// dynamic node so runtime resolution can decrypt chunk.VaultSecretID.
+			applyChunkAuth := func(n *Object) {
+				n.SetString("sshUser", chunkUser)
+				n.SetString("authMethod", chunkAuth)
+				if chunk.VaultSecretID != "" {
+					n.SetString("vaultSecretId", chunk.VaultSecretID)
+				} else {
+					n.Delete("vaultSecretId")
+				}
+				if chunkTailnet != "" {
+					n.SetString("datacenter", chunkTailnet)
+				}
+			}
+
 			for _, peer := range allPeers {
 				if !matchesTailscaleTag(peer.Tags, chunk.Tag) {
 					continue
@@ -870,6 +897,7 @@ func (a *API) refreshFromTailscale() {
 						existing.SetString("group", chunk.Tag)
 						existing.SetString("status", targetStatus)
 						_ = existing.SetJSON("sshConnected", targetStatus == "online")
+						applyChunkAuth(existing)
 						if peerTsIp != "" {
 							existing.SetString("tailscaleIp", peerTsIp)
 						}
@@ -892,14 +920,11 @@ func (a *API) refreshFromTailscale() {
 					newNode.SetString("name", pHost)
 					newNode.SetString("shortName", pHost)
 					newNode.SetString("group", chunk.Tag)
-					newNode.SetString("datacenter", "leo-banjo.ts.net")
 					newNode.SetString("nodeType", "linux")
 					newNode.SetString("badge", "SSH")
 					newNode.SetString("badgeColor", "text-[#8cd6cb]")
 					newNode.SetString("ip", peerTsIp)
 					_ = newNode.SetJSON("port", 22)
-					newNode.SetString("sshUser", "core")
-					newNode.SetString("authMethod", "tailscale-ssh")
 					_ = newNode.SetJSON("tags", []string{chunk.Tag})
 					_ = newNode.SetJSON("sshConnected", targetStatus == "online")
 					newNode.SetString("tailscaleIp", peerTsIp)
@@ -913,6 +938,7 @@ func (a *API) refreshFromTailscale() {
 					_ = newNode.SetJSON("hasRestic", false)
 					_ = newNode.SetJSON("isDynamicTagMember", true)
 					newNode.SetString("followedTag", chunk.Tag)
+					applyChunkAuth(newNode)
 
 					ensureNodeNormalized(newNode, nil)
 					handledIds[candidateId] = true
@@ -943,4 +969,15 @@ func (a *API) refreshFromTailscale() {
 		}
 	}
 	_ = a.store.UpsertHosts(updatedRecs)
+}
+
+// tailnetSuffix extracts the MagicDNS suffix (e.g. "leo-banjo.ts.net") from a
+// fully-qualified node DNS name. Returns "" when the name is not fully
+// qualified, so callers never invent a tailnet that does not exist.
+func tailnetSuffix(dnsName string) string {
+	clean := strings.TrimSuffix(strings.TrimSpace(dnsName), ".")
+	if i := strings.Index(clean, "."); i >= 0 && i+1 < len(clean) {
+		return clean[i+1:]
+	}
+	return ""
 }

@@ -2,9 +2,13 @@ package tailscale
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,11 +18,14 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 
 	"air-traffic-control/backend/pkg/plugin"
 	"air-traffic-control/backend/pkg/plugin/newapi"
 	"air-traffic-control/backend/pkg/plugin/settingsframework"
+	"air-traffic-control/backend/pkg/secrets"
+	"air-traffic-control/backend/pkg/tailscale"
 )
 
 var (
@@ -108,7 +115,7 @@ func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
 		WithCategory(string(p.Meta().Kind)).
 		WithScope(newapi.SettingsScopeDatacenter).
 		WithOrder(15).
-		WithDescription("ATC's own Tailscale node (embedded tsnet) — the identity ATC uses to reach the mesh. " +
+		WithDescription("ATC's own Tailscale node (embedded tsnet) — the identity ATC uses to reach the mesh. "+
 			"The auth key is write-only and masked in every API response.").
 		SecretField(
 			FieldAuthKey,
@@ -148,8 +155,8 @@ func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
 		BoolField(
 			FieldEphemeral,
 			"Ephemeral Node",
-			true,
-			settingsframework.WithDescription("Register ATC as an ephemeral node so the tailnet drops it when ATC goes offline."),
+			false,
+			settingsframework.WithDescription("Requested at registration only; the auth key's own ephemerality decides. Inert once the node is registered."),
 		).
 		BuildCategorized()
 }
@@ -201,10 +208,30 @@ func (p *Plugin) effectiveSettings() tsnetSettings {
 	cfg := tsnetSettings{
 		AuthKey:            strings.TrimSpace(p.authKey),
 		Hostname:           adapter.StringOrDefault(SettingsPageID, FieldHostname, p.hostname),
-		StateDir:           adapter.StringOrDefault(SettingsPageID, FieldStateDir, p.stateDir),
 		ControlURL:         adapter.StringOrDefault(SettingsPageID, FieldControlURL, ""),
 		Ephemeral:          adapter.BoolOrDefault(SettingsPageID, FieldEphemeral, p.ephemeral),
 		FallbackHostSocket: adapter.BoolOrDefault(SettingsPageID, FieldFallbackHostSocket, false),
+	}
+	// State dir: persisted value wins; otherwise derive from the data store
+	// location so new installs keep their node state outside /tmp.
+	if sd := adapter.StringOrDefault(SettingsPageID, FieldStateDir, ""); sd != "" {
+		cfg.StateDir = sd
+	} else if p.stateDir != "" && p.stateDir != DefaultStateDir {
+		// Explicit plugin option (e.g. WithStateDir in tests) wins.
+		cfg.StateDir = p.stateDir
+	} else {
+		dbPath := ""
+		if st := plugin.GlobalSettingsStore(); st != nil {
+			dbPath = st.DBPath()
+		}
+		if dbPath == "" {
+			dbPath = plugin.ResolveDBPath("")
+		}
+		if dbPath != "" {
+			cfg.StateDir = filepath.Join(filepath.Dir(dbPath), "tsnet")
+		} else {
+			cfg.StateDir = p.stateDir
+		}
 	}
 
 	if cfg.AuthKey == "" {
@@ -255,6 +282,11 @@ type Plugin struct {
 	tsnetFP     string
 	tsnetAuth   string
 	initialized bool
+
+	// upSince records when the backend last became Running, so `lastUpAt`
+	// reports a real "up since" instead of the time of the last status read.
+	upMu    sync.Mutex
+	upSince time.Time
 }
 
 // Option configures the Tailscale plugin.
@@ -287,7 +319,7 @@ func New(opts ...Option) *Plugin {
 		clients:   make(map[string]*ssh.Client),
 		stateDir:  DefaultStateDir,
 		hostname:  DefaultHostname,
-		ephemeral: true,
+		ephemeral: false,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -629,6 +661,11 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 	// locking and must never be held while dialing.
 	cfg := p.effectiveSettings()
 
+	// One-time migration of node state out of /tmp so a reboot no longer
+	// wipes the registration. Existing /tmp state is copied, never moved, so a
+	// failure leaves the old state intact.
+	p.migrateLegacyStateDir(&cfg)
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -678,6 +715,16 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 			AuthKey:    cfg.AuthKey,
 			ControlURL: cfg.ControlURL,
 			Ephemeral:  cfg.Ephemeral,
+			// tsnet discs all logs by default (Logf unset), which is why
+			// tailscaled.log1.txt stayed empty. Surface them, filtered to
+			// state/derp/netmap/health lines so the daemon log isn't flooded.
+			Logf: func(format string, args ...any) {
+				msg := fmt.Sprintf(format, args...)
+				if isNoisyTsnetLine(msg) {
+					return
+				}
+				log.Printf("tsnet: %s", msg)
+			},
 		}
 		p.tsServer = srv
 		p.tsnetFP = cfg.fingerprint()
@@ -685,6 +732,468 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 	}
 
 	return &tsnetDialer{srv: p.tsServer}, nil
+}
+
+// SelfStatus is the live view of ATC's own tsnet node. It is derived from the
+// tsnet local API (never from the host's tailscaled) and never contains the
+// auth key. When the node cannot be brought up, the real error is returned so
+// the UI can show it instead of pretending the mesh is connected.
+type SelfStatus struct {
+	Configured bool `json:"configured"`
+	Connected  bool `json:"connected"`
+	// Online is what the control plane reports for this node. It is distinct
+	// from Connected (which is only "BackendState == Running"): a node can
+	// have a running backend while control says it is offline.
+	Online       bool     `json:"online"`
+	Mode         string   `json:"mode"` // "tsnet" | "host-socket" | "unconfigured"
+	Hostname     string   `json:"hostname"`
+	DNSName      string   `json:"dnsName,omitempty"`
+	TailscaleIPs []string `json:"tailscaleIps"`
+	BackendState string   `json:"backendState,omitempty"`
+	AuthURL      string   `json:"authUrl,omitempty"`
+	Health       []string `json:"health,omitempty"`
+	KeyExpiry    string   `json:"keyExpiry,omitempty"`
+	PeerCount    int      `json:"peerCount"`
+	LastUpAt     string   `json:"lastUpAt,omitempty"`
+	StateDir     string   `json:"stateDir"`
+	Ephemeral    bool     `json:"ephemeral"`
+	Error        string   `json:"error,omitempty"`
+}
+
+// SelfStatus brings ATC's own tsnet node up (idempotently) and reports its real
+// registration state. It is safe to call while other operations are dialing:
+// ensureTsnet reuses a cached server and rebuilds it only when the resolved
+// settings changed.
+func (p *Plugin) SelfStatus(ctx context.Context) SelfStatus {
+	cfg := p.effectiveSettings()
+	status := SelfStatus{
+		Mode:         "unconfigured",
+		Hostname:     cfg.Hostname,
+		StateDir:     cfg.StateDir,
+		Ephemeral:    cfg.Ephemeral,
+		TailscaleIPs: []string{},
+	}
+	if cfg.AuthKey != "" {
+		status.Configured = true
+	} else if _, err := os.Stat(filepath.Join(cfg.StateDir, "tailscaled.state")); err == nil {
+		// Prior registration state lets tsnet come up without a fresh key.
+		status.Configured = true
+	}
+
+	dialer, err := p.ensureTsnet()
+	if err != nil {
+		status.Error = err.Error()
+		return status
+	}
+
+	td, ok := dialer.(*tsnetDialer)
+	if !ok {
+		// Explicit local-dev host-socket fallback: ATC borrows the host's
+		// tailscaled and therefore is not its own mesh node.
+		status.Mode = "host-socket"
+		return status
+	}
+
+	status.Mode = "tsnet"
+	st, err := td.srv.Up(ctx)
+	if err != nil {
+		status.Error = fmt.Sprintf("tsnet start failed: %v", err)
+		return status
+	}
+	status.BackendState = st.BackendState
+	status.AuthURL = st.AuthURL
+	status.Connected = st.BackendState == "Running"
+	if st.Self != nil {
+		if st.Self.HostName != "" {
+			status.Hostname = st.Self.HostName
+		}
+		status.DNSName = st.Self.DNSName
+		status.TailscaleIPs = make([]string, 0, len(st.Self.TailscaleIPs))
+		for _, ip := range st.Self.TailscaleIPs {
+			status.TailscaleIPs = append(status.TailscaleIPs, ip.String())
+		}
+	}
+	status.Online = st.BackendState == "Running" && (st.Self == nil || st.Self.Online)
+	status.LastUpAt = p.markUp(status.Connected)
+
+	// Kick off the self-heal watchdog the first time the node comes up. It is
+	// guarded by sync.Once so repeated SelfStatus calls do not spawn workers.
+	p.startWatchdog()
+
+	// Enrich from the tsnet local API: health problems, node-key expiry, and
+	// the real control-plane view of this node's online state. /api/tailscale/self
+	// used to report "connected" purely from BackendState==Running, which lied
+	// while control reported online=False.
+	if lc, err := td.srv.LocalClient(); err == nil && lc != nil {
+		if s, err := lc.Status(ctx); err == nil {
+			status.Health = s.Health
+			status.PeerCount = len(s.Peer)
+			if s.Self != nil {
+				status.Online = s.Self.Online
+				if s.Self.KeyExpiry != nil {
+					status.KeyExpiry = s.Self.KeyExpiry.UTC().Format(time.RFC3339)
+				}
+			}
+		}
+	}
+	return status
+}
+
+// markUp records the moment the backend became Running and returns it as an
+// RFC3339 timestamp. It returns "" while disconnected.
+func (p *Plugin) markUp(connected bool) string {
+	p.upMu.Lock()
+	defer p.upMu.Unlock()
+	if !connected {
+		p.upSince = time.Time{}
+		return ""
+	}
+	if p.upSince.IsZero() {
+		p.upSince = time.Now().UTC()
+	}
+	return p.upSince.Format(time.RFC3339)
+}
+
+var watchdogOnce sync.Once
+
+// startWatchdog launches the background self-heal loop at most once per plugin.
+func (p *Plugin) startWatchdog() {
+	watchdogOnce.Do(func() {
+		go p.watchdogLoop(context.Background())
+	})
+}
+
+// watchdogLoop runs every 30s and drives the repair ladder
+// (force-netmap-update -> rebind -> close+Up) only when the mesh is genuinely
+// broken. Informational health warnings are ignored: Tailscale reports them for
+// healthy nodes (e.g. "--accept-routes is false"), and treating those as faults
+// restarted tsnet every minute, aborting every in-flight connection.
+func (p *Plugin) watchdogLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	policy := repairPolicy{}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			st := p.SelfStatus(ctx)
+			if !shouldRepair(st) {
+				policy.recordHealthy(now)
+				continue
+			}
+			if !policy.mayRepair(now) {
+				continue
+			}
+			log.Printf("tsnet watchdog: repairing mesh (%s); this drops in-flight SSH/PTY/DB sessions", repairReason(st))
+			_, _, _ = p.Repair(ctx)
+			policy.recordRepair(now)
+		}
+	}
+}
+
+// Repair timing: three consecutive bad readings (~90s) before acting, then at
+// most one repair per 10 minutes, backing off to 60 minutes while it keeps
+// failing. A sustained healthy period resets the backoff.
+const (
+	repairBadStreak   = 3
+	repairBaseBackoff = 10 * time.Minute
+	repairMaxBackoff  = 60 * time.Minute
+)
+
+// repairPolicy debounces the self-heal ladder.
+type repairPolicy struct {
+	badStreak  int
+	lastRepair time.Time
+	backoff    time.Duration
+}
+
+func (p *repairPolicy) mayRepair(now time.Time) bool {
+	p.badStreak++
+	if p.badStreak < repairBadStreak {
+		return false
+	}
+	if !p.lastRepair.IsZero() && now.Sub(p.lastRepair) < p.cooldown() {
+		return false
+	}
+	return true
+}
+
+func (p *repairPolicy) cooldown() time.Duration {
+	if p.backoff > 0 {
+		return p.backoff
+	}
+	return repairBaseBackoff
+}
+
+func (p *repairPolicy) recordRepair(now time.Time) {
+	p.badStreak = 0
+	p.lastRepair = now
+	if p.backoff == 0 {
+		p.backoff = repairBaseBackoff
+		return
+	}
+	p.backoff *= 2
+	if p.backoff > repairMaxBackoff {
+		p.backoff = repairMaxBackoff
+	}
+}
+
+func (p *repairPolicy) recordHealthy(now time.Time) {
+	p.badStreak = 0
+	if p.backoff > 0 && !p.lastRepair.IsZero() && now.Sub(p.lastRepair) > repairMaxBackoff {
+		p.backoff = 0
+	}
+}
+
+// benignHealthMarkers are Tailscale health strings that describe a healthy node.
+func benignHealthMarkers() []string {
+	return []string{
+		"--accept-routes is false",
+		"advertising routes",
+		"exit node",
+		"is starting",
+		"warming-up",
+	}
+}
+
+// fatalHealthMarkers are health strings that indicate the node cannot reach the
+// tailnet and self-healing may help. Anything unmatched is treated as benign so
+// a new informational string can never reintroduce a repair loop.
+func fatalHealthMarkers() []string {
+	return []string{
+		"not connected",
+		"backend error",
+		"backend failed",
+		"failed to connect",
+		"no derp",
+		"unreachable",
+		"has expired",
+		"key expired",
+		"shut down",
+		"state is stopped",
+	}
+}
+
+// healthIsFatal classifies one Tailscale health entry.
+func healthIsFatal(entry string) bool {
+	lower := strings.ToLower(strings.TrimSpace(entry))
+	if lower == "" {
+		return false
+	}
+	for _, marker := range benignHealthMarkers() {
+		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
+	for _, marker := range fatalHealthMarkers() {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldRepair reports whether a status reading means the mesh needs the repair
+// ladder. A connected, online node with only informational warnings is healthy.
+func shouldRepair(st SelfStatus) bool {
+	if !st.Connected || !st.Online {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(st.BackendState), "NoState") {
+		return true
+	}
+	for _, entry := range st.Health {
+		if healthIsFatal(entry) {
+			return true
+		}
+	}
+	return false
+}
+
+// repairReason renders a short cause for the watchdog log.
+func repairReason(st SelfStatus) string {
+	switch {
+	case !st.Connected:
+		return "backend not connected"
+	case !st.Online:
+		return "control plane reports offline"
+	}
+	for _, entry := range st.Health {
+		if healthIsFatal(entry) {
+			return entry
+		}
+	}
+	if st.BackendState != "" {
+		return "backend state " + st.BackendState
+	}
+	return "degraded"
+}
+
+// TsnetPing pings a target through ATC's own tsnet node (not the host's).
+// Returns (output, isDirect, rtt, err). When tsnet is not the active transport
+// it returns an error so the caller can fall back to the host tailscale CLI.
+func (p *Plugin) TsnetPing(ctx context.Context, target string) (string, bool, *string, error) {
+	td, err := p.ensureTsnet()
+	if err != nil {
+		return "", false, nil, err
+	}
+	d, ok := td.(*tsnetDialer)
+	if !ok {
+		return "", false, nil, fmt.Errorf("host-socket mode: use host ping")
+	}
+	lc, err := d.srv.LocalClient()
+	if err != nil || lc == nil {
+		return "", false, nil, fmt.Errorf("tsnet local client unavailable: %v", err)
+	}
+
+	// If the target is an IP, ping it directly through tsnet.
+	if ip, err := netip.ParseAddr(strings.TrimSpace(target)); err == nil {
+		res, err := lc.Ping(ctx, ip, tailcfg.PingDisco)
+		if err != nil {
+			return "", false, nil, err
+		}
+		isDirect := res.Endpoint != "" && !strings.Contains(strings.ToLower(res.Endpoint), "derp")
+		var rtt *string
+		if res.LatencySeconds > 0 {
+			s := fmt.Sprintf("%.1fms", res.LatencySeconds*1000)
+			rtt = &s
+		}
+		out := fmt.Sprintf("via %s in %.1fms", res.Endpoint, res.LatencySeconds*1000)
+		if res.Err != "" {
+			return out, isDirect, rtt, fmt.Errorf("%s", res.Err)
+		}
+		return out, isDirect, rtt, nil
+	}
+
+	// Otherwise resolve by hostname against tsnet's own netmap.
+	st, err := lc.Status(ctx)
+	if err != nil {
+		return "", false, nil, err
+	}
+	for _, peer := range st.Peer {
+		if strings.EqualFold(peer.HostName, target) || strings.EqualFold(strings.TrimSuffix(peer.DNSName, "."), target) {
+			if !peer.Online {
+				return fmt.Sprintf("%s: offline", peer.HostName), false, nil, fmt.Errorf("peer offline")
+			}
+			ips := make([]string, 0, len(peer.TailscaleIPs))
+			for _, ip := range peer.TailscaleIPs {
+				ips = append(ips, ip.String())
+			}
+			out := fmt.Sprintf("%s online (%s)", peer.HostName, strings.Join(ips, ","))
+			return out, false, nil, nil
+		}
+	}
+	return "", false, nil, fmt.Errorf("peer %q not found in tsnet netmap", target)
+}
+
+// TsnetPeers returns the peers from ATC's own tsnet node's netmap. It returns
+// (nil, nil) when tsnet is not the active transport (host-socket mode), so the
+// caller can fall back to the host tailscaled view.
+func (p *Plugin) TsnetPeers(ctx context.Context) ([]tailscale.PeerStatus, error) {
+	dialer, err := p.ensureTsnet()
+	if err != nil {
+		return nil, err
+	}
+	td, ok := dialer.(*tsnetDialer)
+	if !ok {
+		return nil, nil
+	}
+	lc, err := td.srv.LocalClient()
+	if err != nil || lc == nil {
+		return nil, fmt.Errorf("tsnet local client unavailable: %v", err)
+	}
+	st, err := lc.Status(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tailscale.PeerStatus, 0, len(st.Peer))
+	for _, peer := range st.Peer {
+		ps := tailscale.PeerStatus{
+			HostName: peer.HostName,
+			DNSName:  strings.TrimSuffix(peer.DNSName, "."),
+			OS:       peer.OS,
+			Online:   peer.Online,
+			Active:   peer.Online,
+		}
+		if peer.ID != "" {
+			ps.ID = string(peer.ID)
+		}
+		if peer.TailscaleIPs != nil {
+			for _, ip := range peer.TailscaleIPs {
+				ps.TailscaleIPs = append(ps.TailscaleIPs, ip.String())
+			}
+		}
+		ps.Addrs = peer.Addrs
+		if peer.Tags != nil {
+			ps.Tags = peer.Tags.AsSlice()
+		}
+		out = append(out, ps)
+	}
+	return out, nil
+}
+
+// Repair runs the self-heal ladder once and returns the resulting status plus
+// the steps taken. It is safe to call concurrently with normal operations.
+func (p *Plugin) Repair(ctx context.Context) (SelfStatus, []string, error) {
+	var steps []string
+	st := p.SelfStatus(ctx)
+	if st.Connected && st.Online && len(st.Health) == 0 {
+		steps = append(steps, "already healthy: no repair needed")
+		return st, steps, nil
+	}
+
+	// Step 1: force a netmap replay.
+	if td, err := p.ensureTsnet(); err == nil {
+		if d, ok := td.(*tsnetDialer); ok {
+			if lc, err := d.srv.LocalClient(); err == nil && lc != nil {
+				if err := lc.DebugAction(ctx, "force-netmap-update"); err != nil {
+					steps = append(steps, "force-netmap-update failed: "+err.Error())
+				} else {
+					steps = append(steps, "force-netmap-update")
+				}
+			}
+		}
+	}
+	time.Sleep(3 * time.Second)
+	st = p.SelfStatus(ctx)
+	if st.Connected && st.Online && len(st.Health) == 0 {
+		return st, steps, nil
+	}
+
+	// Step 2: rebind the magicsock.
+	if td, err := p.ensureTsnet(); err == nil {
+		if d, ok := td.(*tsnetDialer); ok {
+			if lc, err := d.srv.LocalClient(); err == nil && lc != nil {
+				if err := lc.DebugAction(ctx, "rebind"); err != nil {
+					steps = append(steps, "rebind failed: "+err.Error())
+				} else {
+					steps = append(steps, "rebind")
+				}
+			}
+		}
+	}
+	time.Sleep(3 * time.Second)
+	st = p.SelfStatus(ctx)
+	if st.Connected && st.Online && len(st.Health) == 0 {
+		return st, steps, nil
+	}
+
+	// Step 3: close and bring the node back up from scratch.
+	p.mu.Lock()
+	if p.tsServer != nil {
+		_ = p.tsServer.Close()
+		p.tsServer = nil
+	}
+	p.dialer = nil
+	p.tsnetFP = ""
+	p.tsnetAuth = ""
+	p.mu.Unlock()
+	time.Sleep(1 * time.Second)
+	st = p.SelfStatus(ctx)
+	steps = append(steps, "close+Up restart")
+	return st, steps, nil
 }
 
 type systemNetworkDialer struct{}
@@ -696,9 +1205,31 @@ func (s *systemNetworkDialer) Dial(ctx context.Context, network, address string)
 
 type tsnetDialer struct {
 	srv *tsnet.Server
+
+	mu    sync.Mutex
+	ready bool
+}
+
+// ensureRunning brings the tsnet node up before the first dial. Without this,
+// the very first connections raced registration and failed with "tsnet: backend
+// in state NoState" (which the startup cache warmup hit for every host).
+func (td *tsnetDialer) ensureRunning(ctx context.Context) error {
+	td.mu.Lock()
+	defer td.mu.Unlock()
+	if td.ready {
+		return nil
+	}
+	if _, err := td.srv.Up(ctx); err != nil {
+		return err
+	}
+	td.ready = true
+	return nil
 }
 
 func (td *tsnetDialer) Dial(ctx context.Context, network, address string) (net.Conn, error) {
+	if err := td.ensureRunning(ctx); err != nil {
+		return nil, fmt.Errorf("tsnet not ready: %w", err)
+	}
 	return td.srv.Dial(ctx, network, address)
 }
 
@@ -758,6 +1289,215 @@ func (p *Plugin) NewRunner(h plugin.HostFacts) (plugin.Runner, error) {
 	return &Runner{client: client}, nil
 }
 
+// EvictClient removes a cached client for the given facts.
+func (p *Plugin) EvictClient(h plugin.HostFacts) {
+	host := h.HostRoute
+	if host == "" {
+		return
+	}
+	user := "root"
+	if u, ok := h.Overrides["user"]; ok && u != "" {
+		user = u
+	}
+	port := 22
+	if pStr, ok := h.Overrides["port"]; ok && pStr != "" {
+		if pVal, err := strconv.Atoi(pStr); err == nil && pVal > 0 {
+			port = pVal
+		}
+	}
+	authMethods, credentialID, err := authMethodsForHost(h)
+	if err != nil {
+		return
+	}
+	key := fmt.Sprintf("%s@%s:%d#%s", user, host, port, credentialID)
+	p.mu.Lock()
+	if c, ok := p.clients[key]; ok {
+		delete(p.clients, key)
+		p.mu.Unlock()
+		_ = c.Close()
+	} else {
+		p.mu.Unlock()
+	}
+	_ = authMethods
+}
+
+// isNoisyTsnetLine filters the tsnet internal log stream: keep state, derp,
+// netmap, and health lines, drop the per-packet/keepalive noise that would
+// otherwise flood the daemon log.
+// migrateLegacyStateDir moves a /tmp-based state directory to the data store's
+// directory the first time it runs, preserving the registration. It is a no-op
+// when the state dir is already outside /tmp or the target already exists.
+func (p *Plugin) migrateLegacyStateDir(cfg *tsnetSettings) {
+	log.Printf("tsnet migrate: stateDir=%q", cfg.StateDir)
+	if !strings.HasPrefix(cfg.StateDir, "/tmp/") {
+		log.Printf("tsnet migrate: not a /tmp path, skipping")
+		return
+	}
+	dbPath := ""
+	if st := plugin.GlobalSettingsStore(); st != nil {
+		dbPath = st.DBPath()
+	}
+	if dbPath == "" {
+		dbPath = plugin.ResolveDBPath("")
+	}
+	if dbPath == "" {
+		return
+	}
+	newDir := filepath.Join(filepath.Dir(dbPath), "tsnet")
+	if _, err := os.Stat(newDir); err == nil {
+		// Already migrated (or created): just switch over.
+		cfg.StateDir = newDir
+		return
+	}
+	if _, err := os.Stat(cfg.StateDir); err == nil {
+		if err := copyDir(cfg.StateDir, newDir); err != nil {
+			log.Printf("tsnet: failed to migrate state dir %s -> %s: %v", cfg.StateDir, newDir, err)
+			return
+		}
+	} else {
+		if err := os.MkdirAll(newDir, 0700); err != nil {
+			log.Printf("tsnet: failed to create state dir %s: %v", newDir, err)
+			return
+		}
+	}
+	cfg.StateDir = newDir
+	adapter := settingsframework.NewStoreAdapter(nil)
+	if err := adapter.Save(SettingsPageID, map[string]any{FieldStateDir: newDir}); err != nil {
+		log.Printf("tsnet: failed to persist migrated state dir: %v", err)
+	}
+}
+
+// copyDir recursively copies src into dst.
+func copyDir(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, info.Mode()); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		s := filepath.Join(src, e.Name())
+		d := filepath.Join(dst, e.Name())
+		if e.IsDir() {
+			if err := copyDir(s, d); err != nil {
+				return err
+			}
+		} else {
+			info, err := os.Stat(s)
+			if err != nil {
+				return err
+			}
+			data, err := os.ReadFile(s)
+			if err != nil {
+				return err
+			}
+			mode := info.Mode().Perm()
+			if mode == 0 {
+				mode = 0600
+			}
+			if err := os.WriteFile(d, data, mode); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func isNoisyTsnetLine(msg string) bool {
+	lower := strings.ToLower(msg)
+	noisy := []string{
+		"magicsock:", "portmap:", "udp", "keepalive", "disco ping",
+		"received packet", "sending packet", "stun", "netcheck:",
+		"wireguard", "noise_handshake", "sendmsg", "recvmsg",
+	}
+	for _, n := range noisy {
+		if strings.Contains(lower, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// authMethodsForHost assembles the SSH auth methods a peer offers, in priority
+// order: the vault secret referenced by the node or tag chunk, legacy
+// private_key/password overrides, then the local ssh-agent.
+//
+// A referenced secret that cannot be decrypted or parsed fails loudly: silently
+// continuing with no methods produced the opaque "attempted methods [none]"
+// handshake error this transport used to emit. The returned credentialID is a
+// non-reversible fingerprint used only in the client cache key, so rotating a
+// secret never reuses a connection authenticated with the old value.
+func authMethodsForHost(h plugin.HostFacts) ([]ssh.AuthMethod, string, error) {
+	var methods []ssh.AuthMethod
+	fingerprint := ""
+
+	if vaultID := strings.TrimSpace(h.Overrides["vaultSecretId"]); vaultID != "" {
+		sec, err := secrets.Resolve(context.Background(), vaultID)
+		if err != nil {
+			return nil, "", err
+		}
+		switch sec.Kind {
+		case secrets.KindPrivateKey:
+			var signer ssh.Signer
+			if pass := h.Overrides["passphrase"]; pass != "" {
+				signer, err = ssh.ParsePrivateKeyWithPassphrase([]byte(sec.Value), []byte(pass))
+			} else {
+				signer, err = ssh.ParsePrivateKey([]byte(sec.Value))
+			}
+			if err != nil {
+				return nil, "", fmt.Errorf("vault secret %q is not a usable SSH private key: %w", vaultID, err)
+			}
+			methods = append(methods, ssh.PublicKeys(signer))
+		case secrets.KindPassword:
+			methods = append(methods, ssh.Password(sec.Value))
+		default:
+			return nil, "", fmt.Errorf("vault secret %q has unsupported kind %q", vaultID, sec.Kind)
+		}
+		sum := sha256.Sum256([]byte(sec.Value))
+		fingerprint = "vault:" + vaultID + ":" + hex.EncodeToString(sum[:8])
+	} else {
+		if pkStr, ok := h.Overrides["private_key"]; ok && strings.TrimSpace(pkStr) != "" {
+			var signer ssh.Signer
+			var err error
+			if pass := h.Overrides["passphrase"]; pass != "" {
+				signer, err = ssh.ParsePrivateKeyWithPassphrase([]byte(pkStr), []byte(pass))
+			} else {
+				signer, err = ssh.ParsePrivateKey([]byte(pkStr))
+			}
+			if err != nil {
+				return nil, "", fmt.Errorf("private_key override is not a usable SSH private key: %w", err)
+			}
+			methods = append(methods, ssh.PublicKeys(signer))
+			sum := sha256.Sum256([]byte(pkStr))
+			fingerprint = "key:" + hex.EncodeToString(sum[:8])
+		}
+		if pass, ok := h.Overrides["password"]; ok && pass != "" {
+			methods = append(methods, ssh.Password(pass))
+			if fingerprint == "" {
+				sum := sha256.Sum256([]byte(pass))
+				fingerprint = "pw:" + hex.EncodeToString(sum[:8])
+			}
+		}
+	}
+
+	if agentAuth, _ := getSSHAgentAuthMethod(); agentAuth != nil {
+		methods = append(methods, agentAuth)
+		if fingerprint == "" {
+			fingerprint = "agent"
+		}
+	}
+
+	if fingerprint == "" {
+		fingerprint = "none"
+	}
+	return methods, fingerprint, nil
+}
+
 // GetClient connects or retrieves a pooled SSH client over Tailscale.
 func (p *Plugin) GetClient(h plugin.HostFacts) (*ssh.Client, error) {
 	host := h.HostRoute
@@ -777,14 +1517,31 @@ func (p *Plugin) GetClient(h plugin.HostFacts) (*ssh.Client, error) {
 		user = u
 	}
 
-	key := fmt.Sprintf("%s@%s:%d", user, host, port)
+	// Resolve the node/tag vault credential before touching the client cache so
+	// the cache key reflects the credential actually offered (rotating the
+	// secret must not reuse a connection authenticated with the old value).
+	authMethods, credentialID, err := authMethodsForHost(h)
+	if err != nil {
+		return nil, err
+	}
+
+	key := fmt.Sprintf("%s@%s:%d#%s", user, host, port, credentialID)
 
 	p.mu.Lock()
 	if client, ok := p.clients[key]; ok {
 		p.mu.Unlock()
-		return client, nil
+		// Liveness check: a cached client whose underlying connection died
+		// (e.g. after a tsnet re-registration) must not be handed out again.
+		if _, _, err := client.SendRequest("keepalive@openssh.com", false, nil); err == nil {
+			return client, nil
+		}
+		p.mu.Lock()
+		delete(p.clients, key)
+		p.mu.Unlock()
+		_ = client.Close()
+	} else {
+		p.mu.Unlock()
 	}
-	p.mu.Unlock()
 
 	dialer, err := p.ensureTsnet()
 	if err != nil {
@@ -807,31 +1564,9 @@ func (p *Plugin) GetClient(h plugin.HostFacts) (*ssh.Client, error) {
 		return nil, fmt.Errorf("tailscale dial to %s failed: %w", targetAddr, err)
 	}
 
-	var authMethods []ssh.AuthMethod
-	// 1. Agent forwarding
-	if agentAuth, _ := getSSHAgentAuthMethod(); agentAuth != nil {
-		authMethods = append(authMethods, agentAuth)
-	}
-
-	// 2. Private Key
-	if pkStr, ok := h.Overrides["private_key"]; ok && strings.TrimSpace(pkStr) != "" {
-		pass := h.Overrides["passphrase"]
-		var signer ssh.Signer
-		var parseErr error
-		if pass != "" {
-			signer, parseErr = ssh.ParsePrivateKeyWithPassphrase([]byte(pkStr), []byte(pass))
-		} else {
-			signer, parseErr = ssh.ParsePrivateKey([]byte(pkStr))
-		}
-		if parseErr == nil {
-			authMethods = append(authMethods, ssh.PublicKeys(signer))
-		}
-	}
-	if pass, ok := h.Overrides["password"]; ok && pass != "" {
-		authMethods = append(authMethods, ssh.Password(pass))
-	}
-
-	// Automatic none-auth negotiation (verified in Task 1 spike)
+	// Automatic none-auth negotiation (verified in Task 1 spike) stays enabled:
+	// hosts enrolled in Tailscale SSH authenticate at the control layer, so an
+	// empty Auth list is valid for them.
 	clientConfig := &ssh.ClientConfig{
 		User:            user,
 		Auth:            authMethods,
@@ -842,7 +1577,13 @@ func (p *Plugin) GetClient(h plugin.HostFacts) (*ssh.Client, error) {
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, targetAddr, clientConfig)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("tailscale ssh handshake failed: %w", err)
+		if len(authMethods) == 0 {
+			return nil, fmt.Errorf(
+				"tailscale ssh handshake failed to %s@%s: %w (no credential offered: node has no vaultSecretId, no private_key/password override, and no ssh-agent socket; hosts that rely on Tailscale SSH must use authMethod=tailscale-ssh)",
+				user, targetAddr, err,
+			)
+		}
+		return nil, fmt.Errorf("tailscale ssh handshake failed to %s@%s: %w", user, targetAddr, err)
 	}
 
 	client := ssh.NewClient(sshConn, chans, reqs)

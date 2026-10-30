@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   findDatacenterSettingCategory,
   findDatacenterSettingPage,
@@ -17,13 +17,44 @@ import {
   type QuickCommandCategory,
 } from '../utils/quickCommandsManager.ts';
 import type { AnsibleConfigSettings } from '../utils/ansibleConfigManager.ts';
+import type { NodeItem } from '../types/index.ts';
+import { CronSchedulesPanel } from './CronSchedulesPanel.tsx';
+import { DatacenterTopologyCard } from './DatacenterTopologyCard.tsx';
 import { DatacenterVarsPage } from './DatacenterVarsPage.tsx';
 import { DatacenterPlaybooksPage } from './DatacenterPlaybooksPage.tsx';
 import { RcloneRemotesView } from './RcloneRemotesView.tsx';
 import { DatacenterTailscalePage } from './DatacenterTailscalePage.tsx';
 
+interface VaultVariable {
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  maskedValue: string;
+}
+
+interface VaultStatusResponse {
+  success: boolean;
+  hasPasswordSource: boolean;
+  source: string;
+}
+
+interface VaultVariablesResponse {
+  success: boolean;
+  variables: VaultVariable[];
+  total: number;
+}
+
+interface VaultActionResponse {
+  success: boolean;
+  variable?: VaultVariable;
+  error?: string;
+}
+
 export interface DatacenterSettingsViewProps {
   page: DatacenterSettingPageId;
+  /** Cluster inventory, used by the mesh topology and scheduler pages. */
+  nodes?: NodeItem[];
+  onSelectNode?: (node: NodeItem) => void;
 }
 
 const QUICK_CMD_CATEGORY_COLORS: Record<QuickCommandCategory, { bg: string; text: string; border: string }> = {
@@ -98,9 +129,17 @@ interface GalaxyCollectionItem {
   path?: string;
 }
 
+/**
+ * First-paint fallback only: the authoritative catalog lives in the Go daemon
+ * (`pkg/collections.Catalog`) and is fetched from
+ * `GET /api/ansible/collections/catalog`. The daemon auto-installs everything
+ * in that catalog on startup, plus any collection a detected host capability
+ * needs (PostgreSQL, MariaDB/MySQL, MongoDB, Podman, Docker, Proxmox, Windows).
+ */
 const SUGGESTED_COLLECTIONS: Array<{ name: string; description: string }> = [
-  { name: 'community.general', description: 'Core community modules & become plugins (community.general.run0, doas, etc.)' },
+  { name: 'community.general', description: 'Core community modules & become plugins (community.general.run0, doas, systemd, filesystems)' },
   { name: 'ansible.posix', description: 'POSIX system modules (firewalld, mount, sysctl, synchronize, acl)' },
+  { name: 'ansible.windows', description: 'Windows host automation over WinRM (win_* modules, PowerShell remoting)' },
   { name: 'community.docker', description: 'Docker Engine & Docker Compose lifecycle modules' },
   { name: 'containers.podman', description: 'Rootless and rootful Podman container & pod management' },
   { name: 'community.postgresql', description: 'PostgreSQL databases, roles, privileges, and extensions' },
@@ -116,6 +155,29 @@ const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }
   const [installing, setInstalling] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [catalog, setCatalog] = useState(SUGGESTED_COLLECTIONS);
+  const [disabled, setDisabled] = useState<string[]>([]);
+  const [required, setRequired] = useState<string[]>([]);
+  const [updates, setUpdates] = useState<
+    Record<string, { latest?: string; updateAvailable: boolean; checkError?: string }>
+  >({});
+  const [checking, setChecking] = useState(false);
+  const [updatingAll, setUpdatingAll] = useState(false);
+  const [pinned, setPinned] = useState<Record<string, string>>({});
+  const [autoUpdate, setAutoUpdate] = useState(false);
+  const [pinning, setPinning] = useState<string | null>(null);
+
+  const fetchCatalog = async () => {
+    try {
+      const res = await fetch('/api/ansible/collections/catalog');
+      const data = await res.json();
+      if (data?.success && Array.isArray(data.catalog) && data.catalog.length > 0) {
+        setCatalog(data.catalog);
+      }
+    } catch {
+      // Keep the fallback catalog; the daemon installs the same set regardless.
+    }
+  };
 
   const fetchCollections = async () => {
     setLoading(true);
@@ -124,6 +186,10 @@ const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }
       const data = await res.json();
       if (data?.success && Array.isArray(data.collections)) {
         setCollections(data.collections);
+        setDisabled(Array.isArray(data.disabled) ? data.disabled : []);
+        setRequired(Array.isArray(data.required) ? data.required : []);
+        setPinned(data.pinned && typeof data.pinned === 'object' ? data.pinned : {});
+        setAutoUpdate(Boolean(data.autoUpdate));
       }
     } catch (err: any) {
       setFeedback({ type: 'error', message: `Failed to load Galaxy collections: ${err?.message || err}` });
@@ -133,6 +199,7 @@ const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }
   };
 
   useEffect(() => {
+    fetchCatalog();
     fetchCollections();
   }, []);
 
@@ -179,12 +246,25 @@ const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }
       });
       const data = await res.json();
       if (res.ok && data?.success) {
+        if (Array.isArray(data.disabled)) {
+          setDisabled(data.disabled);
+        }
         if (Array.isArray(data.collections)) {
           setCollections(data.collections);
         } else {
           await fetchCollections();
         }
-        setFeedback({ type: 'success', message: data.message || `Removed ${collectionName} from managed Ansible environment.` });
+        setUpdates(prev => {
+          const next = { ...prev };
+          delete next[collectionName];
+          return next;
+        });
+        setFeedback({
+          type: 'success',
+          message:
+            data.message ||
+            `Removed ${collectionName}. It stays removed: auto-install will not re-add it until you enable it again.`,
+        });
       } else {
         setFeedback({ type: 'error', message: data?.error || `Failed to remove ${collectionName}` });
       }
@@ -195,21 +275,255 @@ const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }
     }
   };
 
+  const refreshAll = async () => {
+    await fetchCollections();
+  };
+
+  const handleCheckUpdates = async () => {
+    setChecking(true);
+    setFeedback(null);
+    try {
+      const res = await fetch('/api/ansible/collections/updates');
+      const data = await res.json();
+      if (!res.ok || !data?.success) {
+        setFeedback({ type: 'error', message: data?.error || 'Could not check Galaxy for updates' });
+        return;
+      }
+      const next: Record<string, { latest?: string; updateAvailable: boolean; checkError?: string }> = {};
+      for (const entry of data.updates ?? []) {
+        next[entry.name] = {
+          latest: entry.latest,
+          updateAvailable: Boolean(entry.updateAvailable),
+          checkError: entry.checkError,
+        };
+      }
+      setUpdates(next);
+      const count = Number(data.updatesAvailable ?? 0);
+      setFeedback({
+        type: 'success',
+        message:
+          count > 0
+            ? `${count} collection${count === 1 ? '' : 's'} can be updated.`
+            : 'All collections are up to date with Galaxy.',
+      });
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err?.message || 'Network error checking for updates' });
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const reportUpdate = (results: any[]) => {
+    const failed = results.filter(r => r.error);
+    if (failed.length > 0) {
+      setFeedback({ type: 'error', message: `Update failed for ${failed.map(r => r.name).join(', ')}: ${failed[0].error}` });
+      return;
+    }
+    const changed = results.filter(r => r.changed);
+    const skipped = results.filter(r => r.skipped);
+    const parts: string[] = [];
+    if (changed.length > 0) {
+      parts.push(changed.map(r => `${r.name} ${r.from || '—'} → ${r.to}`).join(', '));
+    }
+    if (skipped.length > 0) {
+      parts.push(`skipped ${skipped.map(r => `${r.name} (${r.skipped})`).join(', ')}`);
+    }
+    setFeedback({
+      type: 'success',
+      message: parts.length > 0 ? parts.join(' · ') : 'Everything was already at the newest version.',
+    });
+  };
+
+  const handleUpdate = async (collectionName: string) => {
+    setInstalling(collectionName);
+    setFeedback(null);
+    try {
+      const res = await fetch('/api/ansible/collections/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ collection: collectionName }),
+      });
+      const data = await res.json();
+      reportUpdate(data?.results ?? []);
+      await refreshAll();
+      setUpdates(prev => {
+        const next = { ...prev };
+        delete next[collectionName];
+        return next;
+      });
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err?.message || `Network error updating ${collectionName}` });
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  const handleUpdateAll = async () => {
+    setUpdatingAll(true);
+    setFeedback(null);
+    try {
+      const res = await fetch('/api/ansible/collections/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ all: true }),
+      });
+      const data = await res.json();
+      reportUpdate(data?.results ?? []);
+      await refreshAll();
+      setUpdates({});
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err?.message || 'Network error updating collections' });
+    } finally {
+      setUpdatingAll(false);
+    }
+  };
+
+  const handlePin = async (collectionName: string) => {
+    setPinning(collectionName);
+    setFeedback(null);
+    try {
+      const res = await fetch('/api/ansible/collections/pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ collection: collectionName }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.success) {
+        setPinned(data.pinned && typeof data.pinned === 'object' ? data.pinned : {});
+        setFeedback({ type: 'success', message: `${collectionName} pinned at ${data.version}.` });
+        setUpdates(prev => {
+          const next = { ...prev };
+          delete next[collectionName];
+          return next;
+        });
+      } else {
+        setFeedback({ type: 'error', message: data?.error || `Failed to pin ${collectionName}` });
+      }
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err?.message || `Network error pinning ${collectionName}` });
+    } finally {
+      setPinning(null);
+    }
+  };
+
+  const handleUnpin = async (collectionName: string) => {
+    setPinning(collectionName);
+    setFeedback(null);
+    try {
+      const res = await fetch('/api/ansible/collections/unpin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ collection: collectionName }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.success) {
+        setPinned(data.pinned && typeof data.pinned === 'object' ? data.pinned : {});
+        setFeedback({ type: 'success', message: `${collectionName} is no longer pinned.` });
+      } else {
+        setFeedback({ type: 'error', message: data?.error || `Failed to unpin ${collectionName}` });
+      }
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err?.message || `Network error unpinning ${collectionName}` });
+    } finally {
+      setPinning(null);
+    }
+  };
+
+  const handleToggleAutoUpdate = async () => {
+    const next = !autoUpdate;
+    setAutoUpdate(next);
+    setFeedback(null);
+    try {
+      const res = await fetch('/api/ansible/collections/auto-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.success) {
+        setAutoUpdate(!next);
+        setFeedback({ type: 'error', message: data?.error || 'Failed to change the auto-update setting' });
+        return;
+      }
+      setAutoUpdate(Boolean(data.autoUpdate));
+      setFeedback({
+        type: 'success',
+        message: data.autoUpdate
+          ? 'Weekly auto-update enabled: unpinned collections upgrade to the newest published version.'
+          : 'Weekly auto-update disabled. Updates stay manual.',
+      });
+    } catch (err: any) {
+      setAutoUpdate(!next);
+      setFeedback({ type: 'error', message: err?.message || 'Network error changing the auto-update setting' });
+    }
+  };
+
+  const handleEnable = async (collectionName: string) => {
+    setInstalling(collectionName);
+    setFeedback(null);
+    try {
+      const res = await fetch('/api/ansible/collections/enable', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ collection: collectionName }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.success) {
+        setDisabled(Array.isArray(data.disabled) ? data.disabled : []);
+        setFeedback({
+          type: 'success',
+          message: data.reinstalled
+            ? `${collectionName} re-enabled and installed.`
+            : `${collectionName} re-enabled; it was already installed.`,
+        });
+        await refreshAll();
+      } else {
+        setFeedback({ type: 'error', message: data?.error || `Failed to enable ${collectionName}` });
+      }
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err?.message || `Network error enabling ${collectionName}` });
+    } finally {
+      setInstalling(null);
+    }
+  };
+
   const installedNames = new Set(collections.map(c => c.name));
 
   return (
     <SettingsPageFrame
       page={page}
       actions={
-        <button
-          type="button"
-          onClick={fetchCollections}
-          disabled={loading}
-          className="px-2.5 py-1 rounded text-xs font-mono text-[#dfe1fa] bg-[#171a2d] hover:bg-[#21263d] border border-[#26293c] transition-colors flex items-center gap-1.5 cursor-pointer"
-        >
-          <span className="material-symbols-outlined text-[14px]">refresh</span>
-          <span>Refresh</span>
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={fetchCollections}
+            disabled={loading}
+            className="px-2.5 py-1 rounded text-xs font-mono text-[#dfe1fa] bg-[#171a2d] hover:bg-[#21263d] border border-[#26293c] transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+          >
+            <span className="material-symbols-outlined text-[14px]">refresh</span>
+            <span>Refresh</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleCheckUpdates}
+            disabled={checking || loading}
+            data-testid="galaxy-check-updates"
+            className="px-2.5 py-1 rounded text-xs font-mono text-[#8cd6cb] bg-[#171a2d] hover:bg-[#21263d] border border-[#26293c] transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+          >
+            <span className="material-symbols-outlined text-[14px]">cloud_sync</span>
+            <span>{checking ? 'Checking…' : 'Check for updates'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleUpdateAll}
+            disabled={updatingAll || loading}
+            data-testid="galaxy-update-all"
+            className="px-2.5 py-1 rounded text-xs font-mono font-bold text-white bg-[#1f6feb] hover:bg-[#388bfd] border border-[#1f6feb] transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+          >
+            <span className="material-symbols-outlined text-[14px]">upgrade</span>
+            <span>{updatingAll ? 'Updating…' : 'Update All'}</span>
+          </button>
+        </div>
       }
     >
       <div
@@ -233,10 +547,36 @@ const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }
         </div>
 
         <p className="text-[11px] text-[#8d909b] font-mono">
-          Add or remove Ansible Galaxy collections in the managed controller environment. Note that{' '}
-          <code className="text-[#8cd6cb]">community.general</code> is required for{' '}
-          <code className="text-[#d9b9ff]">community.general.run0</code> privilege elevation.
+          The catalog below is installed automatically, and any capability detected on a host (PostgreSQL, MariaDB/MySQL,
+          MongoDB, Podman, Docker, Proxmox, Windows) pulls its module tree on first probe. Removing a collection records an
+          opt-out so auto-install stops re-adding it; <code className="text-[#8cd6cb]">community.general</code> and{' '}
+          <code className="text-[#8cd6cb]">ansible.posix</code> are required by the mutation pipeline and cannot be removed.
         </p>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-[#171a2d] border border-[#26293c]">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="material-symbols-outlined text-[16px] text-[#8d909b]">schedule</span>
+            <div className="min-w-0">
+              <div className="text-[11px] font-mono font-bold text-[#dfe1fa]">Weekly auto-update</div>
+              <div className="text-[10px] font-mono text-[#8d909b]">
+                Opt-in. Unpinned, non-required collections upgrade to the newest published version once a week.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleToggleAutoUpdate}
+            data-testid="galaxy-auto-update-toggle"
+            aria-pressed={autoUpdate}
+            className={`px-2.5 py-1 rounded text-[10px] font-mono font-bold border transition-colors shrink-0 cursor-pointer ${
+              autoUpdate
+                ? 'bg-[#162620] text-[#8cd6cb] border-[#8cd6cb]/40'
+                : 'bg-[#121528] text-[#8d909b] border-[#26293c]'
+            }`}
+          >
+            {autoUpdate ? 'ON' : 'OFF'}
+          </button>
+        </div>
 
         {feedback && (
           <div
@@ -315,7 +655,8 @@ const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }
                 <thead>
                   <tr className="bg-[#171a2d] text-[#8d909b] text-[10px] uppercase border-b border-[#26293c]">
                     <th className="py-2 px-3">Collection</th>
-                    <th className="py-2 px-3">Version</th>
+                    <th className="py-2 px-3">Installed</th>
+                    <th className="py-2 px-3">Latest</th>
                     <th className="py-2 px-3">Collection Path</th>
                     <th className="py-2 px-3 text-right">Actions</th>
                   </tr>
@@ -334,30 +675,107 @@ const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }
                         </div>
                       </td>
                       <td className="py-2 px-3 text-[#8cd6cb]">{col.version}</td>
+                      <td className="py-2 px-3">
+                        {(() => {
+                          const pin = pinned[col.name];
+                          if (pin) {
+                            return (
+                              <span className="text-[#d9b9ff]">
+                                {pin}
+                                <span className="ml-1.5 text-[9px] px-1 py-0.2 rounded bg-[#291e3b] text-[#d9b9ff] border border-[#d9b9ff]/30">
+                                  PINNED
+                                </span>
+                              </span>
+                            );
+                          }
+                          const info = updates[col.name];
+                          if (!info) {
+                            return <span className="text-[#8d909b]">—</span>;
+                          }
+                          if (info.checkError || !info.latest) {
+                            return (
+                              <span className="text-[#ffd580] text-[10px]" title={info.checkError}>
+                                unknown
+                              </span>
+                            );
+                          }
+                          return (
+                            <span className={info.updateAvailable ? 'text-[#ffd580] font-bold' : 'text-[#8d909b]'}>
+                              {info.latest}
+                              {info.updateAvailable && (
+                                <span className="ml-1.5 text-[9px] px-1 py-0.2 rounded bg-[#2d281b] text-[#ffd580] border border-[#ffd580]/30">
+                                  UPDATE
+                                </span>
+                              )}
+                            </span>
+                          );
+                        })()}
+                      </td>
                       <td className="py-2 px-3 text-[#8d909b] text-[11px] truncate max-w-xs" title={col.path}>
                         {col.path || '~/.ansible/collections/ansible_collections'}
                       </td>
                       <td className="py-2 px-3 text-right">
                         <div className="inline-flex items-center gap-1.5">
+                          {pinned[col.name] ? (
+                            <button
+                              type="button"
+                              onClick={() => handleUnpin(col.name)}
+                              disabled={pinning === col.name}
+                              data-testid={`unpin-collection-${col.name}`}
+                              className="px-2 py-0.5 rounded text-[10px] bg-[#291e3b] text-[#d9b9ff] hover:bg-[#38284f] border border-[#d9b9ff]/30 disabled:opacity-50 cursor-pointer"
+                              title={`Release the pin on ${col.name}`}
+                            >
+                              {pinning === col.name ? 'Unpinning…' : 'Unpin'}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handlePin(col.name)}
+                              disabled={pinning === col.name}
+                              data-testid={`pin-collection-${col.name}`}
+                              className="px-2 py-0.5 rounded text-[10px] bg-[#171a2d] text-[#c3c6d2] hover:bg-[#21263d] border border-[#26293c] disabled:opacity-50 cursor-pointer"
+                              title={`Pin ${col.name} at the installed version (${col.version})`}
+                            >
+                              {pinning === col.name ? 'Pinning…' : 'Pin'}
+                            </button>
+                          )}
                           <button
                             type="button"
-                            onClick={() => handleInstall(col.name)}
-                            disabled={Boolean(installing) || Boolean(removing)}
+                            onClick={() => handleUpdate(col.name)}
+                            disabled={Boolean(installing) || Boolean(removing) || updatingAll}
+                            data-testid={`update-collection-${col.name}`}
                             className="px-2 py-0.5 rounded text-[10px] bg-[#1b2a38] text-[#79c0ff] hover:bg-[#24384b] border border-[#79c0ff]/30 disabled:opacity-50 cursor-pointer"
-                            title={`Reinstall or upgrade ${col.name}`}
+                            title={
+                              updates[col.name]?.updateAvailable
+                                ? `Upgrade ${col.name} to ${updates[col.name]?.latest}`
+                                : `Reinstall ${col.name} at the newest published version`
+                            }
                           >
-                            {installing === col.name ? 'Updating...' : 'Update'}
+                            {installing === col.name
+                              ? 'Updating...'
+                              : updates[col.name]?.updateAvailable
+                              ? `Update to ${updates[col.name]?.latest}`
+                              : 'Update'}
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => handleRemove(col.name)}
-                            disabled={Boolean(removing) || Boolean(installing)}
-                            data-testid={`remove-collection-${col.name}`}
-                            className="px-2 py-0.5 rounded text-[10px] bg-[#311c1c] text-[#ffb4ab] hover:bg-[#442424] border border-[#ffb4ab]/30 disabled:opacity-50 cursor-pointer"
-                            title={`Remove ${col.name}`}
-                          >
-                            {removing === col.name ? 'Removing...' : 'Remove'}
-                          </button>
+                          {required.includes(col.name) ? (
+                            <span
+                              className="px-2 py-0.5 rounded text-[10px] bg-[#21263d] text-[#b0c9ff] border border-[#b0c9ff]/30"
+                              title="Required by ATC's mutation pipeline — removal is blocked"
+                            >
+                              Required
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleRemove(col.name)}
+                              disabled={Boolean(removing) || Boolean(installing)}
+                              data-testid={`remove-collection-${col.name}`}
+                              className="px-2 py-0.5 rounded text-[10px] bg-[#311c1c] text-[#ffb4ab] hover:bg-[#442424] border border-[#ffb4ab]/30 disabled:opacity-50 cursor-pointer"
+                              title={`Remove ${col.name} and stop auto-installing it`}
+                            >
+                              {removing === col.name ? 'Removing...' : 'Remove'}
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -374,12 +792,15 @@ const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }
             Recommended Collections Catalog
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {SUGGESTED_COLLECTIONS.map(item => {
+            {catalog.map(item => {
               const isInstalled = installedNames.has(item.name);
+              const isDisabled = disabled.includes(item.name);
+              const isRequired = required.includes(item.name);
               return (
                 <div
                   key={item.name}
                   className="p-2.5 rounded bg-[#171a2d] border border-[#26293c] flex items-center justify-between gap-2"
+                  data-testid={`catalog-collection-${item.name}`}
                 >
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5">
@@ -389,20 +810,47 @@ const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }
                           INSTALLED
                         </span>
                       )}
+                      {isDisabled && !isInstalled && (
+                        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#2d281b] text-[#ffd580] border border-[#ffd580]/30">
+                          DISABLED
+                        </span>
+                      )}
+                      {isRequired && (
+                        <span
+                          className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#21263d] text-[#b0c9ff] border border-[#b0c9ff]/30"
+                          title="Required by ATC's mutation pipeline"
+                        >
+                          REQUIRED
+                        </span>
+                      )}
                     </div>
                     <p className="text-[10px] font-mono text-[#8d909b] truncate" title={item.description}>
                       {item.description}
                     </p>
                   </div>
-                  {isInstalled ? (
+                  {isDisabled && !isInstalled ? (
                     <button
                       type="button"
-                      onClick={() => handleRemove(item.name)}
-                      disabled={Boolean(removing) || Boolean(installing)}
-                      className="px-2.5 py-1 rounded text-[10px] font-mono text-[#ffb4ab] bg-[#311c1c] hover:bg-[#442424] border border-[#ffb4ab]/30 shrink-0 cursor-pointer disabled:opacity-50"
+                      onClick={() => handleEnable(item.name)}
+                      disabled={Boolean(installing) || Boolean(removing)}
+                      data-testid={`enable-collection-${item.name}`}
+                      className="px-2.5 py-1 rounded text-[10px] font-mono font-bold text-[#8cd6cb] bg-[#162620] hover:bg-[#1d332a] border border-[#8cd6cb]/30 shrink-0 cursor-pointer disabled:opacity-50"
                     >
-                      {removing === item.name ? 'Removing...' : 'Remove'}
+                      {installing === item.name ? 'Enabling...' : 'Enable'}
                     </button>
+                  ) : isInstalled ? (
+                    isRequired ? (
+                      <span className="text-[10px] font-mono text-[#8d909b] shrink-0 px-2">kept</span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleRemove(item.name)}
+                        disabled={Boolean(removing) || Boolean(installing)}
+                        className="px-2.5 py-1 rounded text-[10px] font-mono text-[#ffb4ab] bg-[#311c1c] hover:bg-[#442424] border border-[#ffb4ab]/30 shrink-0 cursor-pointer disabled:opacity-50"
+                      >
+                        {removing === item.name ? 'Removing...' : 'Remove'}
+                      </button>
+                    )
                   ) : (
                     <button
                       type="button"
@@ -417,6 +865,569 @@ const AnsibleCollectionsSettingsPage: React.FC<{ page: DatacenterSettingPageId }
               );
             })}
           </div>
+        </div>
+      </div>
+    </SettingsPageFrame>
+  );
+};
+
+const SSHVaultPage: React.FC<{ page: DatacenterSettingPageId }> = ({ page }) => {
+  const [variables, setVariables] = useState<VaultVariable[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [vaultStatus, setVaultStatus] = useState<VaultStatusResponse | null>(null);
+
+  // Form state for adding new vault variable
+  const [isAdding, setIsAdding] = useState(false);
+  const [newVarName, setNewVarName] = useState('');
+  const [newVarValue, setNewVarValue] = useState('');
+  const [vaultPassword, setVaultPassword] = useState('');
+
+  // State for editing a variable
+  const [editingVar, setEditingVar] = useState<VaultVariable | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const [editPassword, setEditPassword] = useState('');
+
+  // Confirm delete state
+  const [confirmDeleteVar, setConfirmDeleteVar] = useState<string | null>(null);
+
+  const loadVariables = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [varsRes, statusRes] = await Promise.all([
+        fetch('/api/vault/variables'),
+        fetch('/api/vault/status'),
+      ]);
+
+      if (varsRes.ok) {
+        const data: VaultVariablesResponse = await varsRes.json();
+        if (data.success) {
+          setVariables(data.variables);
+        }
+      }
+
+      if (statusRes.ok) {
+        const statusData: VaultStatusResponse = await statusRes.json();
+        setVaultStatus(statusData);
+      }
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: `Failed to load SSH vault variables: ${err?.message || err}` });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadVariables();
+  }, [loadVariables]);
+
+  const handleAddVariable = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newVarName.trim() || !newVarValue.trim()) {
+      setFeedback({ type: 'error', message: 'Variable name and value are required.' });
+      return;
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(newVarName.trim())) {
+      setFeedback({ type: 'error', message: 'Variable name must match [A-Za-z_][A-Za-z0-9_]* (e.g., ssh_key_webserver).' });
+      return;
+    }
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const res = await fetch('/api/vault/variables', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newVarName.trim(),
+          value: newVarValue,
+          password: vaultPassword || undefined,
+        }),
+      });
+      const data: VaultActionResponse = await res.json();
+      if (res.ok && data.success) {
+        setFeedback({ type: 'success', message: `SSH vault variable "${newVarName.trim()}" created and encrypted.` });
+        setNewVarName('');
+        setNewVarValue('');
+        setVaultPassword('');
+        setIsAdding(false);
+        loadVariables();
+      } else {
+        setFeedback({ type: 'error', message: data.error || 'Failed to create vault variable.' });
+      }
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: `Network error: ${err?.message || err}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUpdateVariable = async (name: string) => {
+    if (!editValue.trim()) {
+      setFeedback({ type: 'error', message: 'A non-empty value is required.' });
+      return;
+    }
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const res = await fetch(`/api/vault/variables/${encodeURIComponent(name)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          value: editValue,
+          password: editPassword || undefined,
+        }),
+      });
+      const data: VaultActionResponse = await res.json();
+      if (res.ok && data.success) {
+        setFeedback({ type: 'success', message: `SSH vault variable "${name}" updated.` });
+        setEditingVar(null);
+        setEditValue('');
+        setEditPassword('');
+        loadVariables();
+      } else {
+        setFeedback({ type: 'error', message: data.error || 'Failed to update vault variable.' });
+      }
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: `Network error: ${err?.message || err}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDeleteVariable = async (name: string) => {
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const res = await fetch(`/api/vault/variables/${encodeURIComponent(name)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setFeedback({ type: 'success', message: `SSH vault variable "${name}" deleted.` });
+        setConfirmDeleteVar(null);
+        loadVariables();
+      } else {
+        setFeedback({ type: 'error', message: data.error || 'Failed to delete vault variable.' });
+      }
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: `Network error: ${err?.message || err}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleOpenEdit = (variable: VaultVariable) => {
+    setEditingVar(variable);
+    setEditValue('');
+    setEditPassword('');
+    setFeedback(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingVar(null);
+    setEditValue('');
+    setEditPassword('');
+    setFeedback(null);
+  };
+
+  const formatTimestamp = (ts: number) => {
+    return new Date(ts).toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  };
+
+  const headerActions = (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={loadVariables}
+        disabled={loading || busy}
+        className="px-2.5 py-1 rounded text-xs font-mono text-[#dfe1fa] bg-[#171a2d] hover:bg-[#21263d] border border-[#26293c] transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+        title="Refresh vault variables from store"
+      >
+        <span className="material-symbols-outlined text-[14px]">refresh</span>
+        <span>Refresh</span>
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          setIsAdding(!isAdding);
+          setFeedback(null);
+        }}
+        disabled={busy || loading}
+        className="px-2.5 py-1 rounded text-xs font-mono font-bold text-white bg-[#1f6feb] hover:bg-[#388bfd] transition-colors flex items-center gap-1 cursor-pointer shadow-xs disabled:opacity-50"
+        title="Add a new SSH private key or secret to ansible-vault"
+      >
+        <span className="material-symbols-outlined text-[15px]">{isAdding ? 'remove' : 'add'}</span>
+        <span>{isAdding ? 'Cancel' : 'Add SSH Key / Secret'}</span>
+      </button>
+    </div>
+  );
+
+  return (
+    <SettingsPageFrame page={page} actions={headerActions}>
+      <div
+        id="datacenter-ssh-vault"
+        data-testid="datacenter-ssh-vault-settings"
+        className="rounded-lg bg-[#121528] border border-[#26293c] p-4 shadow-md flex flex-col gap-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[18px] text-[#d9b9ff]">vpn_key</span>
+            <h2 className="text-xs font-mono font-bold text-[#dfe1fa] uppercase tracking-wider">
+              SSH Vault Secrets
+            </h2>
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#291e3b] text-[#d9b9ff] border border-[#d9b9ff]/30">
+              {variables.length} Variable{variables.length !== 1 ? 's' : ''}
+            </span>
+          </div>
+          <span className="text-[10px] font-mono text-[#8d909b]">
+            Source: /api/vault/variables (SQLite vault store) · Encrypted via ansible-vault AES256
+          </span>
+        </div>
+
+        <p className="text-[11px] text-[#8d909b] font-mono">
+          Manage SSH private keys and sensitive secrets stored in the Ansible Vault database. Values are encrypted with{' '}
+          <code className="text-[#8cd6cb]">ansible-vault encrypt_string</code> and persisted to the coordinator's SQLite vault store.
+          Every decryption is logged to the Vault Audit trail.
+        </p>
+
+        {vaultStatus && (
+          <div
+            className={`p-2.5 rounded text-xs font-mono border flex items-center justify-between gap-2 ${
+              vaultStatus.hasPasswordSource
+                ? 'bg-[#162620] text-[#8cd6cb] border-[#8cd6cb]/30'
+                : 'bg-[#291717] text-[#ffb4ab] border-[#ffb4ab]/30'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-[15px]">
+                {vaultStatus.hasPasswordSource ? 'lock_open' : 'lock'}
+              </span>
+              <span>
+                Vault password source: <code className="text-[#79c0ff]">{vaultStatus.source}</code>
+                {vaultStatus.hasPasswordSource ? ' (encryption available)' : ' — set a password source to enable encryption'}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {feedback && (
+          <div
+            className={`p-2.5 rounded text-xs font-mono border flex items-center justify-between ${
+              feedback.type === 'success'
+                ? 'bg-[#162620] text-[#8cd6cb] border-[#8cd6cb]/30'
+                : 'bg-[#311c1c] text-[#ffb4ab] border-[#ffb4ab]/30'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-[16px]">
+                {feedback.type === 'success' ? 'check_circle' : 'error'}
+              </span>
+              <span>{feedback.message}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setFeedback(null)}
+              className="text-[#8d909b] hover:text-[#dfe1fa] cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[14px]">close</span>
+            </button>
+          </div>
+        )}
+
+        {/* Add new variable form */}
+        {isAdding && (
+          <form
+            onSubmit={handleAddVariable}
+            className="p-3.5 rounded-lg bg-[#171a2d] border border-[#58a6ff]/40 flex flex-col gap-3 shadow-md"
+          >
+            <div className="flex items-center justify-between border-b border-[#26293c] pb-2">
+              <span className="text-xs font-mono font-bold text-[#dfe1fa] flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[16px] text-[#79c0ff]">add_circle</span>
+                Add New SSH Vault Variable
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsAdding(false);
+                  setNewVarName('');
+                  setNewVarValue('');
+                  setVaultPassword('');
+                  setFeedback(null);
+                }}
+                className="text-gray-400 hover:text-white cursor-pointer"
+                title="Cancel"
+              >
+                <span className="material-symbols-outlined text-[16px]">close</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[10px] font-mono text-[#8d909b] uppercase mb-1">
+                  Variable Name (Ansible identifier) *
+                </label>
+                <input
+                  type="text"
+                  value={newVarName}
+                  onChange={e => setNewVarName(e.target.value)}
+                  placeholder="ssh_key_webserver"
+                  data-testid="ssh-vault-var-name-input"
+                  className="w-full bg-[#121528] border border-[#26293c] focus:border-[#58a6ff] rounded px-2.5 py-1.5 text-xs font-mono text-[#dfe1fa] outline-none"
+                  required
+                />
+                <span className="text-[10px] font-mono text-[#8d909b]">Must match [A-Za-z_][A-Za-z0-9_]*</span>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-mono text-[#8d909b] uppercase mb-1">
+                  Vault Password (optional)
+                </label>
+                <input
+                  type="password"
+                  value={vaultPassword}
+                  onChange={e => setVaultPassword(e.target.value)}
+                  placeholder="Leave empty to use configured vault password source"
+                  data-testid="ssh-vault-password-input"
+                  className="w-full bg-[#121528] border border-[#26293c] focus:border-[#58a6ff] rounded px-2.5 py-1.5 text-xs font-mono text-[#dfe1fa] outline-none"
+                />
+                <span className="text-[10px] font-mono text-[#8d909b]">Uses ansible.cfg / ANSIBLE_VAULT_PASSWORD if empty</span>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-mono text-[#8d909b] uppercase mb-1">
+                SSH Private Key / Secret Value *
+              </label>
+              <textarea
+                value={newVarValue}
+                onChange={e => setNewVarValue(e.target.value)}
+                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
+                rows={6}
+                data-testid="ssh-vault-value-input"
+                className="w-full bg-[#121528] border border-[#26293c] focus:border-[#58a6ff] rounded px-2.5 py-1.5 text-xs font-mono text-[#dfe1fa] outline-none resize-y min-h-[120px]"
+                required
+              />
+              <span className="text-[10px] font-mono text-[#8d909b]">Paste the full SSH private key or any secret value to encrypt</span>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsAdding(false);
+                  setNewVarName('');
+                  setNewVarValue('');
+                  setVaultPassword('');
+                  setFeedback(null);
+                }}
+                className="px-3 py-1 rounded text-xs font-mono text-gray-400 hover:text-white bg-[#121528] border border-[#26293c] cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy || !newVarName.trim() || !newVarValue.trim()}
+                className="px-3 py-1 rounded text-xs font-mono font-bold text-white bg-[#1f6feb] hover:bg-[#388bfd] cursor-pointer disabled:opacity-50"
+              >
+                {busy ? 'Encrypting & Saving...' : 'Encrypt & Save'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Edit variable form */}
+        {editingVar && (
+          <form
+            onSubmit={e => { e.preventDefault(); handleUpdateVariable(editingVar.name); }}
+            className="p-3.5 rounded-lg bg-[#171a2d] border border-[#d9b9ff]/40 flex flex-col gap-3 shadow-md"
+          >
+            <div className="flex items-center justify-between border-b border-[#26293c] pb-2">
+              <span className="text-xs font-mono font-bold text-[#dfe1fa] flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[16px] text-[#d9b9ff]">edit</span>
+                Edit SSH Vault Variable: <code className="text-[#79c0ff]">{editingVar.name}</code>
+              </span>
+              <button
+                type="button"
+                onClick={handleCancelEdit}
+                className="text-gray-400 hover:text-white cursor-pointer"
+                title="Cancel"
+              >
+                <span className="material-symbols-outlined text-[16px]">close</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[10px] font-mono text-[#8d909b] uppercase mb-1">
+                  Vault Password (optional)
+                </label>
+                <input
+                  type="password"
+                  value={editPassword}
+                  onChange={e => setEditPassword(e.target.value)}
+                  placeholder="Leave empty to use configured vault password source"
+                  className="w-full bg-[#121528] border border-[#26293c] focus:border-[#d9b9ff] rounded px-2.5 py-1.5 text-xs font-mono text-[#dfe1fa] outline-none"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-mono text-[#8d909b] uppercase mb-1">
+                New SSH Private Key / Secret Value *
+              </label>
+              <textarea
+                value={editValue}
+                onChange={e => setEditValue(e.target.value)}
+                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
+                rows={6}
+                className="w-full bg-[#121528] border border-[#26293c] focus:border-[#d9b9ff] rounded px-2.5 py-1.5 text-xs font-mono text-[#dfe1fa] outline-none resize-y min-h-[120px]"
+                required
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleCancelEdit}
+                className="px-3 py-1 rounded text-xs font-mono text-gray-400 hover:text-white bg-[#121528] border border-[#26293c] cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy || !editValue.trim()}
+                className="px-3 py-1 rounded text-xs font-mono font-bold text-white bg-[#d9b9ff] hover:bg-[#e8d0ff] text-[#121528] cursor-pointer disabled:opacity-50"
+              >
+                {busy ? 'Updating...' : 'Update Variable'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Variables table */}
+        <div className="flex flex-col gap-2">
+          <h3 className="text-[11px] font-mono font-bold text-[#8d909b] uppercase tracking-wider">
+            Stored SSH Vault Variables ({variables.length})
+          </h3>
+          {loading ? (
+            <div className="p-4 text-center text-xs font-mono text-[#8d909b] bg-[#171a2d] rounded border border-[#26293c]">
+              Querying vault variable store…
+            </div>
+          ) : variables.length === 0 ? (
+            <div className="p-4 text-center text-xs font-mono text-[#8d909b] bg-[#171a2d] rounded border border-[#26293c]">
+              No SSH vault variables stored yet. Click "Add SSH Key / Secret" to create one.
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded border border-[#26293c]">
+              <table className="w-full text-left border-collapse font-mono text-xs">
+                <thead>
+                  <tr className="bg-[#171a2d] text-[#8d909b] text-[10px] uppercase border-b border-[#26293c]">
+                    <th className="py-2 px-3">Variable Name</th>
+                    <th className="py-2 px-3">Masked Value</th>
+                    <th className="py-2 px-3">Created</th>
+                    <th className="py-2 px-3">Updated</th>
+                    <th className="py-2 px-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#26293c]/60">
+                  {variables.map(variable => (
+                    <tr key={variable.name} className="hover:bg-[#171a2d]/60 transition-colors">
+                      <td className="py-2 px-3 font-bold text-[#dfe1fa]">
+                        <div className="flex items-center gap-2">
+                          <span>{variable.name}</span>
+                          {variable.name.startsWith('ssh_') && (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#1b2a38] text-[#8cd6cb] border border-[#8cd6cb]/30">
+                              SSH Key
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-2 px-3 text-[#8cd6cb] font-mono text-[11px]">
+                        {variable.maskedValue}
+                      </td>
+                      <td className="py-2 px-3 text-[#8d909b] text-[11px]">
+                        {formatTimestamp(variable.createdAt)}
+                      </td>
+                      <td className="py-2 px-3 text-[#8d909b] text-[11px]">
+                        {formatTimestamp(variable.updatedAt)}
+                      </td>
+                      <td className="py-2 px-3 text-right">
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEdit(variable)}
+                            disabled={busy}
+                            className="px-2 py-0.5 rounded text-[10px] bg-[#1b2a38] text-[#d9b9ff] hover:bg-[#291e3b] border border-[#d9b9ff]/30 disabled:opacity-50 cursor-pointer"
+                            title={`Update ${variable.name}`}
+                          >
+                            Edit
+                          </button>
+                          {confirmDeleteVar === variable.name ? (
+                            <span className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteVariable(variable.name)}
+                                disabled={busy}
+                                className="px-2 py-0.5 rounded text-[10px] bg-[#ffb4ab] text-[#121528] font-bold cursor-pointer disabled:opacity-50"
+                                title={`Delete ${variable.name}`}
+                              >
+                                Delete
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteVar(null)}
+                                className="px-2 py-0.5 rounded text-[10px] text-[#8d909b] hover:text-[#dfe1fa] cursor-pointer"
+                              >
+                                No
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteVar(variable.name)}
+                              disabled={busy}
+                              className="px-2 py-0.5 rounded text-[10px] bg-[#311c1c] text-[#ffb4ab] hover:bg-[#442424] border border-[#ffb4ab]/30 disabled:opacity-50 cursor-pointer"
+                              title={`Delete ${variable.name}`}
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Usage hint */}
+        <div className="pt-2 border-t border-[#26293c]/60 p-3 rounded bg-[#171a2d] border border-[#26293c]">
+          <h4 className="text-[11px] font-mono font-bold text-[#ffd580] uppercase tracking-wider mb-2">
+            Usage in Ansible Playbooks
+          </h4>
+          <p className="text-[11px] text-[#8d909b] font-mono mb-2">
+            Reference these vault variables in your playbooks using standard Ansible syntax:
+          </p>
+          <pre className="bg-[#0f1220] border border-[#26293c] rounded p-3 text-[10px] font-mono text-[#8cd6cb] overflow-x-auto">
+{`# In group_vars or playbook vars:
+ansible_ssh_private_key_file: "{{ vault_ssh_key_webserver }}"
+
+# Or use the vault variable directly:
+- name: Use SSH key from vault
+  ansible.builtin.copy:
+    dest: /tmp/id_ed25519
+    content: "{{ vault_ssh_key_webserver }}"
+    mode: "0600"`}
+          </pre>
         </div>
       </div>
     </SettingsPageFrame>
@@ -1085,7 +2096,11 @@ const QuickCommandsSettingsPage: React.FC<{ page: DatacenterSettingPageId }> = (
  * route stays inside the settings catalog so unsaved form state survives
  * navigation between settings pages.
  */
-export const DatacenterSettingsView: React.FC<DatacenterSettingsViewProps> = ({ page }) => {
+export const DatacenterSettingsView: React.FC<DatacenterSettingsViewProps> = ({
+  page,
+  nodes = [],
+  onSelectNode,
+}) => {
   const meta = findDatacenterSettingPage(page);
   if (!meta) return null;
 
@@ -1095,6 +2110,9 @@ export const DatacenterSettingsView: React.FC<DatacenterSettingsViewProps> = ({ 
         <DatacenterPlaybooksPage showHeader={false} />
       </SettingsPageFrame>
     );
+  }
+  if (meta.id === 'ssh-vault') {
+    return <SSHVaultPage page={meta.id} />;
   }
   if (meta.category === 'variables') {
     return (
@@ -1116,7 +2134,17 @@ export const DatacenterSettingsView: React.FC<DatacenterSettingsViewProps> = ({ 
   if (meta.id === 'connection/tailscale') {
     return (
       <SettingsPageFrame page={meta.id}>
-        <DatacenterTailscalePage />
+        <div className="flex flex-col gap-3">
+          <DatacenterTailscalePage />
+          <DatacenterTopologyCard nodes={nodes} onSelectNode={onSelectNode} />
+        </div>
+      </SettingsPageFrame>
+    );
+  }
+  if (meta.id === 'ansible-schedules') {
+    return (
+      <SettingsPageFrame page={meta.id}>
+        <CronSchedulesPanel nodes={nodes} />
       </SettingsPageFrame>
     );
   }

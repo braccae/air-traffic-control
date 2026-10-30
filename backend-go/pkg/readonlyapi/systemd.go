@@ -72,6 +72,34 @@ func (a *API) systemdTarget(w http.ResponseWriter, r *http.Request) (plugin.Runn
 	return runner, scope, true
 }
 
+// withSelectedUser wraps the runner so user-scoped reads target the operator's
+// chosen per-user manager (?uid=<id>) instead of the SSH login user's.
+func withSelectedUser(run plugin.Runner, r *http.Request, scope systemd.Scope) plugin.Runner {
+	uid := strings.TrimSpace(r.URL.Query().Get("uid"))
+	if uid == "" || scope != systemd.ScopeUser {
+		return run
+	}
+	return systemd.UserRunner{Base: run, UID: uid}
+}
+
+// handleSystemdUsers lists the per-user managers on the host.
+func (a *API) handleSystemdUsers(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), systemdStateTimeout)
+	defer cancel()
+
+	_, runner, err := a.factsAndRunner(ctx, r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	users, err := systemd.ListUserManagers(ctx, runner)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodeId": r.PathValue("id"), "users": users})
+}
+
 // handleSystemdUnits serves the service unit list. scope=all returns the system
 // manager's units followed by the user manager's units.
 func (a *API) handleSystemdUnits(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +110,8 @@ func (a *API) handleSystemdUnits(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), systemdStateTimeout)
 	defer cancel()
+
+	runner = withSelectedUser(runner, r, scope)
 
 	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("scope")), "all") {
 		units, warnings, err := systemd.ListAllScopes(ctx, runner)
@@ -112,6 +142,7 @@ func (a *API) handleSystemdUnit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	runner = withSelectedUser(runner, r, scope)
 	unit := strings.TrimSpace(r.URL.Query().Get("unit"))
 	if unit == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unit query parameter is required"})
@@ -141,6 +172,8 @@ func (a *API) handleSystemdJournal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+
+	runner = withSelectedUser(runner, r, scope)
 
 	opts := systemd.JournalOptions{
 		Unit:     strings.TrimSpace(r.URL.Query().Get("unit")),

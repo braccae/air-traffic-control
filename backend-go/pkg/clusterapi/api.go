@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"air-traffic-control/backend/pkg/hostcache"
+	"air-traffic-control/backend/pkg/secrets"
 )
 
 // ClusterLogKind specifies the source of the log entry.
@@ -218,10 +219,11 @@ func (cr *ConnectionRegistry) Begin(kind, label string) func() {
 
 // API handles cluster logging, connection stats, inventory folders/chunks, tasks, ping, and restic.
 type API struct {
-	store       *hostcache.Store
-	logStore    *LogStore
-	connReg     *ConnectionRegistry
-	broadcast   func(map[string]any)
+	store      *hostcache.Store
+	logStore   *LogStore
+	connReg    *ConnectionRegistry
+	broadcast  func(map[string]any)
+	tsnetPing  func(ctx context.Context, target string) (string, bool, *string, error)
 }
 
 // Options configures the cluster API.
@@ -230,6 +232,9 @@ type Options struct {
 	LogStore  *LogStore
 	ConnReg   *ConnectionRegistry
 	Broadcast func(map[string]any)
+	// TsnetPing, if set, pings a target through ATC's own tsnet node instead
+	// of the host's tailscale CLI. It returns (output, isDirect, rtt, err).
+	TsnetPing func(ctx context.Context, target string) (string, bool, *string, error)
 }
 
 // NewAPI creates a new Cluster API.
@@ -243,10 +248,11 @@ func NewAPI(opts Options) (*API, error) {
 		cr = NewConnectionRegistry()
 	}
 	return &API{
-		store:     opts.Store,
-		logStore:  ls,
-		connReg:   cr,
-		broadcast: opts.Broadcast,
+		store:      opts.Store,
+		logStore:   ls,
+		connReg:    cr,
+		broadcast:  opts.Broadcast,
+		tsnetPing:  opts.TsnetPing,
 	}, nil
 }
 
@@ -409,9 +415,20 @@ func (a *API) handleChunks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Reject references to vault variables that do not exist before saving
+		// the chunk, so a typo fails here instead of at first connection.
+		if err := secrets.ValidateRef(req.VaultSecretID); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+
+		normalizedTag := strings.TrimSpace(req.Tag)
+		if !strings.HasPrefix(strings.ToLower(normalizedTag), "tag:") {
+			normalizedTag = "tag:" + normalizedTag
+		}
 		chunkID := req.ID
 		if chunkID == "" {
-			chunkID = fmt.Sprintf("chunk-%s", req.Tag)
+			chunkID = fmt.Sprintf("chunk-%s", normalizedTag)
 		}
 		now := req.CreatedAt
 		if now == 0 {
@@ -420,7 +437,7 @@ func (a *API) handleChunks(w http.ResponseWriter, r *http.Request) {
 
 		chunk := hostcache.TagChunk{
 			ID:            chunkID,
-			Tag:           req.Tag,
+			Tag:           normalizedTag,
 			SSHUser:       req.SSHUser,
 			VaultSecretID: req.VaultSecretID,
 			AuthMethod:    req.AuthMethod,
@@ -557,6 +574,30 @@ func (a *API) handleTailscalePing(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
+
+	// Prefer ATC's own tsnet node when available: pinging as the host (below)
+	// reports reachability of the host's tailscaled identity, not ATC's.
+	if a.tsnetPing != nil {
+		if out, isDirect, rtt, err := a.tsnetPing(ctx, target); err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"success":  true,
+				"target":   target,
+				"output":   out,
+				"isDirect": isDirect,
+				"rtt":      rtt,
+				"source":   "tsnet",
+			})
+			return
+		} else if !strings.Contains(err.Error(), "host-socket mode") {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"success": false,
+				"target":  target,
+				"error":   err.Error(),
+				"source":  "tsnet",
+			})
+			return
+		}
+	}
 
 	cmd := exec.CommandContext(ctx, "tailscale", "ping", "-c", "1", target)
 	out, err := cmd.CombinedOutput()

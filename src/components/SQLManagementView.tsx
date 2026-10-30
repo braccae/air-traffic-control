@@ -273,16 +273,34 @@ export function buildSQLTableListQuery(engine: string): string {
   return "SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name;";
 }
 
+// Quote a (possibly schema-qualified) table name so mixed-case identifiers
+// survive the round trip. Postgres folds unquoted names to lowercase, which
+// made "Load tables" list e.g. "public.AppSyncProfiles" while the browse query
+// `SELECT * FROM public.AppSyncProfiles` resolved to "public.appsyncprofiles"
+// and failed with "relation does not exist".
+export function quoteTableName(engine: string, tableName: string): string {
+  const parts = String(tableName || '').split('.');
+  if (engine === 'mariadb' || engine === 'mysql') {
+    return parts.map(p => (p ? `\`${p.replace(/`/g, '``')}\`` : p)).join('.');
+  }
+  if (engine === 'mssql') {
+    return parts.map(p => (p ? `[${p.replace(/]/g, ']]')}]` : p)).join('.');
+  }
+  // postgres (and default): double quotes
+  return parts.map(p => (p ? `"${p.replace(/"/g, '""')}"` : p)).join('.');
+}
+
 export function buildSQLBrowseRowsQuery(
   engine: string,
   tableName: string,
   limit: number,
   offset: number
 ): string {
+  const quoted = quoteTableName(engine, tableName);
   if (engine === 'mssql') {
-    return `SELECT * FROM ${tableName} ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY;`;
+    return `SELECT * FROM ${quoted} ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY;`;
   }
-  return `SELECT * FROM ${tableName} LIMIT ${limit} OFFSET ${offset};`;
+  return `SELECT * FROM ${quoted} LIMIT ${limit} OFFSET ${offset};`;
 }
 
 export const SQLManagementView: React.FC<SQLManagementViewProps> = ({
@@ -347,6 +365,8 @@ export const SQLManagementView: React.FC<SQLManagementViewProps> = ({
 
   // SQL Data Browser state
   const [browserDatabase, setBrowserDatabase] = useState<string>('');
+  // Top-level view tabs: replaces the old stacked "little boxes" layout.
+  const [activeView, setActiveView] = useState<'browse' | 'query' | 'databases' | 'users'>('browse');
   const [browserTables, setBrowserTables] = useState<string[]>([]);
   const [browserLoadingTables, setBrowserLoadingTables] = useState<boolean>(false);
   const [browserSelectedTable, setBrowserSelectedTable] = useState<string | null>(null);
@@ -584,6 +604,7 @@ export const SQLManagementView: React.FC<SQLManagementViewProps> = ({
               host: effectiveOverrides[`${activeEngine}_host`] || undefined,
               port: Number(effectiveOverrides[`${activeEngine}_port`]) || undefined,
               user: effectiveOverrides[`${activeEngine}_user`] || undefined,
+              password: effectiveOverrides[`${activeEngine}_password`] || undefined,
               socket: effectiveOverrides[`${activeEngine}_socket`] || undefined,
               query: sql,
             }),
@@ -832,31 +853,86 @@ export const SQLManagementView: React.FC<SQLManagementViewProps> = ({
     setBrowserError(null);
     try {
       const sql = buildSQLTableListQuery(activeEngine);
-      const cmd = buildSQLClientCommand(activeEngine, sql, targetDb, effectiveOverrides, false);
-      const res = await fetch('/api/terminal/exec', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nodeId: node.id,
-          command: cmd,
-        }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+      // Prefer the native Go database driver (no CLI dependency) and fall
+      // back to the vendor CLI only when the driver cannot connect.
+      let tables: string[] = [];
+      let nativeOk = false;
+      let nativeError: string | null = null;
+      try {
+        const driverRes = await fetch(
+          `/api/nodes/${encodeURIComponent(node.id)}/plugins/database/unified/query`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              engine: activeEngine,
+              database: targetDb,
+              host: effectiveOverrides[`${activeEngine}_host`] || undefined,
+              port: Number(effectiveOverrides[`${activeEngine}_port`]) || undefined,
+              user: effectiveOverrides[`${activeEngine}_user`] || undefined,
+              password: effectiveOverrides[`${activeEngine}_password`] || undefined,
+              socket: effectiveOverrides[`${activeEngine}_socket`] || undefined,
+              query: sql,
+            }),
+          }
+        );
+        if (driverRes.ok) {
+          const out = await driverRes.json();
+          if (out.error) {
+            // Surface the real driver error (auth, connectivity, ...) instead
+            // of silently falling back to a CLI that may not be installed.
+            throw new Error(out.error);
+          }
+          if (!out.fallback) {
+            const driverRows: any[][] = Array.isArray(out.rows) ? out.rows : [];
+            tables = driverRows
+              .map(row => (Array.isArray(row) ? String(row[0] ?? '').trim() : ''))
+              .filter(t => t.length > 0);
+            nativeOk = true;
+          }
+        } else {
+          const text = await driverRes.text();
+          throw new Error(`HTTP ${driverRes.status}: ${text || driverRes.statusText}`);
+        }
+      } catch (err: any) {
+        nativeError = err?.message || 'Failed to load tables';
+        nativeOk = false;
       }
-      const json = await res.json();
-      if (json.exitCode !== 0 && json.exitCode !== undefined) {
-        setBrowserError(json.stderr || json.stdout || `Failed to list tables (exit ${json.exitCode})`);
+
+      if (nativeError && !nativeOk) {
+        setBrowserError(nativeError);
         setBrowserTables([]);
-      } else {
+        setBrowserLoadingTables(false);
+        return;
+      }
+
+      if (!nativeOk) {
+        const cmd = buildSQLClientCommand(activeEngine, sql, targetDb, effectiveOverrides, false);
+        const res = await fetch('/api/terminal/exec', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            nodeId: node.id,
+            command: cmd,
+          }),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+        }
+        const json = await res.json();
+        if (json.exitCode !== 0 && json.exitCode !== undefined) {
+          setBrowserError(json.stderr || json.stdout || `Failed to list tables (exit ${json.exitCode})`);
+          setBrowserTables([]);
+          return;
+        }
         const raw = String(json.stdout || '');
-        const tables = raw
+        tables = raw
           .split('\n')
           .map(l => l.trim())
           .filter(l => l && !l.startsWith('(') && !/^[-+]+$/.test(l));
-        setBrowserTables(tables);
       }
+      setBrowserTables(tables);
     } catch (err: any) {
       setBrowserError(err?.message || 'Failed to load tables');
     } finally {
@@ -883,25 +959,83 @@ export const SQLManagementView: React.FC<SQLManagementViewProps> = ({
     setBrowserSortCol(null);
     try {
       const sql = buildSQLBrowseRowsQuery(activeEngine, tableName, limitVal, offsetVal);
-      const cmd = buildSQLClientCommand(activeEngine, sql, targetDb, effectiveOverrides, true);
-      const res = await fetch('/api/terminal/exec', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nodeId: node.id,
-          command: cmd,
-        }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+      // Prefer the native Go driver (no CLI dependency, no shell escaping
+      // issues) and fall back to the vendor CLI only when the driver cannot
+      // handle this statement.
+      let nativeOk = false;
+      let nativeError: string | null = null;
+      try {
+        const driverRes = await fetch(
+          `/api/nodes/${encodeURIComponent(node.id)}/plugins/database/unified/query`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              engine: activeEngine,
+              database: targetDb,
+              host: effectiveOverrides[`${activeEngine}_host`] || undefined,
+              port: Number(effectiveOverrides[`${activeEngine}_port`]) || undefined,
+              user: effectiveOverrides[`${activeEngine}_user`] || undefined,
+              password: effectiveOverrides[`${activeEngine}_password`] || undefined,
+              socket: effectiveOverrides[`${activeEngine}_socket`] || undefined,
+              query: sql,
+            }),
+          }
+        );
+        if (driverRes.ok) {
+          const out = await driverRes.json();
+          if (out.error) {
+            nativeError = out.error;
+          } else if (!out.fallback) {
+            const driverRows: any[][] = Array.isArray(out.rows) ? out.rows : [];
+            const driverColumns: string[] = Array.isArray(out.columns) ? out.columns : [];
+            setBrowserRowsResult({
+              columns: driverColumns,
+              rows: driverRows.map(row =>
+                row.map(cell => (cell === null || cell === undefined ? null : String(cell)))
+              ),
+              rowCount: driverRows.length,
+              rawText: '',
+              isTabular: true,
+            });
+            nativeOk = true;
+          }
+        } else {
+          const text = await driverRes.text();
+          nativeError = `HTTP ${driverRes.status}: ${text || driverRes.statusText}`;
+        }
+      } catch (err: any) {
+        nativeError = err?.message || 'Failed to fetch table rows';
       }
-      const json = await res.json();
-      if (json.exitCode !== 0 && json.exitCode !== undefined) {
-        setBrowserError(json.stderr || json.stdout || `Failed to fetch table rows (exit ${json.exitCode})`);
+
+      if (nativeError && !nativeOk) {
+        setBrowserError(nativeError);
         setBrowserRowsResult(null);
-      } else {
-        setBrowserRowsResult(parseTabularOutput(json.stdout || ''));
+        setBrowserLoadingRows(false);
+        return;
+      }
+
+      if (!nativeOk) {
+        const cmd = buildSQLClientCommand(activeEngine, sql, targetDb, effectiveOverrides, true);
+        const res = await fetch('/api/terminal/exec', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            nodeId: node.id,
+            command: cmd,
+          }),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+        }
+        const json = await res.json();
+        if (json.exitCode !== 0 && json.exitCode !== undefined) {
+          setBrowserError(json.stderr || json.stdout || `Failed to fetch table rows (exit ${json.exitCode})`);
+          setBrowserRowsResult(null);
+        } else {
+          setBrowserRowsResult(parseTabularOutput(json.stdout || ''));
+        }
       }
     } catch (err: any) {
       setBrowserError(err?.message || 'Failed to load table rows');
@@ -1153,11 +1287,31 @@ export const SQLManagementView: React.FC<SQLManagementViewProps> = ({
         </div>
       </div>
 
-      {/* Main Content Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Left Column: Databases & Users */}
-        <div className="lg:col-span-5 flex flex-col gap-4">
-          {/* Databases Panel */}
+      {/* View tabs: Browse / Query / Databases / Users */}
+      <div data-testid="sql-view-tabs" className="flex flex-wrap items-center gap-1 border-b border-[#26293c] pb-2">
+        {([
+          { id: 'browse', label: 'Browse Data', icon: 'table_view' },
+          { id: 'query', label: 'SQL Query', icon: 'terminal' },
+          { id: 'databases', label: `Databases (${currentEngineData.databases?.length || 0})`, icon: 'folder' },
+          { id: 'users', label: `Users (${currentEngineData.users?.length || 0})`, icon: 'group' },
+        ] as const).map(t => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setActiveView(t.id)}
+            className={`px-3 py-1.5 rounded-t border-b-2 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors ${
+              activeView === t.id
+                ? 'border-[#b0c9ff] text-[#b0c9ff] bg-[#171a2d]'
+                : 'border-transparent text-[#8d909b] hover:text-[#dfe1fa]'
+            }`}
+          >
+            <span className="material-symbols-outlined text-[14px]">{t.icon}</span>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {activeView === 'databases' && (
           <div className="bg-[#171a2d] border border-[#26293c] rounded p-3 flex flex-col gap-2">
             <div className="flex items-center justify-between text-[#dfe1fa] font-bold border-b border-[#26293c] pb-2">
               <span className="flex items-center gap-1">
@@ -1195,8 +1349,9 @@ export const SQLManagementView: React.FC<SQLManagementViewProps> = ({
               </div>
             )}
           </div>
+      )}
 
-          {/* Users & Roles Panel */}
+      {activeView === 'users' && (
           <div className="bg-[#171a2d] border border-[#26293c] rounded p-3 flex flex-col gap-2">
             <div className="flex items-center justify-between text-[#dfe1fa] font-bold border-b border-[#26293c] pb-2">
               <span className="flex items-center gap-1">
@@ -1236,10 +1391,9 @@ export const SQLManagementView: React.FC<SQLManagementViewProps> = ({
               </div>
             )}
           </div>
-        </div>
+      )}
 
-        {/* Right Column: SQL Query Workbench & Table View */}
-        <div className="lg:col-span-7 flex flex-col gap-4">
+      {activeView === 'query' && (
           <div className="bg-[#171a2d] border border-[#26293c] rounded p-3 flex flex-col gap-3">
             <div className="flex items-center justify-between">
               <span className="font-bold text-[12px] text-[#dfe1fa] flex items-center gap-1.5">
@@ -1355,10 +1509,9 @@ export const SQLManagementView: React.FC<SQLManagementViewProps> = ({
               )}
             </div>
           </div>
-        </div>
-      </div>
+      )}
 
-      {/* SQL Data Browser Panel (browse tables & rows without writing SQL) */}
+      {activeView === 'browse' && (
       <div
         data-testid="sql-data-browser"
         className="bg-[#171a2d] border border-[#26293c] rounded p-3 flex flex-col gap-3"
@@ -1580,6 +1733,7 @@ export const SQLManagementView: React.FC<SQLManagementViewProps> = ({
           </div>
         </div>
       </div>
+      )}
 
       {/* Dump Database Modal */}
       {dumpModalOpen && (

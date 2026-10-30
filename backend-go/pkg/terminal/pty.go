@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/creack/pty"
@@ -97,14 +97,32 @@ func (s *sshPTYSession) Close() error {
 	return err
 }
 
+// isLocalNode checks if a node represents the local machine (localhost).
+// Mirrors the logic in websocket hub for consistency.
+func isLocalNode(node *nodeapi.Object) bool {
+	if node == nil {
+		return false
+	}
+	ip, _ := node.GetString("ip")
+	shortName, _ := node.GetString("shortName")
+	name, _ := node.GetString("name")
+	return ip == "127.0.0.1" ||
+		ip == "localhost" ||
+		ip == "::1" ||
+		shortName == "localhost" ||
+		name == "localhost"
+}
+
 // OpenLocalPTY spawns a local PTY session running bash/sh.
 func OpenLocalPTY(cols, rows int) (PTYSession, error) {
+	log.Printf("pty: opening local PTY cols=%d rows=%d", cols, rows)
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/bash"
 	}
 	if _, err := exec.LookPath(shell); err != nil {
 		shell = "/bin/sh"
+		log.Printf("pty: bash not found, falling back to %s", shell)
 	}
 
 	cmd := exec.Command(shell)
@@ -123,9 +141,11 @@ func OpenLocalPTY(cols, rows int) (PTYSession, error) {
 
 	ptmx, err := pty.StartWithSize(cmd, ws)
 	if err != nil {
+		log.Printf("pty: failed to start pty: %v", err)
 		return nil, fmt.Errorf("failed to start pty: %w", err)
 	}
 
+	log.Printf("pty: local PTY allocated successfully (fd=%d)", ptmx.Fd())
 	return &localPTYSession{
 		cmd:  cmd,
 		ptmx: ptmx,
@@ -139,7 +159,6 @@ func OpenSSHPTY(ctx context.Context, pool *sshclient.ClientPool, node *nodeapi.O
 	}
 
 	ip, _ := node.GetString("ip")
-	shortName, _ := node.GetString("shortName")
 	tailscaleHost, _ := node.GetString("tailscaleHost")
 	tailscaleIp, _ := node.GetString("tailscaleIp")
 	sshUser, _ := node.GetString("sshUser")
@@ -163,11 +182,7 @@ func OpenSSHPTY(ctx context.Context, pool *sshclient.ClientPool, node *nodeapi.O
 		effectiveUser = "core"
 	}
 
-	isLocal := ip == "127.0.0.1" ||
-		ip == "localhost" ||
-		shortName == "dev-pc" ||
-		shortName == "dev-pc (local)" ||
-		strings.HasPrefix(tailscaleHost, "dev-pc")
+	isLocal := isLocalNode(node)
 
 	if isLocal || pool == nil {
 		return OpenLocalPTY(cols, rows)
@@ -184,18 +199,30 @@ func OpenSSHPTY(ctx context.Context, pool *sshclient.ClientPool, node *nodeapi.O
 		return nil, fmt.Errorf("no host address available for node")
 	}
 
+	vaultSecretID, _ := node.GetString("vaultSecretId")
+	authMethod, _ := node.GetString("authMethod")
+
 	cfg := sshclient.Config{
-		Host: targetHost,
-		Port: port,
-		User: effectiveUser,
+		Host:          targetHost,
+		Port:          port,
+		User:          effectiveUser,
+		VaultSecretID: vaultSecretID,
+		AuthMethod:    authMethod,
 	}
 
 	client, err := pool.GetClient(ctx, cfg)
 	if err != nil {
-		// Fallback to local PTY if connection fails
 		return nil, fmt.Errorf("ssh get client failed: %w", err)
 	}
 
+	return OpenSSHPTYWithClient(client, cols, rows)
+}
+
+// OpenSSHPTYWithClient opens an interactive PTY shell over an
+// already-authenticated SSH client. The caller owns session lifecycle only:
+// the client itself is typically pooled by a connection plugin and must NOT
+// be closed here.
+func OpenSSHPTYWithClient(client *ssh.Client, cols, rows int) (PTYSession, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("ssh new session failed: %w", err)

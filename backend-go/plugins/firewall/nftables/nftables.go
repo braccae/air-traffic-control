@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -124,6 +125,79 @@ type ParsedFirewallRule struct {
 	Source    string `json:"source"`
 	Interface string `json:"interface"`
 	Comment   string `json:"comment"`
+}
+
+// NATForwardPort describes one DNAT port-forward entry observed in a ruleset.
+type NATForwardPort struct {
+	Port   string `json:"port"`
+	Proto  string `json:"proto"`
+	ToPort string `json:"toport"`
+	ToAddr string `json:"toaddr,omitempty"`
+}
+
+// nftDNATRe matches "tcp dport 8080 dnat to 10.0.0.5:80" and the address-less
+// form "dnat to :80" (same-host forwarding).
+var nftDNATRe = regexp.MustCompile(`(?:(\w+)\s+dport\s+(\S+)\s+)?dnat\s+to\s+([^\s:]*):(\S+)`)
+
+// ParseNftNAT extracts NAT state from `nft list ruleset`: whether masquerade is
+// present in a postrouting chain and which DNAT forwards exist in prerouting.
+func ParseNftNAT(raw string) (bool, []NATForwardPort) {
+	forwardPorts := []NATForwardPort{}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.Contains(trimmed, "NO_NFT") {
+		return false, forwardPorts
+	}
+
+	// JSON rulesets are only scanned best-effort; the textual ruleset is the
+	// authoritative source for masquerade / DNAT inspection.
+	if strings.HasPrefix(trimmed, "{") {
+		masquerade := strings.Contains(trimmed, `"masquerade"`)
+		for _, m := range nftDNATRe.FindAllStringSubmatch(trimmed, -1) {
+			fp := NATForwardPort{Proto: "tcp", Port: "all", ToPort: m[4], ToAddr: m[3]}
+			if m[1] != "" {
+				fp.Proto = strings.ToLower(m[1])
+			}
+			if m[2] != "" {
+				fp.Port = m[2]
+			}
+			forwardPorts = append(forwardPorts, fp)
+		}
+		return masquerade, forwardPorts
+	}
+
+	masquerade := false
+	chain := ""
+	for _, line := range strings.Split(trimmed, "\n") {
+		t := strings.TrimSpace(line)
+		if m := nftChainRe.FindStringSubmatch(t); len(m) == 2 {
+			chain = strings.ToLower(m[1])
+			continue
+		}
+		if t == "}" {
+			chain = ""
+			continue
+		}
+		switch chain {
+		case "postrouting":
+			if strings.Contains(strings.ToLower(t), "masquerade") {
+				masquerade = true
+			}
+		case "prerouting":
+			m := nftDNATRe.FindStringSubmatch(t)
+			if len(m) != 5 {
+				continue
+			}
+			fp := NATForwardPort{Proto: "tcp", Port: "all", ToPort: m[4], ToAddr: m[3]}
+			if m[1] != "" {
+				fp.Proto = strings.ToLower(m[1])
+			}
+			if m[2] != "" {
+				fp.Port = m[2]
+			}
+			forwardPorts = append(forwardPorts, fp)
+		}
+	}
+	return masquerade, forwardPorts
 }
 
 func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (plugin.Detection, error) {
@@ -423,6 +497,7 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 			ports = append(ports, fmt.Sprintf("%s/%s", rule.Port, rule.Proto))
 		}
 	}
+	masquerade, forwardPorts := ParseNftNAT(out)
 
 	status := "inactive"
 	if len(tables) > 0 || len(rules) > 0 {
@@ -438,6 +513,8 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 		"services":       []string{},
 		"ports":          ports,
 		"rules":          rules,
+		"masquerade":     masquerade,
+		"forwardPorts":   forwardPorts,
 	}, nil
 }
 
@@ -481,6 +558,40 @@ func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
 			ConfirmPrompt:    "Drop or reject traffic on the specified port in nftables?",
 			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
 		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "masquerade",
+				Label:       "Toggle Masquerade",
+				Description: "Enable or disable source NAT masquerade in the nftables postrouting chain (enables outbound routing for NAT'd guests)",
+				Options: []plugin.OptionSchema{
+					{Name: "enabled", Type: "bool", Required: false, Default: true, Description: "true enables masquerade, false removes it"},
+					{Name: "table", Type: "string", Required: false, Default: "inet filter", Description: "Target nftables family and table"},
+				},
+			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
+		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "forward_port",
+				Label:       "Forward Port (DNAT)",
+				Description: "Forward an external port to an internal host and port with an nftables prerouting DNAT rule plus a matching forward accept",
+				Options: []plugin.OptionSchema{
+					{Name: "port", Type: "string", Required: true, Description: "External port (single port, e.g. 8080)"},
+					{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp or udp"},
+					{Name: "toport", Type: "string", Required: true, Description: "Internal destination port (e.g. 80)"},
+					{Name: "toaddr", Type: "string", Required: false, Description: "Internal destination IP (blank = same host)"},
+					{Name: "table", Type: "string", Required: false, Default: "inet filter", Description: "Target nftables family and table"},
+					{Name: "state", Type: "select", Enum: []string{"enabled", "disabled"}, Default: "enabled", Description: "Rule state"},
+				},
+			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
+		},
 	}
 }
 
@@ -495,10 +606,7 @@ func (p *Plugin) Actions() []plugin.ActionSpec {
 
 // ValidateAction validates an nftables action name and option map against the v2 ManagementActionSpec.
 func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
-	norm := strings.ToLower(strings.TrimSpace(action))
-	if norm == "port" {
-		norm = "allow_port"
-	}
+	norm := normalizeNFTAction(action)
 
 	var matched *newapi.ManagementActionSpec
 	for _, spec := range p.ManagementActions() {
@@ -512,6 +620,15 @@ func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[stri
 		return fmt.Errorf("unsupported nftables action: %s", action)
 	}
 	if err := newapi.ValidateManagementOptions(*matched, opts); err != nil {
+		return err
+	}
+
+	switch norm {
+	case "masquerade":
+		_, err := resolveMasqueradeEnabled(opts)
+		return err
+	case "forward_port":
+		_, err := parseNATForwardOptions(opts)
 		return err
 	}
 
@@ -543,6 +660,131 @@ func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[stri
 	}
 
 	return nil
+}
+
+func normalizeNFTAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "port", "allow_port":
+		return "allow_port"
+	case "deny_port":
+		return "deny_port"
+	case "forward_port", "forward-port", "port_forward":
+		return "forward_port"
+	case "masquerade", "toggle_masquerade":
+		return "masquerade"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+// resolveMasqueradeEnabled reads the boolean "enabled" option (also accepting
+// enabled/disabled strings and a "state" selector) for the masquerade action.
+func resolveMasqueradeEnabled(opts map[string]any) (bool, error) {
+	if raw, ok := opts["enabled"]; ok && raw != nil {
+		switch v := raw.(type) {
+		case bool:
+			return v, nil
+		case string:
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "true", "enabled", "enable", "yes", "1", "on":
+				return true, nil
+			case "false", "disabled", "disable", "no", "0", "off":
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("invalid enabled value %v: must be a boolean or enabled/disabled", raw)
+	}
+	if st, ok := opts["state"].(string); ok && strings.TrimSpace(st) != "" {
+		switch strings.ToLower(strings.TrimSpace(st)) {
+		case "enabled", "present":
+			return true, nil
+		case "disabled", "absent":
+			return false, nil
+		}
+		return false, fmt.Errorf("invalid state %q: must be enabled or disabled", st)
+	}
+	return true, nil
+}
+
+// natForwardSpec is the normalized form of a DNAT port-forward request.
+type natForwardSpec struct {
+	Port   string
+	Proto  string
+	ToPort string
+	ToAddr string
+	Absent bool
+}
+
+func parseNATForwardOptions(opts map[string]any) (natForwardSpec, error) {
+	spec := natForwardSpec{Proto: "tcp"}
+
+	rawPort, _ := opts["port"].(string)
+	port, err := validateNftPort(rawPort)
+	if err != nil {
+		return spec, err
+	}
+	if strings.Contains(port, "-") {
+		return spec, fmt.Errorf("port ranges are not supported for DNAT forwarding; provide a single external port")
+	}
+	spec.Port = port
+
+	if rawProto, ok := opts["proto"].(string); ok && strings.TrimSpace(rawProto) != "" {
+		proto := strings.ToLower(strings.TrimSpace(rawProto))
+		if proto != "tcp" && proto != "udp" {
+			return spec, fmt.Errorf("invalid protocol %q: must be tcp or udp", rawProto)
+		}
+		spec.Proto = proto
+	}
+
+	rawTo, _ := opts["toport"].(string)
+	toPort, err := validateNftPort(rawTo)
+	if err != nil {
+		return spec, fmt.Errorf("internal destination port: %w", err)
+	}
+	if strings.Contains(toPort, "-") {
+		return spec, fmt.Errorf("port ranges are not supported for DNAT forwarding; provide a single internal port")
+	}
+	spec.ToPort = toPort
+
+	if rawAddr, ok := opts["toaddr"].(string); ok && strings.TrimSpace(rawAddr) != "" {
+		addr := strings.TrimSpace(rawAddr)
+		if net.ParseIP(addr) == nil {
+			return spec, fmt.Errorf("invalid destination address %q: must be an IP address", addr)
+		}
+		spec.ToAddr = addr
+	}
+
+	if st, ok := opts["state"].(string); ok && strings.EqualFold(strings.TrimSpace(st), "disabled") {
+		spec.Absent = true
+	}
+	if en, ok := opts["enabled"].(bool); ok && !en {
+		spec.Absent = true
+	}
+
+	return spec, nil
+}
+
+// resolveNftTable resolves and validates the "<family> <table>" target.
+func resolveNftTable(opts map[string]any) (string, error) {
+	table, _ := opts["table"].(string)
+	table = strings.TrimSpace(table)
+	if table == "" {
+		table = defaultNftTable()
+	}
+	if !safeNftIdentifierRe.MatchString(table) || len(strings.Fields(table)) != 2 {
+		return "", fmt.Errorf("invalid nftables table %q: expected '<family> <table>'", table)
+	}
+	return table, nil
+}
+
+// nftDeleteByMatch removes every rule in chain whose printed form contains match.
+// nftables has no match-based delete, so handles are resolved first (last field
+// of `nft -a list chain` output is the handle number).
+func nftDeleteByMatch(table, chain, match string) string {
+	return fmt.Sprintf(
+		"nft -a list chain %s %s 2>/dev/null | awk 'index($0,\"%s\"){print $NF}' | while read -r h; do nft delete rule %s %s handle \"$h\"; done || true",
+		table, chain, match, table, chain,
+	)
 }
 
 var safeNftIdentifierRe = regexp.MustCompile(`^[a-zA-Z0-9_\-\s]+$`)
@@ -595,7 +837,7 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 		return plugin.TaskSpec{}, err
 	}
 
-	norm := strings.ToLower(strings.TrimSpace(action))
+	norm := normalizeNFTAction(action)
 	switch norm {
 	case "allow_port", "port", "deny_port":
 		rawPort, _ := opts["port"].(string)
@@ -663,6 +905,112 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 					Module: "ansible.builtin.command",
 					Params: map[string]any{
 						"cmd":    nftCmd,
+						"become": true,
+					},
+				},
+			},
+		}, nil
+
+	case "masquerade":
+		enabled, err := resolveMasqueradeEnabled(opts)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+		table, err := resolveNftTable(opts)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+
+		verb := "Enable"
+		if !enabled {
+			verb = "Disable"
+		}
+		title := fmt.Sprintf("%s nftables masquerade in %s postrouting", verb, table)
+
+		cmds := []string{
+			fmt.Sprintf("nft list table %s >/dev/null 2>&1 || nft add table %s", table, table),
+			fmt.Sprintf("nft list chain %s postrouting >/dev/null 2>&1 || nft add chain %s postrouting '{ type nat hook postrouting priority srcnat; policy accept; }'", table, table),
+		}
+		if enabled {
+			cmds = append(cmds, fmt.Sprintf("nft list chain %s postrouting | grep -qw masquerade || nft add rule %s postrouting masquerade", table, table))
+		} else {
+			cmds = append(cmds, nftDeleteByMatch(table, "postrouting", "masquerade"))
+		}
+
+		// Documented last resort (AGENTS.md §5): no native Ansible module mutates
+		// individual nftables rules, and the idempotent "create only if missing"
+		// guards require shell composition (pipes, conditionals).
+		return plugin.TaskSpec{
+			Name: title,
+			Steps: []plugin.TaskStep{
+				{
+					Name:   title,
+					Module: "ansible.builtin.shell",
+					Params: map[string]any{
+						"cmd":    strings.Join(cmds, "; "),
+						"become": true,
+					},
+				},
+			},
+		}, nil
+
+	case "forward_port":
+		spec, err := parseNATForwardOptions(opts)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+		table, err := resolveNftTable(opts)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+
+		dnatRule := fmt.Sprintf("%s dport %s dnat to %s:%s", spec.Proto, spec.Port, spec.ToAddr, spec.ToPort)
+		acceptRule := fmt.Sprintf("%s dport %s accept", spec.Proto, spec.ToPort)
+		if spec.ToAddr != "" {
+			acceptRule = fmt.Sprintf("ip daddr %s %s dport %s accept", spec.ToAddr, spec.Proto, spec.ToPort)
+		}
+
+		target := "same host"
+		if spec.ToAddr != "" {
+			target = spec.ToAddr
+		}
+
+		if spec.Absent {
+			title := fmt.Sprintf("Remove nftables port forward %s/%s to %s:%s", spec.Port, spec.Proto, target, spec.ToPort)
+			// Documented last resort (AGENTS.md §5): match-based removal needs
+			// handle resolution through shell composition.
+			return plugin.TaskSpec{
+				Name: title,
+				Steps: []plugin.TaskStep{
+					{
+						Name:   title,
+						Module: "ansible.builtin.shell",
+						Params: map[string]any{
+							"cmd":    strings.Join([]string{nftDeleteByMatch(table, "prerouting", dnatRule), nftDeleteByMatch(table, "forward", acceptRule)}, "; "),
+							"become": true,
+						},
+					},
+				},
+			}, nil
+		}
+
+		title := fmt.Sprintf("Forward nftables %s/%s to %s:%s", spec.Port, spec.Proto, target, spec.ToPort)
+		cmds := []string{
+			fmt.Sprintf("nft list table %s >/dev/null 2>&1 || nft add table %s", table, table),
+			fmt.Sprintf("nft list chain %s prerouting >/dev/null 2>&1 || nft add chain %s prerouting '{ type nat hook prerouting priority dstnat; policy accept; }'", table, table),
+			fmt.Sprintf("nft list chain %s forward >/dev/null 2>&1 || nft add chain %s forward '{ type filter hook forward priority filter; policy accept; }'", table, table),
+			fmt.Sprintf("nft list chain %s prerouting | grep -Fq '%s' || nft add rule %s prerouting %s", table, dnatRule, table, dnatRule),
+			fmt.Sprintf("nft list chain %s forward | grep -Fq '%s' || nft add rule %s forward %s", table, acceptRule, table, acceptRule),
+		}
+
+		return plugin.TaskSpec{
+			Name: title,
+			Steps: []plugin.TaskStep{
+				{
+					Name:   title,
+					Module: "ansible.builtin.shell",
+					Params: map[string]any{
+						"cmd":    strings.Join(cmds, "; "),
 						"become": true,
 					},
 				},

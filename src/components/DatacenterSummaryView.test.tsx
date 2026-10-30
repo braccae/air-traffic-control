@@ -49,8 +49,7 @@ const baseProps = {
   tasks: [] as GlobalTaskItem[],
   onSelectNode: noop,
   onOpenPlaybookModal: noop,
-  onOpenPlaybookEditor: noop,
-  onOpenGroupVars: noop,
+  onOpenSetting: noop,
 };
 
 test('renders the datacenter quick actions and cluster stats from real node data', () => {

@@ -52,7 +52,7 @@ func (c *Client) FetchTelemetry(nodeID string) (*types.Telemetry, error) {
 	}
 
 	// If REST API fails or is unavailable, check if target is local to fall back to glances CLI
-	isLocal := c.host == "127.0.0.1" || c.host == "localhost" || c.host == "dev-pc" || c.host == "" || strings.HasPrefix(c.host, "127.")
+	isLocal := c.host == "127.0.0.1" || c.host == "localhost" || c.host == "::1" || c.host == "" || strings.HasPrefix(c.host, "127.")
 	if isLocal {
 		// 15s: under parallel `go test ./...` load across all packages, a real
 		// `glances --stdout-json` invocation on a busy host can take 8-12s.

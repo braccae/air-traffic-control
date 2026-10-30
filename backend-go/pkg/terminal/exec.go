@@ -5,12 +5,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
 	"air-traffic-control/backend/pkg/hostcache"
 	"air-traffic-control/backend/pkg/nodeapi"
 )
+
+
+// secretPatterns match inline credentials that must never be persisted into the
+// task history or the console feed (see the secret-protection invariant).
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(\b[A-Z0-9_]*(?:PASSWORD|PASSWD|PWD|SECRET|TOKEN|API_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*=\s*)('?)[^'"\s]+`),
+	regexp.MustCompile(`(?i)(--password(?:=|\s+))('?)[^'"\s]+`),
+	regexp.MustCompile(`(?i)(--token(?:=|\s+))('?)[^'"\s]+`),
+}
+
+// RedactSecrets masks inline credentials before a command is recorded anywhere
+// the operator can read it back.
+func RedactSecrets(cmd string) string {
+	for _, re := range secretPatterns {
+		cmd = re.ReplaceAllString(cmd, "${1}${2}••••••••")
+	}
+	return cmd
+}
 
 // NodeResolver resolves node details by query.
 type NodeResolver interface {
@@ -89,6 +108,17 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 		targetNode, _ = a.resolver.FindNode(targetQuery)
 	}
 
+	if targetNode == nil {
+		tq := strings.TrimSpace(targetQuery)
+		if tq == "" || tq == "localhost" || tq == "127.0.0.1" || tq == "::1" || tq == "local" || tq == "node-localhost" {
+			targetNode = nodeapi.NewObject()
+			targetNode.SetString("id", "node-localhost")
+			targetNode.SetString("name", "localhost")
+			targetNode.SetString("shortName", "localhost")
+			targetNode.SetString("ip", "127.0.0.1")
+		}
+	}
+
 	nodeID := targetQuery
 	if targetNode != nil {
 		if id, ok := targetNode.GetString("id"); ok && id != "" {
@@ -131,7 +161,7 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 		_ = a.store.SaveTask(hostcache.Task{
 			ID:          taskID,
 			NodeTarget:  nodeID,
-			Description: fmt.Sprintf("Terminal: %s", cmd),
+			Description: fmt.Sprintf("Terminal: %s", RedactSecrets(cmd)),
 			Status:      "RUNNING",
 			StartTime:   startTimeStr,
 			UpdatedAt:   now,
@@ -142,6 +172,8 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 	var runErr error
 	if a.runner != nil && targetNode != nil {
 		output, runErr = a.runner.RunNodeCommand(r.Context(), targetNode, fmt.Sprintf("%s 2>&1", cmd), 8*time.Second)
+	} else if a.runner != nil {
+		output, runErr = a.runner.RunNodeCommand(r.Context(), nil, fmt.Sprintf("%s 2>&1", cmd), 8*time.Second)
 	} else {
 		runErr = fmt.Errorf("no runner or node available")
 	}
@@ -156,7 +188,7 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 			_ = a.store.SaveTask(hostcache.Task{
 				ID:          taskID,
 				NodeTarget:  nodeID,
-				Description: fmt.Sprintf("Terminal: %s", cmd),
+				Description: fmt.Sprintf("Terminal: %s", RedactSecrets(cmd)),
 				Status:      "OK",
 				Progress:    100,
 				ProgressEta: "Completed (exit code 0)",
@@ -184,7 +216,7 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 			_ = a.store.SaveTask(hostcache.Task{
 				ID:          taskID,
 				NodeTarget:  nodeID,
-				Description: fmt.Sprintf("Terminal: %s", cmd),
+				Description: fmt.Sprintf("Terminal: %s", RedactSecrets(cmd)),
 				Status:      "FAILED",
 				Progress:    100,
 				ProgressEta: "Failed (exit code 1)",
@@ -216,7 +248,7 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 		_ = a.store.SaveTask(hostcache.Task{
 			ID:          taskID,
 			NodeTarget:  nodeID,
-			Description: fmt.Sprintf("Terminal: %s", cmd),
+			Description: fmt.Sprintf("Terminal: %s", RedactSecrets(cmd)),
 			Status:      status,
 			Progress:    100,
 			StartTime:   startTimeStr,

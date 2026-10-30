@@ -94,9 +94,11 @@ export async function findOrBootstrapUv(options?: {
   // Use official installer targeting CARGO_HOME / custom bin
   try {
     const installScript = `curl -LsSf https://astral.sh/uv/install.sh | env CARGO_HOME="${dataDir}" UV_INSTALL_DIR="${binDir}" sh`;
+    const systemPath = [process.env.PATH, '/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin'].filter(Boolean).join(':');
     execSync(installScript, {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 60000,
+      env: { ...process.env, PATH: systemPath },
     });
   } catch (err: any) {
     // If installer script fails or curl not present, throw informative error

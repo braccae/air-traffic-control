@@ -110,6 +110,8 @@ export interface NodeMenuActions {
   onEdit?: (node: any) => void;
   onDelete?: (node: any) => void;
   onCopy?: CopyAction;
+  /** Present when the host currently lives inside a custom folder. */
+  onRemoveFromFolder?: (node: any) => void;
 }
 
 export function buildNodeContextMenu(node: any, actions: NodeMenuActions): ContextMenuItem[] {
@@ -153,6 +155,16 @@ export function buildNodeContextMenu(node: any, actions: NodeMenuActions): Conte
     }
   }
 
+  if (actions.onRemoveFromFolder && node?.folder) {
+    items.push({
+      id: 'node.removeFromFolder',
+      label: 'Remove From Folder',
+      icon: 'folder_off',
+      separatorBefore: true,
+      onSelect: () => actions.onRemoveFromFolder!(node),
+    });
+  }
+
   if (actions.onEdit) {
     items.push({
       id: 'node.edit',
@@ -173,6 +185,80 @@ export function buildNodeContextMenu(node: any, actions: NodeMenuActions): Conte
     });
   }
 
+  return items;
+}
+
+// ---------------------------------------------------------------------------
+// Tag group rows (Tailscale tag inventory chunks)
+// ---------------------------------------------------------------------------
+
+export interface TagMenuActions {
+  onDeleteChunk?: (chunkId: string, tag: string) => void;
+  onRefresh?: (tag: string) => void;
+  onCopy?: CopyAction;
+}
+
+export function buildTagContextMenu(tag: string, chunkId: string | null, actions: TagMenuActions): ContextMenuItem[] {
+  const items: ContextMenuItem[] = [];
+  const onCopy = actions.onCopy;
+  if (onCopy) {
+    items.push(copyItem('tag.copyName', 'Copy Tag Name', tag, onCopy));
+  }
+  if (actions.onRefresh) {
+    items.push({
+      id: 'tag.refresh',
+      label: 'Refresh Members',
+      icon: 'refresh',
+      onSelect: () => actions.onRefresh!(tag),
+    });
+  }
+  if (chunkId && actions.onDeleteChunk) {
+    items.push({
+      id: 'tag.deleteChunk',
+      label: 'Stop Following Tag',
+      icon: 'link_off',
+      danger: true,
+      separatorBefore: true,
+      onSelect: () => actions.onDeleteChunk!(chunkId, tag),
+    });
+  }
+  return items;
+}
+
+// ---------------------------------------------------------------------------
+// Folder rows (custom inventory folders)
+// ---------------------------------------------------------------------------
+
+export interface FolderMenuActions {
+  onDelete?: (folderId: string) => void;
+  onRename?: (folderId: string, name: string) => void;
+  onCopy?: CopyAction;
+}
+
+export function buildFolderContextMenu(folder: { id: string; name: string }, actions: FolderMenuActions): ContextMenuItem[] {
+  const items: ContextMenuItem[] = [];
+  const onCopy = actions.onCopy;
+  if (onCopy) {
+    items.push(copyItem('folder.copyName', 'Copy Folder Name', folder.name, onCopy));
+  }
+  if (actions.onRename) {
+    items.push({
+      id: 'folder.rename',
+      label: 'Rename Folder…',
+      icon: 'edit',
+      onSelect: () => actions.onRename!(folder.id, folder.name),
+    });
+  }
+  if (actions.onDelete) {
+    items.push({
+      id: 'folder.delete',
+      label: 'Delete Folder',
+      icon: 'delete',
+      danger: true,
+      separatorBefore: true,
+      onSelect: () => actions.onDelete!(folder.id),
+    });
+  }
   return items;
 }
 

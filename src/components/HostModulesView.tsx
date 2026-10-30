@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { NodeItem } from '../types/index.ts';
 import { resolvePluginIcon } from '../utils/pluginIcons.ts';
+import { resolveModuleNodeId } from '../utils/nodeTarget.ts';
 
 export interface NodeModuleItem {
   id: string;
@@ -25,7 +26,7 @@ export interface NodeModuleItem {
 }
 
 export interface HostModulesViewProps {
-  node: NodeItem;
+  node: NodeItem | null;
   initialModules?: NodeModuleItem[];
   onOpenQueueTask?: (taskId: string) => void;
   className?: string;
@@ -37,6 +38,7 @@ export const HostModulesView: React.FC<HostModulesViewProps> = ({
   onOpenQueueTask,
   className = '',
 }) => {
+  if (!node) return null;
   const [modules, setModules] = useState<NodeModuleItem[]>(initialModules || []);
   const [loading, setLoading] = useState<boolean>(!initialModules);
   const [installingPlugin, setInstallingPlugin] = useState<string | null>(null);
@@ -44,11 +46,12 @@ export const HostModulesView: React.FC<HostModulesViewProps> = ({
   const [activeFilter, setActiveFilter] = useState<'all' | 'active' | 'available' | 'unsupported'>('all');
 
   const fetchModules = async () => {
-    if (!node?.id) return;
+    const nodeId = resolveModuleNodeId(node.id, null);
+    if (!nodeId) return;
     setLoading(true);
     setNotice(null);
     try {
-      const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/modules`);
+      const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/modules`);
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) {

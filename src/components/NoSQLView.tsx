@@ -191,11 +191,14 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
 
   // Redis key-value browser state
   const [redisKeys, setRedisKeys] = useState<string[]>([]);
+  const [redisScanned, setRedisScanned] = useState(false);
   const [selectedRedisKey, setSelectedRedisKey] = useState<string | null>(null);
   const [inspectedRedisKey, setInspectedRedisKey] = useState<RedisInspectedKey | null>(null);
 
   // MongoDB collection & document browser state
   const [mongoCollections, setMongoCollections] = useState<string[]>([]);
+  // Top-level view tabs: replaces the old stacked panels.
+  const [activeView, setActiveView] = useState<'browse' | 'query' | 'databases' | 'users'>('browse');
   const [selectedMongoCollection, setSelectedMongoCollection] = useState<string | null>(null);
   const [mongoDocuments, setMongoDocuments] = useState<any[]>([]);
 
@@ -546,6 +549,38 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
   };
 
   // NoSQL Data Browser Handlers
+  // Native Go driver first; the vendor CLI is only a fallback when the driver
+  // reports it cannot handle the engine.
+  // Returns the native driver's raw output, or null only when the driver
+  // reports "fallback" (engine unsupported). A real driver error is thrown so
+  // the UI shows it instead of the misleading "redis-cli: command not found".
+  const runNativeRedis = async (command: string, limit?: number): Promise<string | null> => {
+    const res = await fetch(
+      `/api/nodes/${encodeURIComponent(node.id)}/plugins/database/unified/query`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          engine: 'redis',
+          database: browserDb || undefined,
+          host: effectiveOverrides.redis_host || undefined,
+          port: Number(effectiveOverrides.redis_port) || undefined,
+          user: effectiveOverrides.redis_user || undefined,
+          password: effectiveOverrides.redis_password || undefined,
+          query: command,
+          limit,
+        }),
+      }
+    );
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${(await res.text()) || res.statusText}`);
+    }
+    const out = await res.json();
+    if (out.error) throw new Error(out.error);
+    if (out.fallback) return null;
+    return String(out.raw ?? '');
+  };
+
   const handleBrowseRedisKeys = async () => {
     setBrowserLoading(true);
     setBrowserError(null);
@@ -553,6 +588,12 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
     setInspectedRedisKey(null);
     try {
       const pat = browserPattern.trim() || '*';
+      const nativeRaw = await runNativeRedis(`--scan --pattern ${pat}`, browserLimit);
+      if (nativeRaw !== null) {
+        setRedisKeys(nativeRaw.split('\n').map(k => k.trim()).filter(Boolean));
+        setRedisScanned(true);
+        return;
+      }
       const scanCmd = `${buildNoSQLClientCommand(
         'redis',
         `--scan --pattern ${escapeShell(pat)}`,
@@ -576,6 +617,7 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
           .map(k => k.trim())
           .filter(Boolean);
         setRedisKeys(keys);
+        setRedisScanned(true);
       }
     } catch (err: any) {
       setBrowserError(err?.message || 'Failed to scan Redis keys');
@@ -589,6 +631,34 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
     setBrowserLoading(true);
     setBrowserError(null);
     try {
+      // Native driver path: issue TYPE/TTL/value commands directly.
+      const nativeType = await runNativeRedis(`TYPE ${key}`);
+      if (nativeType !== null) {
+        const keyType = nativeType.trim() || 'string';
+        const ttlRaw = await runNativeRedis(`TTL ${key}`);
+        const keyTtl = (ttlRaw ?? '-1').trim();
+        const valueCmd =
+          keyType === 'hash' ? `HGETALL ${key}`
+          : keyType === 'list' ? `LRANGE ${key} 0 99`
+          : keyType === 'set' ? `SMEMBERS ${key}`
+          : keyType === 'zset' ? `ZRANGE ${key} 0 99 WITHSCORES`
+          : `GET ${key}`;
+        const rawVal = (await runNativeRedis(valueCmd)) ?? '';
+        const lines = rawVal ? rawVal.split('\n').filter((l, i, a) => !(i === a.length - 1 && l === '')) : [];
+        const entries: Array<{ field: string; value: string }> = [];
+        if (keyType === 'hash' || keyType === 'zset') {
+          for (let i = 0; i < lines.length; i += 2) {
+            entries.push({ field: lines[i] ?? '', value: lines[i + 1] ?? '' });
+          }
+        } else {
+          lines.forEach((line, idx) => {
+            entries.push({ field: keyType === 'string' ? 'value' : `[${idx}]`, value: line });
+          });
+        }
+        setInspectedRedisKey({ key, type: keyType, ttl: keyTtl, entries, rawValue: rawVal });
+        return;
+      }
+
       const kEsc = escapeShell(key);
       const typeCmd = buildNoSQLClientCommand('redis', `TYPE ${kEsc}`, browserDb, effectiveOverrides);
       const ttlCmd = buildNoSQLClientCommand('redis', `TTL ${kEsc}`, browserDb, effectiveOverrides);
@@ -675,37 +745,85 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
     setMongoDocuments([]);
     try {
       const targetDb = browserDb.trim() || 'admin';
-      const cmd = buildNoSQLClientCommand(
-        'mongodb',
-        'JSON.stringify(db.getCollectionNames())',
-        targetDb,
-        effectiveOverrides
-      );
-      const res = await fetch('/api/terminal/exec', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodeId: node.id, command: cmd }),
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${(await res.text()) || res.statusText}`);
+      // Prefer the native Go mongo driver; fall back to mongosh on failure.
+      let collections: string[] = [];
+      let nativeOk = false;
+      let nativeError: string | null = null;
+      try {
+        const driverRes = await fetch(
+          `/api/nodes/${encodeURIComponent(node.id)}/plugins/database/unified/query`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              engine: 'mongodb',
+              database: targetDb,
+              host: effectiveOverrides.mongodb_host || effectiveOverrides.mongo_host || undefined,
+              port: Number(effectiveOverrides.mongodb_port || effectiveOverrides.mongo_port) || undefined,
+              user: effectiveOverrides.mongodb_user || effectiveOverrides.mongo_user || undefined,
+              query: 'db.getCollectionNames()',
+            }),
+          }
+        );
+        if (driverRes.ok) {
+          const out = await driverRes.json();
+          if (out.error) {
+            throw new Error(out.error);
+          }
+          if (!out.fallback) {
+            const raw = String(out.raw || out.Raw || '').trim();
+            try {
+              const parsed = JSON.parse(raw);
+              collections = Array.isArray(parsed) ? parsed.map(String) : [];
+            } catch {
+              collections = raw.split('\n').map(s => s.trim()).filter(Boolean);
+            }
+            nativeOk = true;
+          }
+        } else {
+          const text = await driverRes.text();
+          throw new Error(`HTTP ${driverRes.status}: ${text || driverRes.statusText}`);
+        }
+      } catch (err: any) {
+        nativeError = err?.message || 'Failed to load MongoDB collections';
+        nativeOk = false;
       }
-      const json = await res.json();
-      if (json.exitCode !== 0 && json.exitCode !== undefined) {
-        setBrowserError(json.stderr || json.stdout || `Failed to list collections (${json.exitCode})`);
-      } else {
+
+      if (nativeError && !nativeOk) {
+        setBrowserError(nativeError);
+        setBrowserLoading(false);
+        return;
+      }
+
+      if (!nativeOk) {
+        const cmd = buildNoSQLClientCommand(
+          'mongodb',
+          'JSON.stringify(db.getCollectionNames())',
+          targetDb,
+          effectiveOverrides
+        );
+        const res = await fetch('/api/terminal/exec', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nodeId: node.id, command: cmd }),
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${(await res.text()) || res.statusText}`);
+        }
+        const json = await res.json();
+        if (json.exitCode !== 0 && json.exitCode !== undefined) {
+          setBrowserError(json.stderr || json.stdout || `Failed to list collections (${json.exitCode})`);
+          return;
+        }
         const raw = String(json.stdout || '').trim();
         try {
           const parsed = JSON.parse(raw);
-          setMongoCollections(Array.isArray(parsed) ? parsed.map(String) : []);
+          collections = Array.isArray(parsed) ? parsed.map(String) : [];
         } catch {
-          setMongoCollections(
-            raw
-              .split('\n')
-              .map(s => s.trim())
-              .filter(Boolean)
-          );
+          collections = raw.split('\n').map(s => s.trim()).filter(Boolean);
         }
       }
+      setMongoCollections(collections);
     } catch (err: any) {
       setBrowserError(err?.message || 'Failed to load MongoDB collections');
     } finally {
@@ -720,6 +838,40 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
     try {
       const targetDb = browserDb.trim() || 'admin';
       const safeCol = colName.replace(/"/g, '\\"');
+      // Native Go driver: run a find command and parse the cursor batch.
+      try {
+        const nativeRes = await fetch(
+          `/api/nodes/${encodeURIComponent(node.id)}/plugins/database/unified/query`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              engine: 'mongodb',
+              database: targetDb,
+              host: effectiveOverrides.mongodb_host || effectiveOverrides.mongo_host || undefined,
+              port: Number(effectiveOverrides.mongodb_port || effectiveOverrides.mongo_port) || undefined,
+              user: effectiveOverrides.mongodb_user || effectiveOverrides.mongo_user || undefined,
+              query: JSON.stringify({ find: colName, limit: browserLimit, filter: {} }),
+            }),
+          }
+        );
+        if (nativeRes.ok) {
+          const out = await nativeRes.json();
+          if (out.error) throw new Error(out.error);
+          if (!out.fallback) {
+            const raw = String(out.raw || '').trim();
+            try {
+              const parsed = JSON.parse(raw);
+              setMongoDocuments(Array.isArray(parsed) ? parsed : [parsed]);
+            } catch {
+              setMongoDocuments(raw ? [{ raw }] : []);
+            }
+            return;
+          }
+        }
+      } catch (nativeErr: any) {
+        if (nativeErr?.message) throw nativeErr;
+      }
       const evalExpr = `JSON.stringify(db.getCollection("${safeCol}").find({}).limit(${browserLimit}).toArray())`;
       const cmd = buildNoSQLClientCommand('mongodb', evalExpr, targetDb, effectiveOverrides);
       const res = await fetch('/api/terminal/exec', {
@@ -981,6 +1133,31 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
         </div>
       )}
 
+      {/* View tabs: Browse / Query / Databases / Users */}
+      <div data-testid="nosql-view-tabs" className="flex flex-wrap items-center gap-1 border-b border-[#26293c] pb-2">
+        {([
+          { id: 'browse', label: 'Browse Data', icon: 'manage_search' },
+          { id: 'query', label: 'Raw Query', icon: 'terminal' },
+          { id: 'databases', label: `Databases (${currentEngineData.databases?.length || 0})`, icon: 'folder' },
+          { id: 'users', label: `Users (${currentEngineData.users?.length || 0})`, icon: 'group' },
+        ] as const).map(t => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setActiveView(t.id)}
+            className={`px-3 py-1.5 rounded-t border-b-2 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors ${
+              activeView === t.id
+                ? 'border-[#b0c9ff] text-[#b0c9ff] bg-[#171a2d]'
+                : 'border-transparent text-[#8d909b] hover:text-[#dfe1fa]'
+            }`}
+          >
+            <span className="material-symbols-outlined text-[14px]">{t.icon}</span>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+
       {loading && !data ? (
         <div className="flex items-center justify-center p-8 text-[#8d909b]">
           <span className="material-symbols-outlined animate-spin mr-2">refresh</span>
@@ -988,9 +1165,8 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            {/* Left Column: Databases & Users Management */}
-            <div className="lg:col-span-5 flex flex-col gap-4">
+          {activeView === 'databases' && (
+            <div className="flex flex-col gap-4">
               {/* Engine Overview Card */}
               <div className="bg-[#171a2d] border border-[#26293c] rounded p-3 flex flex-col gap-2">
                 <div className="flex items-center justify-between">
@@ -1066,6 +1242,11 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
                 </div>
               </div>
 
+            </div>
+          )}
+
+          {activeView === 'users' && (
+            <div className="flex flex-col gap-4">
               {/* Users & ACL Management */}
               <div className="bg-[#171a2d] border border-[#26293c] rounded p-3 flex flex-col gap-2">
                 <div className="flex items-center justify-between border-b border-[#26293c] pb-2">
@@ -1113,26 +1294,26 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
                   )}
                 </div>
               </div>
-
-              {/* Action Form Modal / Inline */}
-              {activeAction && (
-                <div className="bg-[#121528] border border-[#b0c9ff]/40 rounded p-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-bold text-[#b0c9ff]">{activeAction.label}</span>
-                    <button type="button" onClick={() => setActiveAction(null)} className="text-xs text-[#8d909b] hover:text-[#dfe1fa] cursor-pointer">✕</button>
-                  </div>
-                  <PluginActionForm
-                    action={activeAction}
-                    onSubmit={handleActionSubmit}
-                    onCancel={() => setActiveAction(null)}
-                    submitting={submitting}
-                  />
-                </div>
-              )}
             </div>
+          )}
 
-            {/* Right Column: Raw Query Workbench & Data-Shape Specific Results */}
-            <div className="lg:col-span-7 flex flex-col gap-4">
+          {/* Action Form (shown above the active tab's content) */}
+          {activeAction && (
+            <div className="bg-[#121528] border border-[#b0c9ff]/40 rounded p-3">
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-bold text-[#b0c9ff]">{activeAction.label}</span>
+                <button type="button" onClick={() => setActiveAction(null)} className="text-xs text-[#8d909b] hover:text-[#dfe1fa] cursor-pointer">✕</button>
+              </div>
+              <PluginActionForm
+                action={activeAction}
+                onSubmit={handleActionSubmit}
+                onCancel={() => setActiveAction(null)}
+                submitting={submitting}
+              />
+            </div>
+          )}
+
+          {activeView === 'query' && (
               <div className="bg-[#171a2d] border border-[#26293c] rounded p-3 flex flex-col gap-3">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-[12px] text-[#dfe1fa] flex items-center gap-1.5">
@@ -1248,10 +1429,10 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
                   )}
                 </div>
               </div>
-            </div>
-          </div>
+          )}
 
           {/* NoSQL Data Browser Panel (browse KV pairs, documents, collections, etc.) */}
+          {activeView === 'browse' && (
           <div
             data-testid="nosql-data-browser"
             className="bg-[#171a2d] border border-[#26293c] rounded p-3 flex flex-col gap-3"
@@ -1391,7 +1572,9 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
                     ))
                   ) : (
                     <div className="text-center py-6 text-[#8d909b] text-[11px]">
-                      Click <span className="text-[#b0c9ff]">Browse Keys</span> to scan keys in {browserDb || 'db0'}.
+                      {redisScanned
+                        ? `No keys found in ${browserDb || 'db0'} (pattern "${browserPattern || '*'}").`
+                        : <>Click <span className="text-[#b0c9ff]">Browse Keys</span> to scan keys in {browserDb || 'db0'}.</>}
                     </div>
                   )}
                 </div>
@@ -1539,6 +1722,7 @@ export const NoSQLView: React.FC<NoSQLViewProps> = ({
               </div>
             )}
           </div>
+          )}
         </>
       )}
     </div>

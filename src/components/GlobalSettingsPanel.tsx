@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { GlobalSettingsField, GlobalSettingsPage } from '../types/index.ts';
 import {
   buildSettingsPayload,
@@ -19,12 +19,38 @@ export interface GlobalSettingsPanelProps {
 }
 
 /**
+ * Secret fields are write-only: the API only ever returns a mask, so a saved
+ * secret must never become the input's value. Blank every secret in the local
+ * draft while keeping non-secret values intact.
+ */
+export function stripSecretValues(
+  fields: GlobalSettingsField[],
+  values: Record<string, unknown> | undefined
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...(values || {}) };
+  for (const field of fields) {
+    if (field.type === 'secret' || field.secret) {
+      next[field.name] = '';
+    }
+  }
+  return next;
+}
+
+/**
  * Generic renderer for a module-contributed global settings page. The page's
  * field schema (declared by the addon module) drives the form; values are
  * persisted through PUT /api/settings/pages/:id by the Go daemon.
  */
 export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, onSaved, save }) => {
-  const [values, setValues] = useState<Record<string, unknown>>(page.values || {});
+  const [values, setValues] = useState<Record<string, unknown>>(() =>
+    stripSecretValues(page.fields, page.values)
+  );
+
+  // Re-sync when the page is (re)loaded from the daemon: the server response
+  // carries a mask for stored secrets, never the plaintext.
+  useEffect(() => {
+    setValues(stripSecretValues(page.fields, page.values));
+  }, [page]);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
@@ -40,7 +66,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, 
       // never the mask the API returned.
       const payload = buildSettingsPayload(page.fields, values);
       const updated = save ? await save(payload) : await saveGlobalSettingsPage(page.id, payload);
-      setValues(updated.values || {});
+      setValues(stripSecretValues(page.fields, updated.values));
       setFeedback({ type: 'success', message: `Saved ${page.title}.` });
       onSaved?.(updated);
     } catch (err: any) {
@@ -65,6 +91,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, 
               checked={Boolean(raw)}
               onChange={e => setField(field.name, e.target.checked)}
               className="rounded bg-[#121528] border-[#26293c] text-[#1f6feb] focus:ring-0 cursor-pointer"
+              aria-label={field.label}
             />
             <span className="text-xs font-mono text-[#dfe1fa]">{raw ? 'Enabled' : 'Disabled'}</span>
           </label>
@@ -76,6 +103,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, 
             value={String(raw ?? '')}
             onChange={e => setField(field.name, e.target.value)}
             className={`${inputClass} cursor-pointer`}
+            aria-label={field.label}
           >
             <option value="">-- select --</option>
             {(field.options || []).map(opt => (
@@ -98,6 +126,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, 
               setField(field.name, Number.isNaN(parsed) ? '' : parsed);
             }}
             className={inputClass}
+            aria-label={field.label}
           />
         );
         break;
@@ -109,6 +138,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, 
             onChange={e => setField(field.name, e.target.value)}
             rows={3}
             className={inputClass}
+            aria-label={field.label}
           />
         );
         break;
@@ -118,12 +148,15 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, 
         if (isSecret) {
           // The API only ever returns a mask for a stored secret. Never load it
           // into the input: the field stays empty and accepts a replacement.
-          const storedMask = isMaskedSecret(raw) ? String(raw) : '';
+          // The stored hint is derived from the server page (not the local
+          // draft, whose secret is always blanked).
+          const storedRaw = page.values?.[field.name];
+          const storedMask = isMaskedSecret(storedRaw) ? String(storedRaw) : '';
           control = (
             <div className="flex flex-col gap-1">
               <input
                 type="password"
-                value=""
+                value={String(raw ?? '')}
                 autoComplete="new-password"
                 placeholder={storedMask || field.placeholder || 'not set'}
                 onChange={e => setField(field.name, e.target.value)}
@@ -144,6 +177,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({ page, 
             placeholder={field.placeholder}
             onChange={e => setField(field.name, e.target.value)}
             className={inputClass}
+            aria-label={field.label}
           />
         );
       }

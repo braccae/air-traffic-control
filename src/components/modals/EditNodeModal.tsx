@@ -31,6 +31,11 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
   const [port, setPort] = useState(22);
   const [authMethod, setAuthMethod] = useState('ssh-ed25519 (ssh-agent)');
 
+  // Vault secrets for per-host SSH authentication. Only names are exchanged;
+  // values stay encrypted on the coordinator.
+  const [vaultVariables, setVaultVariables] = useState<{ name: string; maskedValue?: string }[]>([]);
+  const [vaultSecretId, setVaultSecretId] = useState<string>('');
+
   // PVE / PBS specific
   const [apiPort, setApiPort] = useState(8006);
   const [apiUser, setApiUser] = useState('root@pam');
@@ -75,6 +80,24 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
   const [testSshOnSave, setTestSshOnSave] = useState(true);
   const [saving, setSaving] = useState(false);
 
+  // Load selectable vault variable names (values are never returned by the API).
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    fetch('/api/vault/variables')
+      .then(res => res.json())
+      .then(data => {
+        if (cancelled) return;
+        if (data?.success && Array.isArray(data.variables)) {
+          setVaultVariables(data.variables);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
   useEffect(() => {
     if (node) {
       setName(node.name || '');
@@ -82,6 +105,7 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
       const nt = (node.nodeType as NodeType) || 'linux';
       setNodeType(nt);
       setSshUser(node.sshUser || (nt === 'windows' ? 'Administrator' : (nt === 'pve' || nt === 'pbs' ? 'root' : nt === 'router_switch' ? 'vyos' : 'core')));
+      setVaultSecretId(node.vaultSecretId || '');
       setPort(node.port || 22);
       setAuthMethod(node.authMethod || 'ssh-ed25519 (ssh-agent)');
       setApiPort(node.apiPort || (nt === 'pbs' ? 8007 : 8006));
@@ -210,6 +234,7 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
         fallbackHost,
         osDescription,
         specs,
+        vaultSecretId,
         pluginOverrides: {
           ...(node.pluginOverrides || {}),
           ...(connectionOverride ? { connection: connectionOverride } : { connection: undefined }),
@@ -351,6 +376,24 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
                     />
                   </div>
                   <div>
+                    <label className="block text-[#8d909b] mb-1 text-[11px]">VAULT SECRET (SSH KEY)</label>
+                    <select
+                      value={vaultSecretId}
+                      onChange={e => setVaultSecretId(e.target.value)}
+                      className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2 py-1.5 text-[#dfe1fa] outline-none"
+                    >
+                      <option value="">-- Select vault variable for SSH key --</option>
+                      {vaultVariables.map(v => (
+                        <option key={v.name} value={v.name}>
+                          {v.name} {v.maskedValue ? `(${v.maskedValue})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[10px] text-[#8d909b] mt-1">
+                      References vault_variables.name; SSH plugin resolves the secret at runtime.
+                    </p>
+                  </div>
+                  <div>
                     <label className="block text-[#8d909b] mb-1 text-[11px]">AUTH METHOD</label>
                     <select
                       value={authMethod}
@@ -361,6 +404,11 @@ export const EditNodeModal: React.FC<EditNodeModalProps> = ({
                       <option value="tailscale-ssh">Tailscale SSH</option>
                       <option value="pam-password">PAM Password</option>
                     </select>
+                  </div>
+                  <div className="md:col-span-3 text-[10px] text-[#8d909b]">
+                    SSH keys and passwords are both Ansible Vault secrets. Leave
+                    VAULT SECRET empty to inherit the credential configured on the
+                    node's tag chunk.
                   </div>
                 </div>
               )}

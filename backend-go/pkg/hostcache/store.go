@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,7 +83,7 @@ func openStore(path string, readOnly bool) (*Store, error) {
 		"PRAGMA foreign_keys = ON;",
 		"PRAGMA journal_mode = WAL;",
 		"PRAGMA synchronous = NORMAL;",
-		"PRAGMA cache_size = 2000;",  // 2000 pages × 4KB = 8MB cache
+		"PRAGMA cache_size = 2000;", // 2000 pages × 4KB = 8MB cache
 		"PRAGMA temp_store = MEMORY;",
 	}
 	if inMemory {
@@ -97,20 +98,39 @@ func openStore(path string, readOnly bool) (*Store, error) {
 	}
 
 	if !readOnly {
-		if _, err := db.Exec(schemaDDL); err != nil {
+		// Check schema version before applying schema
+		version, err := GetCurrentSchemaVersion(db)
+		if err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("hostcache: apply schema: %w", err)
+			return nil, fmt.Errorf("hostcache: get schema version: %w", err)
 		}
-		// Track backup path for in-memory mode snapshots
-		if inMemory {
-			backupPath = path
-		}
-		for _, stmt := range schemaEvolve {
-			if _, err := db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
+
+		// If version is 0 (fresh DB) or doesn't match current SchemaVersion,
+		// perform full schema reset: drop all tables, recreate from schemaDDL.
+		if version == 0 || version != SchemaVersion {
+			// A legacy database (version 0 but with real tables) would otherwise
+			// be destroyed silently. Snapshot it first so the inventory can be
+			// recovered.
+			if err := snapshotBeforeReset(db, path); err != nil {
 				_ = db.Close()
-				return nil, fmt.Errorf("hostcache: evolve schema: %w", err)
+				return nil, fmt.Errorf("hostcache: snapshot before schema reset: %w", err)
+			}
+			if err := resetSchema(db); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("hostcache: reset schema: %w", err)
+			}
+			if err := SetSchemaVersion(db, SchemaVersion); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("hostcache: set schema version: %w", err)
 			}
 		}
+		// If version == SchemaVersion, skip reset entirely — keep existing data.
+
+		// For in-memory mode, use a real disk snapshot path; file mode uses its own path
+		if inMemory {
+			backupPath = "data/hosts-cache-backup.sqlite"
+		}
+
 		// Crash recovery: any background task left in RUNNING or QUEUED state
 		// when the daemon starts up was interrupted by a process exit/restart.
 		if _, err := db.Exec(`
@@ -123,9 +143,110 @@ func openStore(path string, readOnly bool) (*Store, error) {
 			_ = db.Close()
 			return nil, fmt.Errorf("hostcache: recover running tasks: %w", err)
 		}
+
+		// Repair credential references written while upsertHost dropped the
+		// vault_secret_id column: the value exists in node_json but not in the
+		// indexed column, so connections saw no credential at all.
+		if err := backfillVaultSecretIDs(db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("hostcache: backfill vault_secret_id: %w", err)
+		}
 	}
 
 	return &Store{path: path, backupPath: backupPath, db: db, readOnly: readOnly}, nil
+}
+
+// backfillVaultSecretIDs copies the credential reference from node_json into
+// the vault_secret_id column when the column is empty. It is idempotent and
+// runs on every open of a writable database.
+func backfillVaultSecretIDs(db *sql.DB) error {
+	res, err := db.Exec(`
+		UPDATE hosts
+		   SET vault_secret_id = json_extract(node_json, '$.vaultSecretId')
+		 WHERE (vault_secret_id IS NULL OR TRIM(vault_secret_id) = '')
+		   AND json_valid(node_json)
+		   AND json_extract(node_json, '$.vaultSecretId') IS NOT NULL
+		   AND TRIM(json_extract(node_json, '$.vaultSecretId')) <> ''`)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		log.Printf("hostcache: backfilled vault_secret_id for %d host(s) from node_json", n)
+	}
+	return nil
+}
+
+// snapshotBeforeReset preserves an existing database before a destructive
+// schema reset. Version mismatches (including legacy databases with no
+// schema_version row) previously dropped every table with no recovery path;
+// the snapshot guarantees the inventory can still be restored manually.
+func snapshotBeforeReset(db *sql.DB, path string) error {
+	if path == "" || path == ":memory:" {
+		return nil
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Size() == 0 {
+		return nil
+	}
+	base := strings.TrimSuffix(path, ".sqlite")
+	target := fmt.Sprintf("%s.pre-reset-%s.sqlite", base, time.Now().UTC().Format("20060102T150405Z"))
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if _, err := db.Exec("VACUUM INTO ?", target); err != nil {
+		return fmt.Errorf("vacuum into %s: %w", target, err)
+	}
+	log.Printf("hostcache: schema reset snapshotted to %s", target)
+	return nil
+}
+
+// resetSchema drops all user tables and recreates them from schemaDDL and schemaEvolve.
+func resetSchema(db *sql.DB) error {
+	// Get all user table names (excluding sqlite_* system tables)
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		tables = append(tables, name)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Drop all tables
+	for _, table := range tables {
+		if _, err := db.Exec(`DROP TABLE IF EXISTS ` + table); err != nil {
+			return err
+		}
+	}
+
+	// Recreate from schemaDDL (includes schema_version table)
+	if _, err := db.Exec(schemaDDL); err != nil {
+		return err
+	}
+
+	// Apply schemaEvolve for incremental column additions
+	for _, stmt := range schemaEvolve {
+		if _, err := db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func isDuplicateColumn(err error) bool {
@@ -201,8 +322,9 @@ func (s *Store) GetHostByID(id string) (NodeRecord, bool, error) {
 	var blob string
 	var order int
 	var updated int64
-	err := s.db.QueryRow(`SELECT node_json, sort_order, updated_at FROM hosts WHERE id = ?`, id).
-		Scan(&blob, &order, &updated)
+	var vaultSecretID sql.NullString
+	err := s.db.QueryRow(`SELECT node_json, sort_order, updated_at, vault_secret_id FROM hosts WHERE id = ?`, id).
+		Scan(&blob, &order, &updated, &vaultSecretID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return NodeRecord{}, false, nil
 	}
@@ -212,6 +334,11 @@ func (s *Store) GetHostByID(id string) (NodeRecord, bool, error) {
 	var rec NodeRecord
 	if err := json.Unmarshal([]byte(blob), &rec); err != nil {
 		return NodeRecord{}, false, fmt.Errorf("hostcache: decode node_json: %w", err)
+	}
+	if vaultSecretID.Valid {
+		rec.VaultSecretID = vaultSecretID.String
+	} else {
+		rec.VaultSecretID = ""
 	}
 	rec.NodeJSON = json.RawMessage(blob)
 	rec.SortOrder = order
@@ -256,6 +383,11 @@ func upsertHostTx(tx *sql.Tx, rec NodeRecord, order int, setOrder bool) error {
 		var fromBlob NodeRecord
 		if err := json.Unmarshal(nodeJSON, &fromBlob); err == nil {
 			col = fromBlob
+			// callers that hold both a blob and a decoded record keep the record
+			// value when the blob omits it
+			if col.VaultSecretID == "" {
+				col.VaultSecretID = rec.VaultSecretID
+			}
 		}
 	} else {
 		b, err := json.Marshal(rec)
@@ -274,6 +406,15 @@ func upsertHostTx(tx *sql.Tx, rec NodeRecord, order int, setOrder bool) error {
 		sshUser = "core"
 	}
 
+	// vault_secret_id is the indexed, queryable copy of the credential
+	// reference. It used to be dropped on every write, so a host edited in the
+	// UI had vaultSecretId only inside node_json and readers that rely on the
+	// column saw an empty reference.
+	var vaultSecret sql.NullString
+	if id := strings.TrimSpace(col.VaultSecretID); id != "" {
+		vaultSecret = sql.NullString{String: id, Valid: true}
+	}
+
 	finalOrder := order
 	if !setOrder {
 		var existing sql.NullInt64
@@ -290,8 +431,8 @@ func upsertHostTx(tx *sql.Tx, rec NodeRecord, order int, setOrder bool) error {
 	_, err := tx.Exec(`
 		INSERT INTO hosts (
 			id, name, short_name, group_name, ip, port, ssh_user,
-			tailscale_ip, tailscale_host, status, sort_order, node_json, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			tailscale_ip, tailscale_host, status, sort_order, vault_secret_id, node_json, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			short_name = excluded.short_name,
@@ -302,10 +443,11 @@ func upsertHostTx(tx *sql.Tx, rec NodeRecord, order int, setOrder bool) error {
 			tailscale_ip = excluded.tailscale_ip,
 			tailscale_host = excluded.tailscale_host,
 			status = excluded.status,
+			vault_secret_id = excluded.vault_secret_id,
 			node_json = excluded.node_json,
 			updated_at = excluded.updated_at`,
 		col.ID, col.Name, col.ShortName, col.Group, col.IP, port, sshUser,
-		col.TailscaleIP, col.TailscaleHost, col.Status, finalOrder, string(nodeJSON), nowMS(),
+		col.TailscaleIP, col.TailscaleHost, col.Status, finalOrder, vaultSecret, string(nodeJSON), nowMS(),
 	)
 	return err
 }
@@ -1472,30 +1614,136 @@ func (s *Store) RecordCronScheduleRun(id string, status string, at int64, taskID
 	return err
 }
 
+// BackupPath returns the disk file used for in-memory snapshots.
+func (s *Store) BackupPath() string { return s.backupPath }
 
-// Backup creates a disk snapshot of the in-memory database by copying all tables.
-// For in-memory stores (backupPath != ""), this writes the current state to disk.
+// Backup creates a durable snapshot of the in-memory database by performing
+// VACUUM INTO backupPath. For in-memory databases, WAL mode is temporarily
+// disabled (PRAGMA journal_mode = OFF) and restored to WAL after backup,
+// ensuring VACUUM INTO succeeds reliably.
 func (s *Store) Backup() error {
 	if s.backupPath == "" || s.backupPath == s.path {
-		// Not in-memory mode, nothing to do
 		return nil
 	}
 
-	// For modernc.org/sqlite, we can use the backup API via SQL
-	// This copies the entire database to the backup path
-	_, err := s.db.Exec(`ATTACH DATABASE ? AS backup_db;`, s.backupPath)
-	if err != nil {
-		return nil // Skip backup if attach fails
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Ensure the backup directory exists.
+	if dir := filepath.Dir(s.backupPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("hostcache: create backup directory %s: %w", dir, err)
+		}
 	}
 
-	// Copy all tables (simplified)
-	_, _ = s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS backup_db.hosts AS SELECT * FROM hosts;
-		CREATE TABLE IF NOT EXISTS backup_db.cron_schedules AS SELECT * FROM cron_schedules;
-		CREATE TABLE IF NOT EXISTS backup_db.ansible_queue_tasks AS SELECT * FROM ansible_queue_tasks;
-	DETACH DATABASE backup_db;
-	`)
+	inMemory := s.path == ":memory:"
+	if inMemory {
+		if _, err := s.db.Exec("PRAGMA journal_mode = OFF;"); err != nil {
+			return fmt.Errorf("hostcache: disable WAL for backup: %w", err)
+		}
+		defer func() {
+			_, _ = s.db.Exec("PRAGMA journal_mode = WAL;")
+		}()
+	}
+
+	// If the backup file already exists, VACUUM INTO will fail with "output file already exists".
+	// Remove existing target before VACUUM INTO to allow repeated backups.
+	if err := os.Remove(s.backupPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("hostcache: remove existing backup file %s: %w", s.backupPath, err)
+	}
+
+	if _, err := s.db.Exec("VACUUM INTO ?", s.backupPath); err != nil {
+		return fmt.Errorf("hostcache: vacuum into %s: %w", s.backupPath, err)
+	}
 
 	return nil
 }
 
+// ---------------------------------------------------------------------------
+// Firewall rule model (the source of truth for rendered nft/iptables drop-ins)
+// ---------------------------------------------------------------------------
+
+// FirewallRule is one ATC-managed firewall mutation for a host.
+type FirewallRule struct {
+	ID        string            `json:"id"`
+	HostID    string            `json:"hostId"`
+	Plugin    string            `json:"plugin"`
+	Kind      string            `json:"kind"` // allow_port | deny_port | masquerade | forward_port
+	Params    map[string]string `json:"params"`
+	Permanent bool              `json:"permanent"`
+	Adopted   bool              `json:"adopted"`
+	CreatedAt int64             `json:"createdAt"`
+	UpdatedAt int64             `json:"updatedAt"`
+}
+
+// UpsertFirewallRule stores the desired state for one rule, replacing a rule
+// with the same host/plugin/kind and identifying params.
+func (s *Store) UpsertFirewallRule(rule FirewallRule) error {
+	if rule.Params == nil {
+		rule.Params = map[string]string{}
+	}
+	raw, err := json.Marshal(rule.Params)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	if rule.ID == "" {
+		rule.ID = fmt.Sprintf("fw-%d-%d", now, len(rule.Params))
+	}
+	if rule.CreatedAt == 0 {
+		rule.CreatedAt = now
+	}
+	perm := 0
+	if rule.Permanent {
+		perm = 1
+	}
+	adopted := 0
+	if rule.Adopted {
+		adopted = 1
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO firewall_rules (id, host_id, plugin, kind, params_json, permanent, adopted, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   params_json = excluded.params_json,
+		   permanent = excluded.permanent,
+		   adopted = excluded.adopted,
+		   updated_at = excluded.updated_at`,
+		rule.ID, rule.HostID, rule.Plugin, rule.Kind, string(raw), perm, adopted, rule.CreatedAt, now,
+	)
+	return err
+}
+
+// ListFirewallRules returns every managed rule for a host.
+func (s *Store) ListFirewallRules(hostID string) ([]FirewallRule, error) {
+	rows, err := s.db.Query(
+		`SELECT id, host_id, plugin, kind, params_json, permanent, adopted, created_at, updated_at
+		 FROM firewall_rules WHERE host_id = ? ORDER BY created_at ASC`, hostID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []FirewallRule
+	for rows.Next() {
+		var (
+			rule              FirewallRule
+			params            string
+			perm, adoptedFlag int
+		)
+		if err := rows.Scan(&rule.ID, &rule.HostID, &rule.Plugin, &rule.Kind, &params, &perm, &adoptedFlag, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(params), &rule.Params)
+		rule.Permanent = perm == 1
+		rule.Adopted = adoptedFlag == 1
+		out = append(out, rule)
+	}
+	return out, rows.Err()
+}
+
+// DeleteFirewallRule removes one managed rule.
+func (s *Store) DeleteFirewallRule(hostID, id string) error {
+	_, err := s.db.Exec(`DELETE FROM firewall_rules WHERE host_id = ? AND id = ?`, hostID, id)
+	return err
+}

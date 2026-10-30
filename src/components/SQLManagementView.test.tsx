@@ -86,7 +86,10 @@ test('SQLManagementView syncs active engine from pluginId and falls back to firs
     })
   );
   assert.ok(mariaHtml.includes('Connection Config (MARIADB):'), 'Must select MariaDB when pluginId=database/sql:mariadb');
-  assert.ok(mariaHtml.includes('SQL Query Workbench (MARIADB)'), 'Workbench must reflect MariaDB');
+  // The default view is the Browse Data tab, which carries the engine name.
+  assert.ok(mariaHtml.includes('SQL Data Browser (MARIADB)'), 'Data browser must reflect MariaDB');
+  // Tabs replace the old stacked panels.
+  assert.ok(mariaHtml.includes('sql-view-tabs'), 'Must render the top-level view tabs');
 });
 
 test('SQLManagementView renders expanded Connection Config (username, password, default database, port, socket)', () => {

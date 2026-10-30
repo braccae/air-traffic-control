@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import type { NodeItem, TelemetryData, GlobalTaskItem, QueuedAnsibleTask, TagInventoryChunk, CustomFolder } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ServerViewSidebar } from './components/ServerViewSidebar.tsx';
+import { findLocalNode } from './utils/nodeTarget.ts';
 import { NodeBreadcrumbBar } from './components/NodeBreadcrumbBar.tsx';
 import { CockpitSubSidebar } from './components/CockpitSubSidebar.tsx';
 import { SystemHealthTelemetry } from './components/SystemHealthTelemetry.tsx';
@@ -32,7 +33,6 @@ import { AddNodeModal } from './components/modals/AddNodeModal.tsx';
 import { CreateVmModal } from './components/modals/CreateVmModal.tsx';
 import { EditNodeModal } from './components/modals/EditNodeModal.tsx';
 import { RunPlaybookModal } from './components/modals/RunPlaybookModal.tsx';
-import { PlaybookEditorModal } from './components/modals/PlaybookEditorModal.tsx';
 import { ContainerLogsModal } from './components/modals/ContainerLogsModal.tsx';
 import { RebootConfirmModal } from './components/modals/RebootConfirmModal.tsx';
 import { SearchModal } from './components/modals/SearchModal.tsx';
@@ -79,354 +79,34 @@ import {
 import type { DragPosition } from './hooks/useDraggable.ts';
 import type { WindowSize } from './hooks/useResizable.ts';
 
-const initialNodes: NodeItem[] = [
-  {
-    id: 'node-likes-it-cold',
-    name: 'likes-it-cold',
-    shortName: 'likes-it-cold',
-    group: 'tag:host',
-    datacenter: 'leo-banjo.ts.net',
-    nodeType: 'linux',
-    badge: 'SSH',
-    badgeColor: 'text-[#8cd6cb]',
-    ip: '192.168.8.249',
-    port: 22,
-    sshUser: 'core',
-    authMethod: 'ssh-ed25519 (ssh-agent)',
-    tags: ['tag:host'],
-    sshConnected: true,
-    rttMs: '1.8ms',
-    tailscaleIp: '100.105.71.49',
-    tailscaleHost: 'likes-it-cold.leo-banjo.ts.net',
-    osDescription: 'AlmaLinux 10.2 (Lavender Lion)',
-    status: 'online',
-    uptime: '3d 14h',
-    hasGlances: false,
-    hasCockpit: true,
-    hasPodman: true,
-    hasRestic: true,
-    specs: {
-      cpu: 'AMD Ryzen 5 PRO 2400G with Radeon Vega Graphics',
-      vcpus: 8,
-      ramGiB: 32,
-      motherboard: 'Lenovo 3141 (ThinkCentre M725s)',
-      bios: 'Lenovo M25KT2FA (2019-04-23)',
-      ipmi: 'N/A (Desktop SFF)',
-      ecc: 'Non-ECC DDR4',
-      secureBoot: 'Enabled',
-      iommu: 'Enabled (AMD-Vi)',
-    },
-  },
-  {
-    id: 'node-ping',
-    name: 'ping',
-    shortName: 'ping',
-    group: 'tag:host',
-    datacenter: 'leo-banjo.ts.net',
-    nodeType: 'linux',
-    badge: 'SSH',
-    badgeColor: 'text-[#8cd6cb]',
-    ip: '100.73.87.87',
-    port: 22,
-    sshUser: 'core',
-    authMethod: 'ssh-ed25519 (ssh-agent)',
-    tags: ['tag:host'],
-    sshConnected: true,
-    rttMs: '2.1ms',
-    tailscaleIp: '100.73.87.87',
-    tailscaleHost: 'ping.leo-banjo.ts.net',
-    osDescription: 'AlmaLinux 10.2 (Lavender Lion)',
-    status: 'online',
-    uptime: '4d 14h',
-    hasGlances: false,
-    hasCockpit: true,
-    hasPodman: true,
-    hasRestic: true,
-    specs: {
-      cpu: 'Intel(R) Core(TM) i5-6500 CPU @ 3.20GHz',
-      vcpus: 4,
-      ramGiB: 8,
-      motherboard: 'Dell 0Y7WYT (OptiPlex 7040)',
-      bios: 'Dell 1.24.0 (2022-07-14)',
-      ipmi: 'Intel AMT',
-      ecc: 'Non-ECC DDR4',
-      secureBoot: 'Enabled',
-      iommu: 'Enabled (VT-d)',
-    },
-  },
-  {
-    id: 'node-dev-pc',
-    name: 'dev-pc (local)',
-    shortName: 'dev-pc',
-    group: 'tag:host',
-    datacenter: 'leo-banjo.ts.net',
-    nodeType: 'linux',
-    badge: 'LOCAL',
-    badgeColor: 'text-[#b0c9ff]',
-    ip: '127.0.0.1',
-    port: 22,
-    sshUser: 'pants',
-    authMethod: 'local-socket / ssh-agent',
-    tags: ['tag:admin', 'tag:host'],
-    sshConnected: true,
-    rttMs: '0.1ms',
-    tailscaleIp: '100.97.159.101',
-    tailscaleHost: 'dev-pc.leo-banjo.ts.net',
-    osDescription: 'CachyOS Linux (6.19.11-1-cachyos)',
-    status: 'online',
-    uptime: '1d 22h',
-    hasGlances: true,
-    hasCockpit: true,
-    hasPodman: true,
-    hasRestic: true,
-    specs: {
-      cpu: 'AMD Ryzen 5 5600X 6-Core Processor',
-      vcpus: 12,
-      ramGiB: 32,
-      motherboard: 'ASUS ROG STRIX B450-F GAMING',
-      bios: 'ASUS 4801',
-      ipmi: 'Local Bus',
-      ecc: 'Non-ECC',
-      secureBoot: 'Disabled',
-      iommu: 'Enabled (AMD-Vi)',
-    },
-  },
-  {
-    id: 'node-fred',
-    name: 'fred',
-    shortName: 'fred',
-    group: 'tag:host',
-    datacenter: 'leo-banjo.ts.net',
-    nodeType: 'linux',
-    badge: 'TS-SSH',
-    badgeColor: 'text-[#8cd6cb]',
-    ip: '100.100.173.57',
-    port: 22,
-    sshUser: 'root',
-    authMethod: 'tailscale-ssh',
-    tags: ['tag:host'],
-    sshConnected: true,
-    rttMs: '3.4ms',
-    tailscaleIp: '100.100.173.57',
-    tailscaleHost: 'fred.leo-banjo.ts.net',
-    osDescription: 'Debian GNU/Linux 13 (trixie)',
-    status: 'online',
-    uptime: '37d 04h',
-    hasGlances: true,
-    hasCockpit: true,
-    hasPodman: true,
-    hasRestic: true,
-    specs: {
-      cpu: 'Common KVM processor',
-      vcpus: 4,
-      ramGiB: 4,
-      motherboard: 'QEMU Standard PC',
-      bios: 'SeaBIOS',
-      ipmi: 'Proxmox VE',
-      ecc: 'Host Managed',
-      secureBoot: 'Disabled',
-      iommu: 'N/A',
-    },
-  },
-  {
-    id: 'node-the-freezer',
-    name: 'the-freezer',
-    shortName: 'the-freezer',
-    group: 'tag:host',
-    datacenter: 'leo-banjo.ts.net',
-    nodeType: 'linux',
-    badge: 'MGR',
-    badgeColor: 'text-[#d9b9ff]',
-    ip: '192.168.8.3',
-    port: 22,
-    sshUser: 'core',
-    authMethod: 'ssh-ed25519 (ssh-agent)',
-    tags: ['tag:host', 'tag:manager'],
-    sshConnected: true,
-    rttMs: '1.5ms',
-    tailscaleIp: '100.115.75.78',
-    tailscaleHost: 'the-freezer.leo-banjo.ts.net',
-    osDescription: 'AlmaLinux 10.2 (Lavender Lion)',
-    status: 'online',
-    uptime: '14d 08h',
-    hasGlances: false,
-    hasCockpit: true,
-    hasPodman: true,
-    hasRestic: true,
-    specs: {
-      cpu: 'AMD Ryzen 7 5700X 8-Core Processor',
-      vcpus: 16,
-      ramGiB: 64,
-      motherboard: 'ASUS PRIME B550-PLUS',
-      bios: 'ASUS UEFI 3607 (2024-03-22)',
-      ipmi: 'N/A (Tower ATX)',
-      ecc: 'Non-ECC DDR4',
-      secureBoot: 'Enabled',
-      iommu: 'Enabled (AMD-Vi)',
-    },
-  },
-  {
-    id: 'node-chuck',
-    name: 'chuck',
-    shortName: 'chuck',
-    group: 'tag:host',
-    datacenter: 'leo-banjo.ts.net',
-    nodeType: 'linux',
-    badge: 'HOST',
-    badgeColor: 'text-[#8d909b]',
-    ip: '100.114.97.98',
-    port: 22,
-    sshUser: 'core',
-    authMethod: 'ssh-ed25519 (ssh-agent)',
-    tags: ['tag:host'],
-    sshConnected: false,
-    rttMs: '2.8ms',
-    tailscaleIp: '100.114.97.98',
-    tailscaleHost: 'chuck.leo-banjo.ts.net',
-    osDescription: 'Linux (tag:host)',
-    status: 'online',
-    uptime: '9d 12h',
-    hasGlances: true,
-    hasCockpit: true,
-    hasPodman: true,
-    hasRestic: true,
-    specs: {
-      cpu: 'x86_64 Host Node',
-      vcpus: 4,
-      ramGiB: 8,
-      motherboard: 'Homelab Host',
-      bios: 'UEFI',
-      ipmi: 'N/A',
-      ecc: 'Standard',
-      secureBoot: 'Enabled',
-      iommu: 'Enabled',
-    },
-  },
-  {
-    id: 'node-larry',
-    name: 'larry',
-    shortName: 'larry',
-    group: 'tag:host',
-    datacenter: 'leo-banjo.ts.net',
-    nodeType: 'linux',
-    badge: 'HOST',
-    badgeColor: 'text-[#8d909b]',
-    ip: '192.168.8.144',
-    port: 22,
-    sshUser: 'core',
-    authMethod: 'ssh-ed25519 (ssh-agent)',
-    tags: ['tag:host'],
-    sshConnected: false,
-    rttMs: '1.9ms',
-    tailscaleIp: '100.107.167.19',
-    tailscaleHost: 'larry.leo-banjo.ts.net',
-    osDescription: 'Linux (tag:host)',
-    status: 'online',
-    uptime: '11d 03h',
-    hasGlances: true,
-    hasCockpit: true,
-    hasPodman: true,
-    hasRestic: true,
-    specs: {
-      cpu: 'x86_64 Host Node',
-      vcpus: 4,
-      ramGiB: 8,
-      motherboard: 'Homelab Host',
-      bios: 'UEFI',
-      ipmi: '192.168.8.144',
-      ecc: 'Standard',
-      secureBoot: 'Enabled',
-      iommu: 'Enabled',
-    },
-  },
-  {
-    id: 'node-orangepizero3',
-    name: 'orangepizero3',
-    shortName: 'orangepizero3',
-    group: 'tag:host',
-    datacenter: 'leo-banjo.ts.net',
-    nodeType: 'linux',
-    badge: 'ARM64',
-    badgeColor: 'text-[#ffd97d]',
-    ip: '100.65.100.14',
-    port: 22,
-    sshUser: 'core',
-    authMethod: 'ssh-ed25519 (ssh-agent)',
-    tags: ['tag:host'],
-    sshConnected: false,
-    rttMs: '4.2ms',
-    tailscaleIp: '100.65.100.14',
-    tailscaleHost: 'orangepizero3.leo-banjo.ts.net',
-    osDescription: 'Debian / Armbian (Allwinner H618 ARM64)',
-    status: 'online',
-    uptime: '21d 06h',
-    hasGlances: true,
-    hasCockpit: false,
-    hasPodman: true,
-    hasRestic: false,
-    specs: {
-      cpu: 'Allwinner H618 Quad-Core Cortex-A53',
-      vcpus: 4,
-      ramGiB: 4,
-      motherboard: 'Orange Pi Zero 3 SBC',
-      bios: 'U-Boot ARM64',
-      ipmi: 'GPIO / Serial',
-      ecc: 'Non-ECC LPDDR4',
-      secureBoot: 'Disabled',
-      iommu: 'N/A',
-    },
-  },
-];
+const initialNodes: NodeItem[] = []; // Removed hardcoded nodes - now loaded dynamically from API
 
 const initialTelemetry: TelemetryData = {
-  cpuUsage: 4.2,
-  cpuModel: 'AMD EPYC / x86_64 Host',
-  vCpus: 8,
-  memoryUsedGiB: 6.4,
-  memoryTotalGiB: 16.0,
-  arcCacheGiB: 2.1,
-  zfsTankUsedTb: 0.18,
-  zfsTankTotalTb: 1.0,
-  zfsRaidType: 'XFS / RootFS',
-  zfsScrubStatus: 'Host: likes-it-cold',
-  loadAvg1m: 0.34,
-  loadAvg5m: 0.28,
-  loadAvg15m: 0.22,
-  ioDelayPercent: 0.02,
-  cpuTempC: 39.0,
-  fanSpeedRpm: 840,
-  packageWatts: 38.5,
-  sparkline: [14, 16, 15, 18, 12, 14, 11, 13, 10, 12, 11],
+  cpuUsage: null,
+  cpuModel: null,
+  vCpus: null,
+  memoryUsedGiB: null,
+  memoryTotalGiB: null,
+  arcCacheGiB: null,
+  zfsTankUsedTb: null,
+  zfsTankTotalTb: null,
+  zfsRaidType: null,
+  zfsScrubStatus: null,
+  loadAvg1m: null,
+  loadAvg5m: null,
+  loadAvg15m: null,
+  ioDelayPercent: null,
+  cpuTempC: null,
+  fanSpeedRpm: null,
+  packageWatts: null,
+  sparkline: [],
 };
 
-const initialTasks: GlobalTaskItem[] = [
-  {
-    id: 'task-1',
-    startTime: '2026-10-18 01:20:00',
-    nodeTarget: 'likes-it-cold.leo-banjo.ts.net',
-    user: 'core@ssh-agent',
-    description: 'ssh core@likes-it-cold.leo-banjo.ts.net podman ps --all',
-    progress: 100,
-    progressEta: 'Connected via ssh-agent (ED25519)',
-    status: 'OK',
-    category: 'active',
-  },
-  {
-    id: 'task-2',
-    startTime: '2026-10-18 01:20:05',
-    nodeTarget: 'ping.leo-banjo.ts.net',
-    user: 'core@ssh-agent',
-    description: 'Probe rootless Podman user uosserver (UID 1001, SubUID 589824:65536)',
-    progress: 100,
-    progressEta: '1 running container (uosserver)',
-    status: 'OK',
-    category: 'active',
-  },
-];
+const initialTasks: GlobalTaskItem[] = [];
 
 export default function App() {
-  const [nodesList, setNodesList] = useState<NodeItem[]>(initialNodes);
-  const [selectedNode, setSelectedNode] = useState<NodeItem>(initialNodes[0]);
+  const [nodesList, setNodesList] = useState<NodeItem[]>([]);
+  const [selectedNode, setSelectedNode] = useState<NodeItem | null>(null);
   const [selectedHostGroup, setSelectedHostGroup] = useState('all');
   const [activeTopTab, setActiveTopTab] = useState('summary');
   const [activeOpTab, setActiveOpTab] = useState('overview');
@@ -540,7 +220,6 @@ export default function App() {
   const [createVmOpen, setCreateVmOpen] = useState(false);
   const [editNodeTarget, setEditNodeTarget] = useState<NodeItem | null>(null);
   const [playbookOpen, setPlaybookOpen] = useState(false);
-  const [playbookEditorOpen, setPlaybookEditorOpen] = useState(false);
   const [selectedPlaybookForEdit, setSelectedPlaybookForEdit] = useState<string | undefined>(undefined);
   const [logsTarget, setLogsTarget] = useState<string | null>(null);
   const [logsUser, setLogsUser] = useState<string | undefined>(undefined);
@@ -556,9 +235,10 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [groupVarsOpen, setGroupVarsOpen] = useState(false);
 
-  const handleOpenPlaybookEditor = (playbookName?: string) => {
-    setSelectedPlaybookForEdit(playbookName);
-    setPlaybookEditorOpen(true);
+  // The playbook editor now lives in the datacenter settings submenu; the old
+  // popup modal duplicated it and has been retired.
+  const handleOpenPlaybookEditor = () => {
+    navigateDatacenterRoute({ kind: 'setting', setting: 'playbook-editor' });
   };
 
   // Floating & Draggable Terminal Sessions State
@@ -618,6 +298,7 @@ export default function App() {
 
   const handleOpenTerminal = (targetNodeId?: string) => {
     const target = nodesList.find(n => n.id === targetNodeId) || selectedNode;
+    if (!target) return;
     const existing = sessions.find(s => s.nodeId === target.id);
     if (existing) {
       if (existing.isMinimized) {
@@ -647,6 +328,7 @@ export default function App() {
 
   const handleNewTerminalSession = (nodeId?: string) => {
     const target = nodesList.find(n => n.id === nodeId) || selectedNode;
+    if (!target) return;
     const newSession = createTerminalSession(
       target.id,
       target.name,
@@ -721,9 +403,6 @@ export default function App() {
     } else if (id === 'modal-run-playbook') {
       setPlaybookOpen(false);
       setMinimizedModals(prev => ({ ...prev, [id]: false }));
-    } else if (id === 'modal-playbook-editor') {
-      setPlaybookEditorOpen(false);
-      setMinimizedModals(prev => ({ ...prev, [id]: false }));
     } else if (id === 'modal-group-vars') {
       setGroupVarsOpen(false);
       setMinimizedModals(prev => ({ ...prev, [id]: false }));
@@ -793,18 +472,6 @@ export default function App() {
           },
         ]
       : []),
-    ...(playbookEditorOpen
-      ? [
-          {
-            id: 'modal-playbook-editor',
-            title: selectedPlaybookForEdit ? `Editor: ${selectedPlaybookForEdit}` : 'Playbook Editor',
-            icon: 'menu_book',
-            type: 'modal' as const,
-            isMinimized: Boolean(minimizedModals['modal-playbook-editor']),
-            isOpen: playbookEditorOpen,
-          },
-        ]
-      : []),
     ...(groupVarsOpen
       ? [
           {
@@ -842,8 +509,6 @@ export default function App() {
       ? 'modal-edit-node'
       : playbookOpen && !minimizedModals['modal-run-playbook']
       ? 'modal-run-playbook'
-      : playbookEditorOpen && !minimizedModals['modal-playbook-editor']
-      ? 'modal-playbook-editor'
       : groupVarsOpen && !minimizedModals['modal-group-vars']
       ? 'modal-group-vars'
       : logsTarget && !minimizedModals['modal-container-logs']
@@ -882,7 +547,7 @@ export default function App() {
     fetch('/api/nodes')
       .then(res => res.json())
       .then(data => {
-        if (Array.isArray(data) && data.length > 0) {
+        if (Array.isArray(data)) {
           setNodesList(data);
           setSelectedNode(data[0]);
         }
@@ -933,6 +598,7 @@ export default function App() {
 
   // Fetch live telemetry when selectedNode changes
   useEffect(() => {
+    if (!selectedNode) return;
     fetch(`/api/telemetry?host=${encodeURIComponent(selectedNode.id)}`)
       .then(res => res.json())
       .then(data => {
@@ -941,7 +607,7 @@ export default function App() {
         }
         if (data?.node) {
           setSelectedNode(prev => {
-            if (prev.id !== data.node.id) return prev;
+            if (!prev || prev.id !== data.node.id) return prev || data.node;
             if (
               prev.uptime === data.node.uptime &&
               prev.status === data.node.status &&
@@ -969,7 +635,7 @@ export default function App() {
         }
       })
       .catch(() => {});
-  }, [selectedNode.id]);
+  }, [selectedNode?.id]);
 
   // WebSocket Connection for real-time telemetry ticks and task progress
   useEffect(() => {
@@ -1029,7 +695,7 @@ export default function App() {
               addToast({ type: 'success', title: 'Node Added', message: `Registered node ${msg.node.name}` });
             } else if (msg.type === 'node_updated' && msg.node) {
               setNodesList(prev => prev.map(n => (n.id === msg.node.id ? msg.node : n)));
-              setSelectedNode(prev => (prev.id === msg.node.id ? msg.node : prev));
+              setSelectedNode(prev => (!prev || prev.id !== msg.node.id ? msg.node : prev));
               addToast({ type: 'info', title: 'Node Updated', message: `Settings saved for ${msg.node.name}` });
             } else if (msg.type === 'node_deleted' && msg.nodeId) {
               setNodesList(prev => prev.filter(n => n.id !== msg.nodeId));
@@ -1041,6 +707,7 @@ export default function App() {
             } else if (msg.type === 'nodes_updated' && Array.isArray(msg.nodes)) {
               setNodesList(msg.nodes);
               setSelectedNode(prev => {
+                if (!prev) return null;
                 const match = msg.nodes.find((n: NodeItem) => n.id === prev.id);
                 return match || (msg.nodes.length > 0 ? msg.nodes[0] : prev);
               });
@@ -1140,35 +807,41 @@ export default function App() {
     nodeId: string,
     updates: Partial<NodeItem> & { testSsh?: boolean }
   ) => {
-    setNodesList(prev =>
-      prev.map(n => (n.id === nodeId ? updateNodeSettings(n, updates) : n))
-    );
-    setSelectedNode(prev =>
-      prev.id === nodeId ? updateNodeSettings(prev, updates) : prev
-    );
+    // Persist first: never show the modal as saved when the coordinator
+    // rejected the change (e.g. 422 for an unknown vault variable).
+    const resp = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
 
-    try {
-      const resp = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates),
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      const message = data?.error || `Failed to save node settings (HTTP ${resp.status})`;
+      addToast({ type: 'error', title: 'Save failed', message });
+      throw new Error(message);
+    }
+
+    const data = await resp.json().catch(() => ({}));
+    const savedNode = data?.node;
+    if (savedNode) {
+      setNodesList(prev => prev.map(n => (n.id === nodeId ? savedNode : n)));
+      setSelectedNode(prev => (prev && prev.id === nodeId ? savedNode : prev));
+    } else {
+      setNodesList(prev =>
+        prev.map(n => (n.id === nodeId ? updateNodeSettings(n, updates) : n))
+      );
+      setSelectedNode(prev => {
+        if (!prev || prev.id !== nodeId) return prev;
+        return updateNodeSettings(prev, updates);
       });
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data?.node) {
-          setNodesList(prev => prev.map(n => (n.id === nodeId ? data.node : n)));
-          setSelectedNode(prev => (prev.id === nodeId ? data.node : prev));
-        }
-      }
-    } catch {
-      // Local state already updated
     }
   };
 
   const handleDeleteNode = (nodeId: string) => {
     setNodesList(prev => {
       const remaining = prev.filter(n => n.id !== nodeId);
-      if (selectedNode.id === nodeId && remaining.length > 0) {
+      if (selectedNode?.id === nodeId && remaining.length > 0) {
         setSelectedNode(remaining[0]);
       }
       return remaining;
@@ -1228,6 +901,54 @@ export default function App() {
     }
   };
 
+  const handleMoveNodeToFolder = async (nodeId: string, folderId: string | null) => {
+    const previous = nodesList.find(n => n.id === nodeId)?.folder;
+    try {
+      const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder: folderId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json().catch(() => ({}));
+      if (data?.node) {
+        setNodesList(prev => prev.map(n => (n.id === nodeId ? data.node : n)));
+      } else {
+        setNodesList(prev => prev.map(n => (n.id === nodeId ? { ...n, folder: folderId || undefined } : n)));
+      }
+    } catch (err: any) {
+      // Revert the optimistic move so the tree keeps showing the host where it
+      // actually lives, and tell the operator instead of failing silently.
+      setNodesList(prev => prev.map(n => (n.id === nodeId ? { ...n, folder: previous } : n)));
+      addToast({
+        type: 'error',
+        title: 'Could not move host',
+        message: err?.message || 'The node update request failed.',
+      });
+    }
+  };
+
+  const handleDeleteChunk = async (id: string) => {
+    try {
+      const res = await fetch(`/api/inventory/chunks/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        setChunks(prev => prev.filter(c => c.id !== id));
+        addToast({
+          type: 'info',
+          title: 'Tag Unfollowed',
+          message: 'Stopped following tag',
+        });
+      }
+    } catch (err) {
+      console.error('Failed to delete chunk:', err);
+    }
+  };
+
   const handleFollowTag = useCallback((chunk: { tag: string; authMethod: string; sshUser?: string; vaultSecretId?: string }) => {
     fetch('/api/inventory/chunks')
       .then(res => res.json())
@@ -1237,7 +958,7 @@ export default function App() {
         }
       })
       .catch(() => {});
-    fetch('/api/nodes')
+    fetch('/api/nodes?refresh=true')
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) {
@@ -1267,6 +988,7 @@ export default function App() {
   };
 
   const handleTriggerRestic = () => {
+    if (!selectedNode) return;
     fetch('/api/restic/snapshot', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1275,6 +997,7 @@ export default function App() {
   };
 
   const handleRestartPod = (podName: string) => {
+    if (!selectedNode) return;
     const restartTask: GlobalTaskItem = {
       id: `task-${Date.now()}`,
       startTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
@@ -1290,6 +1013,7 @@ export default function App() {
   };
 
   const handleRebootConfirm = (mode: string) => {
+    if (!selectedNode) return;
     fetch(`/api/nodes/${encodeURIComponent(selectedNode.id)}/reboot`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1393,11 +1117,11 @@ export default function App() {
       {/* Left Server View Sidebar */}
       <ServerViewSidebar
         nodes={nodesList}
-        selectedNodeId={selectedNode.id}
+        selectedNodeId={selectedNode?.id ?? ''}
         onSelectNode={handleSelectNode}
         onEditNode={node => setEditNodeTarget(node)}
-        onOpenTerminal={node => handleOpenTerminal(node.id)}
-        onOpenLogs={node => handleOpenLogs(node.tailscaleHost || node.ip, node.sshUser)}
+        onOpenTerminal={node => selectedNode && handleOpenTerminal(node.id)}
+        onOpenLogs={node => selectedNode && handleOpenLogs(node.tailscaleHost || node.ip, node.sshUser)}
         onDeleteNode={handleDeleteNode}
         selectedHostGroup={selectedHostGroup}
         onSelectHostGroup={setSelectedHostGroup}
@@ -1413,19 +1137,29 @@ export default function App() {
         folders={folders}
         onCreateFolder={handleCreateFolder}
         onDeleteFolder={handleDeleteFolder}
+        onDeleteChunk={handleDeleteChunk}
+        onMoveNodeToFolder={handleMoveNodeToFolder}
       />
 
       {/* Main Content Workspace */}
       <div className="lg:pl-72 pl-0">
-        <main className={`relative pt-12 pb-24 w-full px-3 min-h-screen ${
+        <main className={`relative pt-12 pb-[var(--console-height,176px)] w-full px-3 min-h-screen ${
           highContrast ? 'bg-[#080a16]' : 'bg-[#0f1224]'
         }`}>
           {selectedViewMode === 'datacenter' ? (
             activeDatacenterSetting ? (
-              <DatacenterSettingsView page={activeDatacenterSetting} />
+              <DatacenterSettingsView
+                page={activeDatacenterSetting}
+                nodes={nodesList}
+                onSelectNode={handleSelectNode}
+              />
             ) : (
             <DatacenterGlobalView
-              datacenterName={selectedNode?.datacenter || 'leo-banjo.ts.net'}
+              datacenterName={
+                selectedNode?.datacenter ||
+                nodesList.find(n => n.tailscaleHost)?.tailscaleHost?.split('.').slice(1).join('.') ||
+                'unknown'
+              }
               nodes={nodesList}
               tasks={tasks}
               activeSection={datacenterSection}
@@ -1434,13 +1168,11 @@ export default function App() {
                 setSelectedPlaybookForEdit(playbookName);
                 setPlaybookOpen(true);
               }}
-              onOpenPlaybookEditor={playbookName => handleOpenPlaybookEditor(playbookName)}
-              onOpenGroupVars={() => setGroupVarsOpen(true)}
+              onOpenSetting={setting => navigateDatacenterRoute({ kind: 'setting', setting })}
               onToggleTasksDrawer={() => {
                 const el = document.getElementById('global-tasks-drawer');
                 el?.scrollIntoView({ behavior: 'smooth' });
               }}
-              onRunPlaybookQuick={(playbook, target) => handleRunPlaybook(playbook, target || 'tag:host')}
             />
             )
           ) : (
@@ -1451,11 +1183,11 @@ export default function App() {
             }`}>
               <NodeBreadcrumbBar
                 node={selectedNode}
-                onOpenTerminal={() => handleOpenTerminal()}
-                onTriggerRestic={handleTriggerRestic}
+                onOpenTerminal={() => selectedNode && handleOpenTerminal(selectedNode.id)}
+                onTriggerRestic={() => selectedNode && handleTriggerRestic()}
                 onReboot={() => setRebootModalOpen(true)}
                 onPowerOff={() => setRebootModalOpen(true)}
-                onEditNode={() => setEditNodeTarget(selectedNode)}
+                onEditNode={() => selectedNode && setEditNodeTarget(selectedNode)}
               />
             </div>
 
@@ -1466,8 +1198,9 @@ export default function App() {
                 <CockpitSubSidebar
                   node={selectedNode}
                   activeItem={activeCockpitItem}
-                  storageEngine={nodeStorageEngines[selectedNode.id]}
+                  storageEngine={selectedNode?.id ? nodeStorageEngines[selectedNode.id] : undefined}
                   onSelectItem={item => {
+                    if (!selectedNode) return;
                     if (item === 'terminal') {
                       handleOpenTerminal(selectedNode.id);
                       setActiveCockpitItem('terminal');
@@ -1483,11 +1216,11 @@ export default function App() {
               {/* Main Operational Workspace Grid */}
               <div className={getWorkspaceWrapperClasses(subSidebarWidth)}>
                 {/* Specific dedicated Views when selected from Menu */}
-                {(activeOpTab === 'services' || activeCockpitItem === 'services') && (
+                {(activeOpTab === 'services' || activeCockpitItem === 'services') && selectedNode && (
                   <SystemServicesView node={selectedNode} />
                 )}
 
-                {activeCockpitItem === 'terminal' && (
+                {activeCockpitItem === 'terminal' && selectedNode && (
                   <div className="bg-[#171a2d] border border-[#26293c] rounded p-6 flex flex-col items-center justify-center text-center gap-3 font-mono">
                     <span className="material-symbols-outlined text-[36px] text-[#b0c9ff]">terminal</span>
                     <h3 className="text-sm font-bold text-[#dfe1fa]">Interactive Ghostty Terminal Active</h3>
@@ -1505,11 +1238,11 @@ export default function App() {
                   </div>
                 )}
 
-                {(activeOpTab === 'logs' || activeCockpitItem === 'logs') && (
+                {(activeOpTab === 'logs' || activeCockpitItem === 'logs') && selectedNode && (
                   <SystemLogsView node={selectedNode} />
                 )}
 
-                {(activeOpTab === 'updates' || activeCockpitItem === 'updates') && (
+                {(activeOpTab === 'updates' || activeCockpitItem === 'updates') && selectedNode && (
                   <PackageUpdatesView
                     node={selectedNode}
                     onOpenTask={taskId => {
@@ -1518,28 +1251,30 @@ export default function App() {
                   />
                 )}
 
-                {activeOpTab === 'interfaces' && (
+                {activeOpTab === 'interfaces' && selectedNode && (
                   <NetworkInterfacesView node={selectedNode} />
                 )}
 
-                {activeOpTab === 'firewall' && (
+                {activeOpTab === 'firewall' && selectedNode && (
                   <FirewallView node={selectedNode} />
                 )}
 
-                {(activeOpTab === 'zfs' || activeCockpitItem === 'zfs' || activeOpTab === 'storage' || activeCockpitItem === 'storage') && (
+                {(activeOpTab === 'zfs' || activeCockpitItem === 'zfs' || activeOpTab === 'storage' || activeCockpitItem === 'storage') && selectedNode && (
                   <ZfsManagementView
                     node={selectedNode}
-                    onEngineDetected={engine => {
-                      setNodeStorageEngines(prev => ({ ...prev, [selectedNode.id]: engine }));
+                    onEngineDetected={(engine: StorageEngineType) => {
+                      if (selectedNode) {
+                        setNodeStorageEngines(prev => ({ ...prev, [selectedNode.id]: engine }));
+                      }
                     }}
                   />
                 )}
 
-                {activeOpTab === 'shares' && (
+                {activeOpTab === 'shares' && selectedNode && (
                   <NetworkSharesView node={selectedNode} />
                 )}
 
-                {activeOpTab === 'smart' && (
+                {activeOpTab === 'smart' && selectedNode && (
                   <DisksSmartView node={selectedNode} />
                 )}
 
@@ -1549,6 +1284,7 @@ export default function App() {
                       const match = nodesList.find(n => n.tailscaleIp === ip || n.ip === ip);
                       handleOpenTerminal(match?.id);
                     }}
+                    nodes={nodesList}
                   />
                 )}
 
@@ -1565,7 +1301,7 @@ export default function App() {
                   />
                 )}
 
-                {activeOpTab === 'vms' && (
+                {activeOpTab === 'vms' && selectedNode && (
                   <VirtualMachinesKVM
                     node={selectedNode}
                     onOpenConsole={() => setTerminalOpen(true)}
@@ -1573,12 +1309,12 @@ export default function App() {
                   />
                 )}
 
-                {activeOpTab === 'restic' && (
+                {activeOpTab === 'restic' && selectedNode && (
                   <ResticBackupPolicy
                     nodeName={selectedNode.name}
                     hasRestic={selectedNode.hasRestic}
                     onIntegrityCheck={() =>
-                      handleRunPlaybook('security-hardening.yml', selectedNode.tailscaleHost)
+                      handleRunPlaybook('security-hardening.yml', selectedNode.tailscaleHost || selectedNode.ip || '')
                     }
                     onBrowseFiles={() => setLogsTarget('restic-repo-browser')}
                     onSnapshot={handleTriggerRestic}
@@ -1595,7 +1331,7 @@ export default function App() {
                 {/* Host Modules & Plugin Matrix View */}
                 {(activeOpTab === 'modules' || activeCockpitItem === 'modules') && (
                   <HostModulesView
-                    node={selectedNode}
+                    node={selectedNode ?? findLocalNode(nodesList)}
                     onOpenQueueTask={taskId => {
                       setLogsTarget(taskId);
                     }}
@@ -1606,7 +1342,7 @@ export default function App() {
                 {Boolean(
                   (activeCockpitItem && activeCockpitItem.includes('/')) ||
                   (activeOpTab && activeOpTab.includes('/'))
-                ) && (() => {
+                ) && selectedNode && (() => {
                   const currentPluginTab = (activeCockpitItem?.includes('/') ? activeCockpitItem : activeOpTab) || '';
                   const PluginViewComponent = getPluginView(currentPluginTab);
                   return (
@@ -1625,7 +1361,7 @@ export default function App() {
                 {activeOpTab === 'overview' && (
                   <div className="flex flex-col gap-2">
                     {panelOrder.map((panelId, idx) => {
-                      if (panelId === 'telemetry_mesh') {
+                      if (panelId === 'telemetry_mesh' && selectedNode) {
                         return (
                           <div
                             key="telemetry_mesh"
@@ -1735,7 +1471,7 @@ export default function App() {
                         );
                       }
 
-                      if (panelId === 'vms_restic') {
+                      if (panelId === 'vms_restic' && selectedNode) {
                         return (
                           <div
                             key="vms_restic"
@@ -1900,10 +1636,11 @@ export default function App() {
         }}
         onAddNode={handleAddNode}
         onFollowTag={handleFollowTag}
+        nodes={nodesList}
       />
 
       <CreateVmModal
-        node={selectedNode}
+        node={selectedNode ?? undefined}
         nodes={nodesList}
         isOpen={createVmOpen}
         isMinimized={Boolean(minimizedModals['modal-create-vm'])}
@@ -1916,7 +1653,7 @@ export default function App() {
           addToast({
             type: 'success',
             title: 'Virtual Machine Created',
-            message: `VM ${newVm.name} successfully provisioned on ${selectedNode.name}`,
+            message: `VM ${newVm.name} successfully provisioned on ${selectedNode?.name ?? 'unknown node'}`,
           });
         }}
       />
@@ -1944,31 +1681,16 @@ export default function App() {
           setMinimizedModals(prev => ({ ...prev, 'modal-run-playbook': false }));
         }}
         onRunPlaybook={handleRunPlaybook}
-        onOpenEditor={(playbook) => {
+        onOpenEditor={() => {
           setPlaybookOpen(false);
-          handleOpenPlaybookEditor(playbook);
+          handleOpenPlaybookEditor();
         }}
-      />
-
-      <PlaybookEditorModal
-        isOpen={playbookEditorOpen}
-        initialPlaybook={selectedPlaybookForEdit}
-        isMinimized={Boolean(minimizedModals['modal-playbook-editor'])}
-        onMinimize={() => setMinimizedModals(prev => ({ ...prev, 'modal-playbook-editor': true }))}
-        onClose={() => {
-          setPlaybookEditorOpen(false);
-          setMinimizedModals(prev => ({ ...prev, 'modal-playbook-editor': false }));
-        }}
-        onRunPlaybook={(playbook) => {
-          setPlaybookEditorOpen(false);
-          setSelectedPlaybookForEdit(playbook);
-          setPlaybookOpen(true);
-        }}
+        nodes={nodesList}
       />
 
       <ContainerLogsModal
         targetName={logsTarget}
-        node={selectedNode}
+        node={selectedNode ?? undefined}
         user={logsUser}
         uid={logsUid}
         isOpen={Boolean(logsTarget)}
@@ -1982,12 +1704,14 @@ export default function App() {
         }}
       />
 
-      <RebootConfirmModal
-        node={selectedNode}
-        isOpen={rebootModalOpen}
-        onClose={() => setRebootModalOpen(false)}
-        onConfirmReboot={handleRebootConfirm}
-      />
+      {selectedNode && (
+        <RebootConfirmModal
+          node={selectedNode}
+          isOpen={rebootModalOpen}
+          onClose={() => setRebootModalOpen(false)}
+          onConfirmReboot={handleRebootConfirm}
+        />
+      )}
 
       <SearchModal
         isOpen={searchOpen}

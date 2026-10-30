@@ -1,7 +1,9 @@
 package vaultapi
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -210,4 +212,87 @@ func TestExtractRawVaultPayloadAndFormatting(t *testing.T) {
 	if !strings.HasPrefix(formatted, "renamed_var: !vault |\n  $ANSIBLE_VAULT;1.1;AES256") {
 		t.Fatalf("unexpected formatted block: %s", formatted)
 	}
+}
+
+func TestVaultEncryptPersistsToStore(t *testing.T) {
+	// Ensure ansible-vault can be found
+	os.Setenv("ANSIBLE_VENV_PATH", "/var/home/core/Projects/air-traffic-control/data/ansible-venv")
+	defer os.Unsetenv("ANSIBLE_VENV_PATH")
+
+	api, store, dir := setupTestVaultAPI(t)
+	api.repoRoot = "/var/home/core/Projects/air-traffic-control"
+	mux := http.NewServeMux()
+	api.Register(mux)
+
+	// 1. Initially empty
+	req := httptest.NewRequest(http.MethodGet, "/api/vault/variables", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	var listRes struct {
+		Total int `json:"total"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &listRes)
+	if listRes.Total != 0 {
+		t.Fatalf("expected empty table, got %d", listRes.Total)
+	}
+
+	// 2. Encrypt an SSH key via /api/vault/encrypt
+	sshKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-key-data\n-----END OPENSSH PRIVATE KEY-----"
+	body := fmt.Sprintf(`{"plaintext": %q, "varName": "ssh_key_test", "password": "test-pass"}`, sshKey)
+	req = httptest.NewRequest(http.MethodPost, "/api/vault/encrypt", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("encrypt failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var encRes struct {
+		Success    bool   `json:"success"`
+		VaultBlock string `json:"vaultBlock"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &encRes)
+	if !encRes.Success || !strings.Contains(encRes.VaultBlock, "$ANSIBLE_VAULT") {
+		t.Fatalf("unexpected encrypt response: %+v", encRes)
+	}
+
+	// 3. Verify persistence to vault_variables table
+	vv, found, err := store.GetVaultVariable("ssh_key_test")
+	if err != nil || !found {
+		t.Fatalf("vault variable not persisted: err=%v found=%v", err, found)
+	}
+	if !strings.Contains(vv.VaultBlock, "$ANSIBLE_VAULT") {
+		t.Fatalf("stored block missing vault header")
+	}
+
+	// 4. Verify retrievable via list
+	req = httptest.NewRequest(http.MethodGet, "/api/vault/variables", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	json.Unmarshal(rec.Body.Bytes(), &listRes)
+	if listRes.Total != 1 {
+		t.Fatalf("expected 1 variable, got %d", listRes.Total)
+	}
+
+	// 5. Verify round-trip decrypt
+	plaintext, err := DecryptVaultString(context.Background(), "/var/home/core/Projects/air-traffic-control", vv.VaultBlock, DecryptOptions{Password: "test-pass"})
+	if err != nil {
+		t.Fatalf("decrypt failed: %v", err)
+	}
+	if plaintext != sshKey {
+		t.Fatalf("decrypted plaintext mismatch")
+	}
+
+	// 6. Empty table regression: new store has zero rows
+	dir2 := t.TempDir()
+	store2, err := hostcache.Open(filepath.Join(dir2, "hosts-cache.sqlite"))
+	if err != nil {
+		t.Fatalf("failed to open second store: %v", err)
+	}
+	defer store2.Close()
+	vars, err := store2.ListVaultVariables()
+	if err != nil || len(vars) != 0 {
+		t.Fatalf("expected empty store, got %d (err=%v)", len(vars), err)
+	}
+
+	_ = dir
 }

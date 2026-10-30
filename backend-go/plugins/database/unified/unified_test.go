@@ -55,10 +55,10 @@ func TestUnifiedPlugin_ProbeWithoutConfiguration(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if det.Detected {
-		t.Error("expected detected=false when no engine overrides are configured")
+		t.Error("expected detected=false (unified is an internal driver, never a tab)")
 	}
-	if !strings.Contains(strings.ToUpper(det.Status), "NO CONFIG") {
-		t.Errorf("expected NO CONFIG status, got %q", det.Status)
+	if !strings.Contains(strings.ToUpper(det.Status), "INTERNAL") {
+		t.Errorf("expected INTERNAL status, got %q", det.Status)
 	}
 }
 
@@ -75,10 +75,10 @@ func TestUnifiedPlugin_ProbeWithUnreachableEngine(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if det.Detected {
-		t.Error("expected detected=false when the configured engine is unreachable and no CLI exists")
+		t.Error("expected detected=false (unified is an internal driver, never a tab)")
 	}
-	if !strings.Contains(det.Status, "0/1") {
-		t.Errorf("expected reachability summary 0/1, got %q", det.Status)
+	if !strings.Contains(strings.ToUpper(det.Status), "INTERNAL") {
+		t.Errorf("expected INTERNAL status, got %q", det.Status)
 	}
 }
 

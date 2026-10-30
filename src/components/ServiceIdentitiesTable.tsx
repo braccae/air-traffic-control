@@ -3,7 +3,7 @@ import type { NodeItem, ServiceUser, UnprivilegedPodmanUser } from '../types/ind
 import { correlateIdentitiesWithProbe } from '../utils/podmanViewModel.ts';
 
 interface ServiceIdentitiesTableProps {
-  selectedNode?: NodeItem;
+  selectedNode?: NodeItem | null;
   onAddIdentity?: () => void;
   onAudit?: (user: string) => void;
 }

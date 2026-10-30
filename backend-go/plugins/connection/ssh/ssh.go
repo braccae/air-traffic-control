@@ -17,6 +17,7 @@ import (
 	"air-traffic-control/backend/pkg/plugin"
 	"air-traffic-control/backend/pkg/plugin/newapi"
 	"air-traffic-control/backend/pkg/plugin/settingsframework"
+	"air-traffic-control/backend/pkg/secrets"
 )
 
 // SettingsPageID is the route slug of the datacenter-wide SSH transport settings page.
@@ -346,6 +347,32 @@ func BuildClientConfig(h plugin.HostFacts) (*ssh.ClientConfig, error) {
 		authMethods = append(authMethods, ssh.Password(pass))
 	}
 
+	// 4. Ansible Vault secret referenced by the node or tag chunk. Decrypted at
+	// connect time from the coordinator vault store; plaintext never leaves the
+	// daemon. A missing/undecryptable reference fails loudly.
+	if vaultID := strings.TrimSpace(h.Overrides["vaultSecretId"]); vaultID != "" {
+		sec, err := secrets.Resolve(context.Background(), vaultID)
+		if err != nil {
+			return nil, err
+		}
+		switch sec.Kind {
+		case secrets.KindPrivateKey:
+			var signer ssh.Signer
+			var parseErr error
+			if pass := h.Overrides["passphrase"]; pass != "" {
+				signer, parseErr = ssh.ParsePrivateKeyWithPassphrase([]byte(sec.Value), []byte(pass))
+			} else {
+				signer, parseErr = ssh.ParsePrivateKey([]byte(sec.Value))
+			}
+			if parseErr != nil {
+				return nil, fmt.Errorf("vault secret %q is not a usable SSH private key: %w", vaultID, parseErr)
+			}
+			authMethods = append(authMethods, ssh.PublicKeys(signer))
+		case secrets.KindPassword:
+			authMethods = append(authMethods, ssh.Password(sec.Value))
+		}
+	}
+
 	timeout := defaultSSHTimeout()
 	if tStr, ok := h.Overrides["timeout"]; ok && tStr != "" {
 		if d, err := time.ParseDuration(tStr); err == nil && d > 0 {
@@ -370,6 +397,25 @@ func (p *Plugin) NewRunner(h plugin.HostFacts) (plugin.Runner, error) {
 	return &Runner{client: client}, nil
 }
 
+// EvictClient removes a cached client for the given facts.
+func (p *Plugin) EvictClient(h plugin.HostFacts) {
+	host := h.HostRoute
+	if host == "" {
+		return
+	}
+	user := resolveEffectiveUser(h)
+	port := resolveEffectivePort(h)
+	key := fmt.Sprintf("%s@%s:%d", user, host, port)
+	p.mu.Lock()
+	if c, ok := p.clients[key]; ok {
+		delete(p.clients, key)
+		p.mu.Unlock()
+		_ = c.Close()
+	} else {
+		p.mu.Unlock()
+	}
+}
+
 // GetClient retrieves or connects an SSH client for the host facts.
 func (p *Plugin) GetClient(h plugin.HostFacts) (*ssh.Client, error) {
 	host := h.HostRoute
@@ -385,9 +431,16 @@ func (p *Plugin) GetClient(h plugin.HostFacts) (*ssh.Client, error) {
 	p.mu.Lock()
 	if client, ok := p.clients[key]; ok {
 		p.mu.Unlock()
-		return client, nil
+		if _, _, err := client.SendRequest("keepalive@openssh.com", false, nil); err == nil {
+			return client, nil
+		}
+		p.mu.Lock()
+		delete(p.clients, key)
+		p.mu.Unlock()
+		_ = client.Close()
+	} else {
+		p.mu.Unlock()
 	}
-	p.mu.Unlock()
 
 	cfg, err := BuildClientConfig(h)
 	if err != nil {
@@ -403,6 +456,12 @@ func (p *Plugin) GetClient(h plugin.HostFacts) (*ssh.Client, error) {
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
 		conn.Close()
+		if len(cfg.Auth) == 0 {
+			return nil, fmt.Errorf(
+				"ssh handshake failed to %s: %w (no credential offered: node has no vaultSecretId, no private_key/password override, and no ssh-agent socket — assign a vault secret or use authMethod=tailscale-ssh)",
+				addr, err,
+			)
+		}
 		return nil, fmt.Errorf("ssh handshake failed to %s: %w", addr, err)
 	}
 

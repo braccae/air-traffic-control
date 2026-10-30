@@ -1,5 +1,11 @@
 package hostcache
 
+import "database/sql"
+
+// SchemaVersion is the current database schema version.
+// Increment this constant when making schema changes that require migration.
+const SchemaVersion = 1
+
 // schemaDDL is the verbatim schema from src/utils/hostCacheDb.ts. It is the
 // source of truth for the shared database: do not rename, reorder or drop
 // anything without changing the TS side first.
@@ -7,6 +13,11 @@ package hostcache
 // NOTE: modernc.org/sqlite executes each statement in exec separately, so the
 // PRAGMAs are applied on open via the DSN (see openStore), not here.
 const schemaDDL = `
+CREATE TABLE IF NOT EXISTS schema_version (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS hosts (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -19,6 +30,7 @@ CREATE TABLE IF NOT EXISTS hosts (
   tailscale_host TEXT NOT NULL,
   status TEXT NOT NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
+  vault_secret_id TEXT,
   node_json TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -79,6 +91,18 @@ CREATE TABLE IF NOT EXISTS tag_inventory_chunks (
   vault_secret_id TEXT,
   auth_method TEXT NOT NULL,
   created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS firewall_rules (
+  id           TEXT PRIMARY KEY,
+  host_id      TEXT NOT NULL,
+  plugin       TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  params_json  TEXT NOT NULL,
+  permanent    INTEGER NOT NULL DEFAULT 1,
+  adopted      INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS ansible_queue_tasks (
@@ -166,10 +190,12 @@ CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_folders_name ON inventory_folders(name ASC);
 CREATE INDEX IF NOT EXISTS idx_chunks_created ON tag_inventory_chunks(created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_ansible_queue_status ON ansible_queue_tasks(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_firewall_rules_host ON firewall_rules(host_id, plugin);
 CREATE INDEX IF NOT EXISTS idx_vault_audit_ts ON vault_audit_log(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_audit_var ON vault_audit_log(variable_name);
 CREATE INDEX IF NOT EXISTS idx_vault_audit_host ON vault_audit_log(host);
 CREATE INDEX IF NOT EXISTS idx_cron_schedules_due ON cron_schedules(enabled, next_run_at);
+
 `
 
 // schemaEvolve mirrors the TS ALTER TABLE block: later versions of the cache
@@ -182,4 +208,30 @@ var schemaEvolve = []string{
 	`ALTER TABLE host_containers_cache ADD COLUMN root_pods_json TEXT DEFAULT '[]';`,
 	`ALTER TABLE host_containers_cache ADD COLUMN has_docker INTEGER DEFAULT 0;`,
 	`ALTER TABLE host_containers_cache ADD COLUMN docker_containers_json TEXT DEFAULT '[]';`,
+	`ALTER TABLE hosts ADD COLUMN vault_secret_id TEXT;`,
+	`ALTER TABLE tag_inventory_chunks ADD COLUMN vault_secret_id TEXT;`,
+}
+
+// GetCurrentSchemaVersion reads the schema version from the database.
+// Returns 0 if the schema_version table or row does not exist.
+func GetCurrentSchemaVersion(db *sql.DB) (int, error) {
+	var version int
+	err := db.QueryRow(`SELECT version FROM schema_version WHERE id = 1`).Scan(&version)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		// Table might not exist (e.g., database created before schema_version was added)
+		return 0, nil
+	}
+	return version, nil
+}
+
+// SetSchemaVersion upserts the schema version row in the database.
+func SetSchemaVersion(db *sql.DB, version int) error {
+	_, err := db.Exec(`
+		INSERT INTO schema_version (id, version) VALUES (1, ?)
+		ON CONFLICT(id) DO UPDATE SET version = excluded.version
+	`, version)
+	return err
 }

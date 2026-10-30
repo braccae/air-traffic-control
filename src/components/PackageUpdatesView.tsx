@@ -7,11 +7,12 @@ import {
   isKernelOrSystemUpdate,
 } from '../utils/packageManager.ts';
 import { safeFetchJson } from '../utils/apiDefensive.ts';
+import { BootcDeploymentsCard } from './BootcDeploymentsCard.tsx';
 import { compilePackageTask } from '../utils/ansibleQueueCompiler.ts';
 import { compileDaemonPluginMutation, stageTaskInQueue } from '../utils/drivers/index.ts';
 
 interface PackageUpdatesViewProps {
-  node: NodeItem;
+  node: NodeItem | null;
   onOpenTask?: (taskId: string) => void;
 }
 
@@ -98,6 +99,15 @@ export async function stageBootcImageSwitch(
 }
 
 export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, onOpenTask }) => {
+  if (!node) {
+    return (
+      <div className="flex flex-col gap-3 font-mono">
+        <div className="bg-[#171a2d] border border-[#26293c] rounded p-3">
+          <div className="text-[11px] text-[#8d909b]">No node selected</div>
+        </div>
+      </div>
+    );
+  }
   const [loading, setLoading] = useState<boolean>(false);
   const [applying, setApplying] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +126,10 @@ export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, on
     setStatusMessage(null);
     try {
       const result = await safeFetchJson<PackageCheckResult>(
-        `/api/nodes/${encodeURIComponent(node.id)}/packages/check${refresh ? '?refresh=true' : ''}`
+        `/api/nodes/${encodeURIComponent(node.id)}/packages/check${refresh ? '?refresh=true' : ''}`,
+        // Client-side deadline matching the daemon's 30s guard. A hung bootc
+        // status/registry call must not leave the section spinning forever.
+        { timeoutMs: 35000 }
       );
       if (result.success && result.data) {
         setCheckResult(result.data);
@@ -298,6 +311,9 @@ export const PackageUpdatesView: React.FC<PackageUpdatesViewProps> = ({ node, on
           )}
         </div>
       </div>
+
+      {/* bootc deployment inventory (booted / rollback / staged) */}
+      {checkResult?.manager === 'bootc' && <BootcDeploymentsCard check={checkResult} />}
 
       {/* bootc Image Switch Panel */}
       {checkResult?.manager === 'bootc' && checkResult.updates?.length === 0 && (

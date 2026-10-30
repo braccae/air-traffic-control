@@ -35,6 +35,14 @@ export interface AddNodeModalProps {
   initialTab?: 'tailscale' | 'manual_ssh' | 'winrm' | 'follow_tag';
   peers?: TailscalePeerOption[];
   onFollowTag?: (chunk: { tag: string; authMethod: string; sshUser?: string; vaultSecretId?: string }) => void;
+  nodes?: NodeItem[];
+}
+
+export interface VaultVariable {
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  maskedValue: string;
 }
 
 export const AddNodeModal: React.FC<AddNodeModalProps> = ({
@@ -46,6 +54,7 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
   initialTab = 'tailscale',
   peers,
   onFollowTag,
+  nodes = [],
 }) => {
   const [activeTab, setActiveTab] = useState<'tailscale' | 'manual_ssh' | 'winrm' | 'follow_tag'>(initialTab);
 
@@ -71,26 +80,35 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
   // Manual SSH / Secret / Vault state
   const [useSshAgent, setUseSshAgent] = useState(false);
   const [secretType, setSecretType] = useState<'password' | 'sshkey'>('password');
+  const [credentialMode, setCredentialMode] = useState<'existing' | 'new'>('existing');
+  const [newSecretName, setNewSecretName] = useState('');
   const [secretText, setSecretText] = useState('');
   const [masterVaultPassword, setMasterVaultPassword] = useState('');
   const [vaultStatus, setVaultStatus] = useState<{ hasPasswordSource: boolean; source: string } | null>(null);
   const [vaultError, setVaultError] = useState<string | null>(null);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [connectionResult, setConnectionResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   // WinRM state
   const [winrmPort, setWinrmPort] = useState(5985);
   const [winrmHttps, setWinrmHttps] = useState(false);
   const [winrmTransport, setWinrmTransport] = useState<'ntlm' | 'basic' | 'kerberos'>('ntlm');
   const [winrmUser, setWinrmUser] = useState('Administrator');
-  const [winrmPassword, setWinrmPassword] = useState('');
 
   // Follow Tag state
-  const [followTag, setFollowTag] = useState('tag:worker');
+  const [followTag, setFollowTag] = useState('');
   const [followSshUser, setFollowSshUser] = useState('core');
   const [followAuthMethod, setFollowAuthMethod] = useState<'tailscale-ssh' | 'vault-password' | 'vault-sshkey' | 'ssh-agent'>('tailscale-ssh');
+  const [followCredentialMode, setFollowCredentialMode] = useState<'existing' | 'new'>('existing');
+  const [followSecretName, setFollowSecretName] = useState('');
   const [followSecret, setFollowSecret] = useState('');
   const [followMasterPassword, setFollowMasterPassword] = useState('');
   const [tagSubmitting, setTagSubmitting] = useState(false);
   const [tagError, setTagError] = useState<string | null>(null);
+
+  // Vault variables for dropdown selection
+  const [vaultVariables, setVaultVariables] = useState<VaultVariable[]>([]);
+  const [selectedVaultSecretId, setSelectedVaultSecretId] = useState<string>('');
 
   // Sync peers prop if provided
   useEffect(() => {
@@ -98,6 +116,18 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
       setTsPeers(peers);
     }
   }, [peers]);
+
+  const refreshVaultVariables = async () => {
+    try {
+      const res = await fetch('/api/vault/variables');
+      const data = await res.json();
+      if (data.success && Array.isArray(data.variables)) {
+        setVaultVariables(data.variables);
+      }
+    } catch {
+      // Non-blocking; the operator can still type a secret name manually.
+    }
+  };
 
   // Fetch Tailscale peers and Vault status on open
   useEffect(() => {
@@ -124,6 +154,9 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
         })
         .catch(() => {});
     }
+
+    // Fetch vault variables for dropdown
+    refreshVaultVariables();
 
     fetch('/api/vault/status')
       .then(res => res.json())
@@ -166,26 +199,119 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
     }
   };
 
-  // Helper to encrypt secret via Ansible Vault
-  const encryptSecretWithVault = async (
-    plaintext: string,
+  // Create a named Ansible Vault variable and return its NAME. The node/chunk
+  // stores only this name; plaintext never reaches the node payload and the
+  // raw ciphertext is never used as an identifier.
+  const createVaultSecret = async (
     varName: string,
+    plaintext: string,
     passwordOverride?: string
   ): Promise<string> => {
-    const resp = await fetch('/api/vault/encrypt', {
+    const name = varName.trim();
+    if (!name) {
+      throw new Error('Secret name is required (e.g. ssh_key)');
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error('Secret name must match [A-Za-z_][A-Za-z0-9_]* (letters, digits, underscore)');
+    }
+    const resp = await fetch('/api/vault/variables', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        plaintext,
-        varName,
+        name,
+        value: plaintext,
         password: passwordOverride || undefined,
       }),
     });
-    const data = await resp.json();
-    if (!data.success || !data.vaultBlock) {
-      throw new Error(data.error || 'Ansible Vault encryption failed');
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.success) {
+      throw new Error(data.error || `Failed to create vault secret "${name}" (HTTP ${resp.status})`);
     }
-    return data.vaultBlock;
+    await refreshVaultVariables();
+    return name;
+  };
+
+  // Resolve the credential reference for a submission: an existing vault
+  // variable name, or a newly created one. Returns undefined when the operator
+  // chose neither (caller decides whether that is acceptable).
+  const ensureVaultSecret = async (opts: {
+    mode: 'existing' | 'new';
+    existingName: string;
+    newName: string;
+    value: string;
+    password: string;
+  }): Promise<string | undefined> => {
+    if (opts.mode === 'existing') {
+      return opts.existingName.trim() || undefined;
+    }
+    const value = opts.value.trim();
+    const name = opts.newName.trim();
+    if (!name && !value) return undefined;
+    if (!name) throw new Error('Secret name is required (e.g. ssh_key)');
+    if (!value) throw new Error(`Secret value is required for "${name}"`);
+    return createVaultSecret(name, value, opts.password.trim() || undefined);
+  };
+
+  // Real connectivity check against the host using POST /api/ssh/test. The
+  // response comes from the remote shell; nothing is simulated.
+  const handleTestConnection = async () => {
+    setConnectionResult(null);
+    setVaultError(null);
+    const host = (ip || tailscaleIp || tailscaleHost || name).trim();
+    if (!host) {
+      setConnectionResult({ ok: false, message: 'Enter a host address first' });
+      return;
+    }
+    setTestingConnection(true);
+    try {
+      let vaultSecretId: string | undefined;
+      if (!useSshAgent) {
+        try {
+          vaultSecretId = await ensureVaultSecret({
+            mode: credentialMode,
+            existingName: selectedVaultSecretId,
+            newName: newSecretName,
+            value: secretText,
+            password: masterVaultPassword,
+          });
+        } catch (err: any) {
+          setConnectionResult({ ok: false, message: err?.message || 'Credential resolution failed' });
+          return;
+        }
+      }
+      const resp = await fetch('/api/ssh/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host,
+          port: port || 22,
+          sshUser: sshUser || 'core',
+          vaultSecretId,
+          authMethod: useSshAgent ? 'ssh-agent' : undefined,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data.success) {
+        const identity = String(data.output || '')
+          .split('\n')
+          .map((line: string) => line.trim())
+          .filter(Boolean)
+          .join(', ');
+        setConnectionResult({
+          ok: true,
+          message: `Connected${identity ? ` — ${identity}` : ''} (${data.latencyMs ?? 0} ms)`,
+        });
+      } else {
+        setConnectionResult({
+          ok: false,
+          message: data.error || `SSH test failed (HTTP ${resp.status})`,
+        });
+      }
+    } catch (err: any) {
+      setConnectionResult({ ok: false, message: err?.message || 'SSH test failed' });
+    } finally {
+      setTestingConnection(false);
+    }
   };
 
   // Submit Handler for Tailscale Mesh & Manual SSH & WinRM
@@ -196,7 +322,14 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
     setVaultError(null);
     setProbeError(null);
 
-    let encryptedVaultId: string | undefined = undefined;
+    // WinRM onboarding is not implemented. Refuse to write a node that would
+    // look managed while no WinRM transport exists.
+    if (activeTab === 'winrm') {
+      setVaultError('WinRM onboarding is not implemented yet. No node was created.');
+      return;
+    }
+
+    let vaultSecretId: string | undefined = undefined;
     let effectiveAuthMethod = 'tailscale-ssh';
     let effectiveProtocol: 'ssh' | 'winrm' | 'tailscale_ssh' = 'tailscale_ssh';
     let effectivePort = port;
@@ -213,41 +346,27 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
       effectiveNodeType = 'linux';
 
       if (useSshAgent) {
-        effectiveAuthMethod = 'ssh-ed25519 (ssh-agent)';
-      } else if (secretText.trim()) {
-        try {
-          const varName = secretType === 'password' ? 'ansible_password' : 'ansible_ssh_private_key';
-          encryptedVaultId = await encryptSecretWithVault(
-            secretText.trim(),
-            varName,
-            masterVaultPassword.trim() || undefined
-          );
-          effectiveAuthMethod = secretType === 'password' ? 'vault-password' : 'vault-sshkey';
-        } catch (err: any) {
-          setVaultError(err?.message || 'Failed to encrypt secret into Ansible Vault');
-          return;
-        }
+        effectiveAuthMethod = 'ssh-agent';
       } else {
-        effectiveAuthMethod = 'ssh-ed25519 (ssh-agent)';
-      }
-    } else if (activeTab === 'winrm') {
-      effectiveProtocol = 'winrm';
-      effectivePort = winrmPort;
-      effectiveUser = winrmUser || 'Administrator';
-      effectiveNodeType = 'windows';
-      effectiveAuthMethod = 'winrm';
-
-      if (winrmPassword.trim()) {
         try {
-          encryptedVaultId = await encryptSecretWithVault(
-            winrmPassword.trim(),
-            'ansible_password',
-            masterVaultPassword.trim() || undefined
-          );
+          vaultSecretId = await ensureVaultSecret({
+            mode: credentialMode,
+            existingName: selectedVaultSecretId,
+            newName: newSecretName,
+            value: secretText,
+            password: masterVaultPassword,
+          });
         } catch (err: any) {
-          setVaultError(err?.message || 'Failed to encrypt WinRM password into Ansible Vault');
+          setVaultError(err?.message || 'Failed to save the vault secret');
           return;
         }
+        if (!vaultSecretId) {
+          setVaultError(
+            'Select an existing vault secret, create a new one, or enable ssh-agent forwarding.'
+          );
+          return;
+        }
+        effectiveAuthMethod = secretType === 'password' ? 'vault-password' : 'vault-sshkey';
       }
     }
 
@@ -266,6 +385,7 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
             port: effectivePort,
             sshUser: effectiveUser,
             authMethod: effectiveAuthMethod,
+            vaultSecretId,
           }),
         });
         const data = await resp.json();
@@ -280,6 +400,7 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
       }
     }
 
+    // Zero-Mock: keep specs empty when the probe did not return real hardware.
     const nodeSpecs = hardware
       ? {
           cpu: hardware.cpu,
@@ -292,37 +413,27 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
           secureBoot: hardware.secureBoot || 'Enabled',
           iommu: hardware.iommu || 'Enabled',
         }
-      : {
-          cpu: effectiveNodeType === 'windows' ? 'Windows Host CPU' : 'Auto-detected Host CPU',
-          vcpus: 4,
-          ramGiB: 8,
-          motherboard: 'Host Chassis',
-          bios: 'UEFI 2.8',
-          ipmi: 'DHCP',
-          ecc: 'Active',
-          secureBoot: 'Enabled',
-          iommu: 'Enabled',
-        };
+      : undefined;
 
-    const osDesc =
-      hardware?.osDescription ||
-      (effectiveNodeType === 'windows' ? 'Windows Server (WinRM)' : 'Linux (Probing)');
+    const osDesc = hardware?.osDescription || 'Pending probe';
+
+    // Dynamic tailnet detection from existing nodes. Empty when unknown.
+    const detectedTailnet = nodes.find(n => n.tailscaleHost)?.tailscaleHost?.split('.').slice(1).join('.') || '';
 
     onAddNode(
       buildProvisionedNode({
         name: name.trim(),
         group,
-        datacenter: 'leo-banjo.ts.net',
+        datacenter: detectedTailnet,
         nodeType: effectiveNodeType,
-        ip: ip || targetAddress,
+        ip: ip.trim() || (activeTab === 'manual_ssh' && !tailscaleIp ? name.trim() : ''),
         port: effectivePort,
-        winrmPort: effectiveProtocol === 'winrm' ? effectivePort : undefined,
         sshUser: effectiveUser,
         authMethod: effectiveAuthMethod,
         connectionProtocol: effectiveProtocol,
-        vaultSecretId: encryptedVaultId,
-        tailscaleIp: tailscaleIp || (targetAddress.startsWith('100.') ? targetAddress : ''),
-        tailscaleHost: tailscaleHost || `${name.trim().toLowerCase()}.leo-banjo.ts.net`,
+        vaultSecretId,
+        tailscaleIp,
+        tailscaleHost,
         osDescription: osDesc,
         specs: nodeSpecs,
       })
@@ -333,27 +444,33 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
 
   // Submit Handler for Follow Tag (Dynamic Inventory Chunk)
   const handleFollowTagSubmit = async () => {
-    if (!followTag.trim()) return;
+    const tagInput = normalizeTag(followTag);
+    if (!tagInput) {
+      setTagError('Enter a tag name, e.g. pve or host');
+      return;
+    }
 
     setTagSubmitting(true);
     setTagError(null);
 
     let vaultSecretId: string | undefined = undefined;
 
-    if (
-      (followAuthMethod === 'vault-password' || followAuthMethod === 'vault-sshkey') &&
-      followSecret.trim()
-    ) {
+    if (followAuthMethod === 'vault-password' || followAuthMethod === 'vault-sshkey') {
       try {
-        const varName =
-          followAuthMethod === 'vault-password' ? 'ansible_password' : 'ansible_ssh_private_key';
-        vaultSecretId = await encryptSecretWithVault(
-          followSecret.trim(),
-          varName,
-          followMasterPassword.trim() || undefined
-        );
+        vaultSecretId = await ensureVaultSecret({
+          mode: followCredentialMode,
+          existingName: selectedVaultSecretId,
+          newName: followSecretName,
+          value: followSecret,
+          password: followMasterPassword,
+        });
       } catch (err: any) {
-        setTagError(err?.message || 'Failed to encrypt shared tag credentials into Ansible Vault');
+        setTagError(err?.message || 'Failed to save the shared tag credential');
+        setTagSubmitting(false);
+        return;
+      }
+      if (!vaultSecretId) {
+        setTagError('Select an existing vault secret or create a new one for this tag.');
         setTagSubmitting(false);
         return;
       }
@@ -364,7 +481,7 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          tag: followTag.trim(),
+          tag: tagInput,
           authMethod: followAuthMethod,
           sshUser: followSshUser.trim() || undefined,
           vaultSecretId,
@@ -378,7 +495,7 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
 
       if (onFollowTag) {
         onFollowTag({
-          tag: followTag.trim(),
+          tag: tagInput,
           authMethod: followAuthMethod,
           sshUser: followSshUser.trim() || undefined,
           vaultSecretId,
@@ -656,57 +773,120 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-1.5">
                         <span className="material-symbols-outlined text-[#8cd6cb] text-[16px]">lock</span>
-                        <span className="text-[#dfe1fa] font-bold text-[11px]">Ansible Vault Encryption</span>
+                        <span className="text-[#dfe1fa] font-bold text-[11px]">SSH Vault Secrets</span>
                       </div>
                       <div className="flex gap-2">
                         <label className="flex items-center gap-1 cursor-pointer text-[10px] text-[#c3c6d2]">
                           <input
                             type="radio"
-                            name="secretType"
-                            checked={secretType === 'password'}
-                            onChange={() => setSecretType('password')}
+                            name="credentialMode"
+                            checked={credentialMode === 'existing'}
+                            onChange={() => setCredentialMode('existing')}
                           />
-                          <span>Password</span>
+                          <span>Existing secret</span>
                         </label>
                         <label className="flex items-center gap-1 cursor-pointer text-[10px] text-[#c3c6d2]">
                           <input
                             type="radio"
-                            name="secretType"
-                            checked={secretType === 'sshkey'}
-                            onChange={() => setSecretType('sshkey')}
+                            name="credentialMode"
+                            checked={credentialMode === 'new'}
+                            onChange={() => setCredentialMode('new')}
                           />
-                          <span>Private SSH Key</span>
+                          <span>New secret</span>
                         </label>
                       </div>
                     </div>
 
-                    <div>
-                      <label className="block text-[#8d909b] text-[10px] mb-1">
-                        {secretType === 'password'
-                          ? 'PLAINTEXT PASSWORD (WILL BE ENCRYPTED BEFORE SAVING)'
-                          : 'PRIVATE SSH KEY (PEM/OPENSSH; WILL BE ENCRYPTED BEFORE SAVING)'}
-                      </label>
-                      {secretType === 'password' ? (
-                        <input
-                          type="password"
-                          value={secretText}
-                          onChange={e => setSecretText(e.target.value)}
-                          placeholder="Host SSH password..."
+                    {credentialMode === 'existing' ? (
+                      <div>
+                        <label className="block text-[#8d909b] text-[10px] mb-1">
+                          SELECT AN EXISTING VAULT VARIABLE
+                        </label>
+                        <select
+                          value={selectedVaultSecretId}
+                          onChange={e => setSelectedVaultSecretId(e.target.value)}
                           className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#b0c9ff] outline-none"
-                        />
-                      ) : (
-                        <textarea
-                          rows={3}
-                          value={secretText}
-                          onChange={e => setSecretText(e.target.value)}
-                          placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..."
-                          className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#b0c9ff] outline-none font-mono text-[10px]"
-                        />
-                      )}
-                    </div>
+                        >
+                          <option value="">
+                            {vaultVariables.length === 0
+                              ? '-- No vault variables yet: switch to New secret --'
+                              : '-- Choose a vault variable --'}
+                          </option>
+                          {vaultVariables.map(v => (
+                            <option key={v.name} value={v.name}>
+                              {v.name} {v.maskedValue ? `(${v.maskedValue})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-[9px] text-[#8d909b] mt-1">
+                          Only the variable name is stored on the node. The value is decrypted on the
+                          coordinator at connection time.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <div>
+                          <label className="block text-[#8d909b] text-[10px] mb-1">
+                            SECRET NAME (E.G. ssh_key)
+                          </label>
+                          <input
+                            type="text"
+                            value={newSecretName}
+                            onChange={e => setNewSecretName(e.target.value)}
+                            placeholder="ssh_key"
+                            className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#8cd6cb] font-bold focus:border-[#b0c9ff] outline-none"
+                          />
+                          <p className="text-[9px] text-[#8d909b] mt-1">
+                            Letters, digits and underscores. SSH keys are secrets too — this name is
+                            yours to choose.
+                          </p>
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                          <label className="block text-[#8d909b] text-[10px]">SECRET VALUE</label>
+                          <div className="flex gap-2">
+                            <label className="flex items-center gap-1 cursor-pointer text-[10px] text-[#c3c6d2]">
+                              <input
+                                type="radio"
+                                name="secretType"
+                                checked={secretType === 'password'}
+                                onChange={() => setSecretType('password')}
+                              />
+                              <span>Password</span>
+                            </label>
+                            <label className="flex items-center gap-1 cursor-pointer text-[10px] text-[#c3c6d2]">
+                              <input
+                                type="radio"
+                                name="secretType"
+                                checked={secretType === 'sshkey'}
+                                onChange={() => setSecretType('sshkey')}
+                              />
+                              <span>Private SSH Key</span>
+                            </label>
+                          </div>
+                        </div>
+                        {secretType === 'password' ? (
+                          <input
+                            type="password"
+                            value={secretText}
+                            onChange={e => setSecretText(e.target.value)}
+                            placeholder="Host SSH password..."
+                            className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#b0c9ff] outline-none"
+                          />
+                        ) : (
+                          <textarea
+                            rows={3}
+                            value={secretText}
+                            onChange={e => setSecretText(e.target.value)}
+                            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..."
+                            className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#b0c9ff] outline-none font-mono text-[10px]"
+                          />
+                        )}
+                      </div>
+                    )}
 
                     {/* Master Vault Password when ask_password is required */}
-                    {vaultStatus?.source === 'ask_password' && (
+                    {vaultStatus?.source === 'ask_password' && credentialMode === 'new' && (
                       <div>
                         <label className="block text-[#ffd580] text-[10px] mb-1">
                           MASTER VAULT PASSWORD (REQUIRED FOR ENCRYPTION)
@@ -722,10 +902,35 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
                     )}
 
                     <div className="text-[10px] text-[#8d909b]">
-                      Credentials are piped through <code className="text-[#8cd6cb]">ansible-vault encrypt_string</code> directly via stdin. Raw passwords or keys are strictly never written to disk or SQLite.
+                      Credentials are encrypted with <code className="text-[#8cd6cb]">ansible-vault encrypt_string</code> on
+                      the coordinator. Plaintext is never written to SQLite or sent to the node.
                     </div>
                   </div>
                 )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleTestConnection}
+                    disabled={testingConnection || !name.trim()}
+                    className="px-3 py-1.5 bg-[#1b1e31] hover:bg-[#26293c] text-[#8cd6cb] border border-[#8cd6cb]/30 rounded cursor-pointer flex items-center gap-1 disabled:opacity-50"
+                  >
+                    <span className={`material-symbols-outlined text-[15px] ${testingConnection ? 'animate-spin' : ''}`}>
+                      {testingConnection ? 'sync' : 'network_check'}
+                    </span>
+                    <span>{testingConnection ? 'Testing...' : 'Test Connection'}</span>
+                  </button>
+                  {connectionResult && (
+                    <span
+                      className={`text-[10px] font-mono truncate ${
+                        connectionResult.ok ? 'text-[#8cd6cb]' : 'text-[#ffb4ab]'
+                      }`}
+                      title={connectionResult.message}
+                    >
+                      {connectionResult.message}
+                    </span>
+                  )}
+                </div>
               </div>
             )}
 
@@ -809,39 +1014,16 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
                   </div>
                 </div>
 
-                <div className="p-3 rounded bg-[#121528] border border-[#26293c] space-y-2">
+                <div className="p-3 rounded bg-[#2d281b] border border-[#ffd580]/40 space-y-1.5">
                   <div className="flex items-center gap-1.5">
-                    <span className="material-symbols-outlined text-[#8cd6cb] text-[16px]">lock</span>
-                    <span className="text-[#dfe1fa] font-bold text-[11px]">Ansible Vault Encryption</span>
+                    <span className="material-symbols-outlined text-[#ffd580] text-[16px]">construction</span>
+                    <span className="text-[#ffd580] font-bold text-[11px]">WinRM onboarding is not implemented</span>
                   </div>
-
-                  <div>
-                    <label className="block text-[#8d909b] text-[10px] mb-1">
-                      WINRM PASSWORD (WILL BE ENCRYPTED VIA ANSIBLE VAULT)
-                    </label>
-                    <input
-                      type="password"
-                      value={winrmPassword}
-                      onChange={e => setWinrmPassword(e.target.value)}
-                      placeholder="Windows Administrator password..."
-                      className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#ffd580] outline-none"
-                    />
-                  </div>
-
-                  {vaultStatus?.source === 'ask_password' && (
-                    <div>
-                      <label className="block text-[#ffd580] text-[10px] mb-1">
-                        MASTER VAULT PASSWORD (REQUIRED FOR ENCRYPTION)
-                      </label>
-                      <input
-                        type="password"
-                        value={masterVaultPassword}
-                        onChange={e => setMasterVaultPassword(e.target.value)}
-                        placeholder="Enter master vault password..."
-                        className="w-full bg-[#1b1e31] border border-[#ffd580]/40 rounded px-2.5 py-1.5 text-[#dfe1fa] outline-none"
-                      />
-                    </div>
-                  )}
+                  <p className="text-[10px] text-[#c3c6d2]">
+                    No WinRM transport exists in the daemon yet, so this form cannot verify or save a
+                    Windows host. Add Node is disabled for this tab to avoid recording metadata for a
+                    host that is not actually managed.
+                  </p>
                 </div>
               </div>
             )}
@@ -880,8 +1062,9 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
               </button>
               <button
                 type="submit"
-                disabled={probing || !name.trim()}
-                className="px-3 py-1.5 bg-[#b0c9ff] hover:bg-[#d8e2ff] text-[#002e68] font-bold rounded cursor-pointer flex items-center gap-1 shadow-sm disabled:opacity-50"
+                disabled={probing || !name.trim() || activeTab === 'winrm'}
+                title={activeTab === 'winrm' ? 'WinRM onboarding is not implemented' : undefined}
+                className="px-3 py-1.5 bg-[#b0c9ff] hover:bg-[#d8e2ff] text-[#002e68] font-bold rounded cursor-pointer flex items-center gap-1 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <span className="material-symbols-outlined text-[15px]">
                   {probing ? 'sync' : 'add'}
@@ -906,14 +1089,24 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
             </div>
 
             <div>
-              <label className="block text-[#8d909b] mb-1">TAG NAME (E.G. tag:worker)</label>
-              <input
-                type="text"
-                value={followTag}
-                onChange={e => setFollowTag(e.target.value)}
-                placeholder="tag:worker"
-                className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#d0bcff] outline-none"
-              />
+              <label className="block text-[#8d909b] mb-1">TAG NAME</label>
+              <div className="flex items-center gap-1">
+                <span className="px-2 py-1.5 rounded bg-[#121528] border border-[#26293c] text-[#8d909b]">
+                  tag:
+                </span>
+                <input
+                  type="text"
+                  value={followTag}
+                  onChange={e => setFollowTag(e.target.value)}
+                  placeholder="pve"
+                  className="flex-1 bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#d0bcff] outline-none"
+                />
+              </div>
+              <p className="text-[9px] text-[#8d909b] mt-1">
+                Enter the plain tag name (e.g. <code className="text-[#d0bcff]">pve</code> or{' '}
+                <code className="text-[#d0bcff]">host</code>). The <code>tag:</code> prefix is added
+                automatically.
+              </p>
             </div>
 
             {/* Live Matching Peers Preview */}
@@ -961,36 +1154,100 @@ export const AddNodeModal: React.FC<AddNodeModalProps> = ({
 
             {(followAuthMethod === 'vault-password' || followAuthMethod === 'vault-sshkey') && (
               <div className="p-3 rounded bg-[#121528] border border-[#26293c] space-y-2">
-                <div className="flex items-center gap-1.5">
-                  <span className="material-symbols-outlined text-[#8cd6cb] text-[16px]">lock</span>
-                  <span className="text-[#dfe1fa] font-bold text-[11px]">Shared Ansible Vault Secret</span>
-                </div>
-                <div>
-                  <label className="block text-[#8d909b] text-[10px] mb-1">
-                    {followAuthMethod === 'vault-password'
-                      ? 'SHARED PASSWORD (ENCRYPTED BEFORE SAVING)'
-                      : 'SHARED PRIVATE SSH KEY (ENCRYPTED BEFORE SAVING)'}
-                  </label>
-                  {followAuthMethod === 'vault-password' ? (
-                    <input
-                      type="password"
-                      value={followSecret}
-                      onChange={e => setFollowSecret(e.target.value)}
-                      placeholder="Shared password for all tag hosts..."
-                      className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#d0bcff] outline-none"
-                    />
-                  ) : (
-                    <textarea
-                      rows={3}
-                      value={followSecret}
-                      onChange={e => setFollowSecret(e.target.value)}
-                      placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..."
-                      className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#d0bcff] outline-none font-mono text-[10px]"
-                    />
-                  )}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[#8cd6cb] text-[16px]">lock</span>
+                    <span className="text-[#dfe1fa] font-bold text-[11px]">Shared SSH Vault Secret</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <label className="flex items-center gap-1 cursor-pointer text-[10px] text-[#c3c6d2]">
+                      <input
+                        type="radio"
+                        name="followCredentialMode"
+                        checked={followCredentialMode === 'existing'}
+                        onChange={() => setFollowCredentialMode('existing')}
+                      />
+                      <span>Existing secret</span>
+                    </label>
+                    <label className="flex items-center gap-1 cursor-pointer text-[10px] text-[#c3c6d2]">
+                      <input
+                        type="radio"
+                        name="followCredentialMode"
+                        checked={followCredentialMode === 'new'}
+                        onChange={() => setFollowCredentialMode('new')}
+                      />
+                      <span>New secret</span>
+                    </label>
+                  </div>
                 </div>
 
-                {vaultStatus?.source === 'ask_password' && (
+                {followCredentialMode === 'existing' ? (
+                  <div>
+                    <label className="block text-[#8d909b] text-[10px] mb-1">
+                      SELECT AN EXISTING VAULT VARIABLE
+                    </label>
+                    <select
+                      value={selectedVaultSecretId}
+                      onChange={e => setSelectedVaultSecretId(e.target.value)}
+                      className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#d0bcff] outline-none"
+                    >
+                      <option value="">
+                        {vaultVariables.length === 0
+                          ? '-- No vault variables yet: switch to New secret --'
+                          : '-- Choose a vault variable --'}
+                      </option>
+                      {vaultVariables.map(v => (
+                        <option key={v.name} value={v.name}>
+                          {v.name} {v.maskedValue ? `(${v.maskedValue})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[9px] text-[#8d909b] mt-1">
+                      The same variable can back both manual hosts and followed tags.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div>
+                      <label className="block text-[#8d909b] text-[10px] mb-1">
+                        SECRET NAME (E.G. ssh_key)
+                      </label>
+                      <input
+                        type="text"
+                        value={followSecretName}
+                        onChange={e => setFollowSecretName(e.target.value)}
+                        placeholder="ssh_key"
+                        className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#8cd6cb] font-bold focus:border-[#d0bcff] outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[#8d909b] text-[10px] mb-1">
+                        {followAuthMethod === 'vault-password'
+                          ? 'SHARED PASSWORD (ENCRYPTED BEFORE SAVING)'
+                          : 'SHARED PRIVATE SSH KEY (ENCRYPTED BEFORE SAVING)'}
+                      </label>
+                      {followAuthMethod === 'vault-password' ? (
+                        <input
+                          type="password"
+                          value={followSecret}
+                          onChange={e => setFollowSecret(e.target.value)}
+                          placeholder="Shared password for all tag hosts..."
+                          className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#d0bcff] outline-none"
+                        />
+                      ) : (
+                        <textarea
+                          rows={3}
+                          value={followSecret}
+                          onChange={e => setFollowSecret(e.target.value)}
+                          placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..."
+                          className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] focus:border-[#d0bcff] outline-none font-mono text-[10px]"
+                        />
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {vaultStatus?.source === 'ask_password' && followCredentialMode === 'new' && (
                   <div>
                     <label className="block text-[#ffd580] text-[10px] mb-1">
                       MASTER VAULT PASSWORD (REQUIRED FOR ENCRYPTION)

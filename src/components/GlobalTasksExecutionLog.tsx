@@ -43,6 +43,18 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
   const [activeTab, setActiveTab] = useState<ConsoleDrawerTab>(activeDrawerTab || 'active');
   const [isExpanded, setIsExpanded] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
+  // Draggable console height (px). Replaces the old big/small toggle.
+  const [consoleHeight, setConsoleHeight] = useState<number>(() => {
+    const saved = typeof window !== 'undefined' ? window.localStorage.getItem('atc-console-height') : null;
+    const n = saved ? Number(saved) : 176;
+    return Number.isFinite(n) && n >= 28 && n <= 600 ? n : 176;
+  });
+  const dragStateRef = React.useRef<{ startY: number; startH: number } | null>(null);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty('--console-height', `${consoleHeight}px`);
+    try { window.localStorage.setItem('atc-console-height', String(consoleHeight)); } catch {}
+  }, [consoleHeight]);
   const [selectedStdoutTaskId, setSelectedStdoutTaskId] = useState<string | null>(null);
   const [showExitedTasks, setShowExitedTasks] = useState(false);
 
@@ -234,14 +246,39 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
     ? runningOrRecentAnsible.logs
     : tasks.find(t => t.logs && t.logs.length > 0)?.logs || null;
 
+  const handleResizeStart = (e: React.PointerEvent) => {
+    e.preventDefault();
+    dragStateRef.current = { startY: e.clientY, startH: consoleHeight };
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  };
+  const handleResizeMove = (e: React.PointerEvent) => {
+    if (!dragStateRef.current) return;
+    const delta = dragStateRef.current.startY - e.clientY;
+    const next = Math.min(600, Math.max(28, dragStateRef.current.startH + delta));
+    setConsoleHeight(next);
+    setIsCollapsed(next <= 28);
+    setIsExpanded(next >= 384);
+  };
+  const handleResizeEnd = () => {
+    dragStateRef.current = null;
+  };
+
   return (
     <section
       id="global-tasks-drawer"
       aria-label="Console"
-      className={`fixed bottom-0 left-0 right-0 bg-[#0a0d1f] z-50 flex flex-col shadow-[0_-2px_10px_rgba(0,0,0,0.6)] border-t border-[#26293c] transition-all duration-300 ${
-        isCollapsed ? 'h-7' : isExpanded ? 'h-96' : 'h-44'
-      }`}
+      className="fixed bottom-0 left-0 right-0 bg-[#0a0d1f] z-50 flex flex-col shadow-[0_-2px_10px_rgba(0,0,0,0.6)] border-t border-[#26293c]"
+      style={{ height: consoleHeight }}
     >
+      {/* Drag handle to resize the console height */}
+      <div
+        onPointerDown={handleResizeStart}
+        onPointerMove={handleResizeMove}
+        onPointerUp={handleResizeEnd}
+        onPointerCancel={handleResizeEnd}
+        className="h-1.5 cursor-ns-resize bg-[#26293c] hover:bg-[#b0c9ff]/40 transition-colors shrink-0"
+        title="Drag to resize console"
+      />
       {/* Top drawer control bar */}
       <div className="h-7 bg-[#171a2d] px-2 sm:px-3 flex items-center justify-between border-b border-[#26293c] gap-2">
         {/* Pinned Left Section: Title and Category Tabs */}
@@ -383,7 +420,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
           {/* Expand / Minimize buttons */}
           <button
             type="button"
-            onClick={() => setIsExpanded(!isExpanded)}
+            onClick={() => { setIsExpanded(v => !v); setConsoleHeight(v => (v >= 384 ? 176 : 400)); }}
             title={isExpanded ? 'Restore size' : 'Expand log view'}
             className="material-symbols-outlined text-[16px] text-[#8d909b] hover:text-[#dfe1fa] p-0.5 cursor-pointer shrink-0"
           >
@@ -391,7 +428,7 @@ export const GlobalTasksExecutionLog: React.FC<GlobalTasksExecutionLogProps> = (
           </button>
           <button
             type="button"
-            onClick={() => setIsCollapsed(!isCollapsed)}
+            onClick={() => { setIsCollapsed(v => !v); setConsoleHeight(v => (v <= 28 ? 176 : 28)); }}
             title={isCollapsed ? 'Open log panel' : 'Collapse log panel'}
             className="material-symbols-outlined text-[16px] text-[#8d909b] hover:text-[#dfe1fa] p-0.5 cursor-pointer shrink-0"
           >

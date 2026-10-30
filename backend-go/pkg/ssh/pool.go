@@ -3,16 +3,20 @@ package ssh
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"air-traffic-control/backend/pkg/secrets"
 	"air-traffic-control/backend/pkg/types"
 )
 
@@ -75,8 +79,10 @@ func (p *ClientPool) ActiveCount() int {
 	return len(p.clients)
 }
 
-// poolKey constructs a unique cache key for a host/port/user credential.
-func poolKey(cfg Config) string {
+// poolKey constructs a unique cache key for a host/port/user credential
+// identity. The credential fingerprint is part of the key so rotating a vault
+// secret never reuses a connection authenticated with the previous value.
+func poolKey(cfg Config, credential string) string {
 	port := cfg.Port
 	if port == 0 {
 		port = 22
@@ -85,22 +91,59 @@ func poolKey(cfg Config) string {
 	if user == "" {
 		user = "core"
 	}
-	return fmt.Sprintf("%s@%s:%d", user, cfg.Host, port)
+	return fmt.Sprintf("%s@%s:%d#%s", user, cfg.Host, port, credential)
 }
 
-// GetClient retrieves or lazily establishes a pooled SSH client.
-func (p *ClientPool) GetClient(ctx context.Context, cfg Config) (*ssh.Client, error) {
+// resolvedSecret resolves cfg.VaultSecretID through the process-wide vault
+// resolver. A nil result means the config references no vault secret.
+func resolvedSecret(ctx context.Context, cfg Config) (*secrets.Secret, error) {
+	id := strings.TrimSpace(cfg.VaultSecretID)
+	if id == "" {
+		return nil, nil
+	}
+	sec, err := secrets.Resolve(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &sec, nil
+}
+
+// credentialFingerprint is a non-reversible identity for the credential used by
+// a connection. It keeps plaintext out of pool keys and logs.
+func credentialFingerprint(cfg Config, sec *secrets.Secret) string {
+	if sec != nil {
+		sum := sha256.Sum256([]byte(sec.Value))
+		return hex.EncodeToString(sum[:8])
+	}
+	if len(cfg.PrivateKey) > 0 {
+		sum := sha256.Sum256(cfg.PrivateKey)
+		return "key-" + hex.EncodeToString(sum[:8])
+	}
+	if cfg.Password != "" {
+		sum := sha256.Sum256([]byte(cfg.Password))
+		return "pw-" + hex.EncodeToString(sum[:8])
+	}
+	return "agent"
+}
+
+// connFor returns a live pooled client for cfg, dialing on demand.
+func (p *ClientPool) connFor(ctx context.Context, cfg Config) (*pooledClient, error) {
+	sec, err := resolvedSecret(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	key := poolKey(cfg, credentialFingerprint(cfg, sec))
+
 	p.mu.RLock()
 	if p.closed {
 		p.mu.RUnlock()
 		return nil, errors.New("ssh client pool is closed")
 	}
-	key := poolKey(cfg)
 	pc, ok := p.clients[key]
 	p.mu.RUnlock()
 
 	if ok && !pc.isClosed() {
-		return pc.client, nil
+		return pc, nil
 	}
 
 	p.mu.Lock()
@@ -112,7 +155,7 @@ func (p *ClientPool) GetClient(ctx context.Context, cfg Config) (*ssh.Client, er
 
 	// Double-check under write lock
 	if pc, ok = p.clients[key]; ok && !pc.isClosed() {
-		return pc.client, nil
+		return pc, nil
 	}
 
 	// Evict any stale client
@@ -121,8 +164,11 @@ func (p *ClientPool) GetClient(ctx context.Context, cfg Config) (*ssh.Client, er
 		delete(p.clients, key)
 	}
 
-	// Lazily dial fresh client
-	client, err := dialSSH(cfg)
+	clientCfg, methods, err := buildClientConfig(cfg, sec)
+	if err != nil {
+		return nil, err
+	}
+	client, err := dialSSH(cfg, clientCfg, methods)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +187,16 @@ func (p *ClientPool) GetClient(ctx context.Context, cfg Config) (*ssh.Client, er
 	// Start background keepalive routine
 	go p.runKeepalive(keepCtx, newPC)
 
-	return client, nil
+	return newPC, nil
+}
+
+// GetClient retrieves or lazily establishes a pooled SSH client.
+func (p *ClientPool) GetClient(ctx context.Context, cfg Config) (*ssh.Client, error) {
+	pc, err := p.connFor(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return pc.client, nil
 }
 
 func (pc *pooledClient) isClosed() bool {
@@ -206,17 +261,39 @@ func (p *ClientPool) runKeepalive(ctx context.Context, pc *pooledClient) {
 	}
 }
 
+// transientTransportMarkers are netstack / OS errors that mean the pooled
+// connection is gone but a fresh dial may succeed. Tailscale's gVisor netstack
+// reports aborted TCP flows as "operation aborted" (tcpip.ErrAborted), which
+// happens whenever ATC's tsnet node is restarted under an open session.
 func isConnectionDead(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNREFUSED) {
 		return true
 	}
-	str := err.Error()
-	return str == "EOF" ||
-		errors.Is(err, io.ErrUnexpectedEOF) ||
-		errors.Is(err, io.ErrClosedPipe)
+	str := strings.ToLower(err.Error())
+	if str == "eof" {
+		return true
+	}
+	for _, marker := range []string{
+		"operation aborted",
+		"connection was refused",
+		"connection refused",
+		"connection reset by peer",
+		"broken pipe",
+		"use of closed network connection",
+		"unexpected eof",
+		"closed pipe",
+	} {
+		if strings.Contains(str, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // acquireSession acquires a slot from the per-host semaphore, bounded by MaxSessionsPerHost.
@@ -242,34 +319,25 @@ func (p *ClientPool) RunCommand(ctx context.Context, cfg Config, command string)
 	out, err := p.runCommandOnce(ctx, cfg, command)
 	if err != nil && isConnectionDead(err) {
 		// Evict dead client and retry once
-		key := poolKey(cfg)
-		p.Evict(key)
+		p.evictConfig(ctx, cfg)
 		return p.runCommandOnce(ctx, cfg, command)
 	}
 	return out, err
 }
 
-func (p *ClientPool) runCommandOnce(ctx context.Context, cfg Config, command string) (string, error) {
-	key := poolKey(cfg)
-
-	// Retrieve pooled entry
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return "", errors.New("ssh client pool is closed")
+// evictConfig drops the pooled connection bound to cfg's credential identity.
+func (p *ClientPool) evictConfig(ctx context.Context, cfg Config) {
+	sec, err := resolvedSecret(ctx, cfg)
+	if err != nil {
+		return
 	}
-	pc, ok := p.clients[key]
-	if !ok || pc.isClosed() {
-		p.mu.Unlock()
-		_, err := p.GetClient(ctx, cfg)
-		if err != nil {
-			return "", err
-		}
-		p.mu.RLock()
-		pc = p.clients[key]
-		p.mu.RUnlock()
-	} else {
-		p.mu.Unlock()
+	p.Evict(poolKey(cfg, credentialFingerprint(cfg, sec)))
+}
+
+func (p *ClientPool) runCommandOnce(ctx context.Context, cfg Config, command string) (string, error) {
+	pc, err := p.connFor(ctx, cfg)
+	if err != nil {
+		return "", err
 	}
 
 	if pc == nil || pc.client == nil {
@@ -347,8 +415,9 @@ func (p *ClientPool) Close() error {
 	return nil
 }
 
-// dialSSH builds the client config and dials TCP.
-func dialSSH(cfg Config) (*ssh.Client, error) {
+// buildClientConfig assembles SSH auth methods from a resolved vault secret,
+// literal credentials, and the local ssh-agent (in that order).
+func buildClientConfig(cfg Config, sec *secrets.Secret) (*ssh.ClientConfig, []string, error) {
 	port := cfg.Port
 	if port == 0 {
 		port = 22
@@ -359,23 +428,50 @@ func dialSSH(cfg Config) (*ssh.Client, error) {
 	}
 
 	authMethods := []ssh.AuthMethod{}
+	methods := []string{}
+
+	if sec != nil {
+		switch sec.Kind {
+		case secrets.KindPrivateKey:
+			var signer ssh.Signer
+			var err error
+			if cfg.Passphrase != "" {
+				signer, err = ssh.ParsePrivateKeyWithPassphrase([]byte(sec.Value), []byte(cfg.Passphrase))
+			} else {
+				signer, err = ssh.ParsePrivateKey([]byte(sec.Value))
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("vault secret %q is not a usable SSH private key: %w", sec.Name, err)
+			}
+			authMethods = append(authMethods, ssh.PublicKeys(signer))
+			methods = append(methods, "vault-private-key:"+sec.Name)
+		case secrets.KindPassword:
+			authMethods = append(authMethods, ssh.Password(sec.Value))
+			methods = append(methods, "vault-password:"+sec.Name)
+		}
+	} else {
+		if len(cfg.PrivateKey) > 0 {
+			var signer ssh.Signer
+			var err error
+			if cfg.Passphrase != "" {
+				signer, err = ssh.ParsePrivateKeyWithPassphrase(cfg.PrivateKey, []byte(cfg.Passphrase))
+			} else {
+				signer, err = ssh.ParsePrivateKey(cfg.PrivateKey)
+			}
+			if err == nil {
+				authMethods = append(authMethods, ssh.PublicKeys(signer))
+				methods = append(methods, "private-key")
+			}
+		}
+		if cfg.Password != "" {
+			authMethods = append(authMethods, ssh.Password(cfg.Password))
+			methods = append(methods, "password")
+		}
+	}
+
 	if agentAuth, _ := getSSHAgentAuthMethod(); agentAuth != nil {
 		authMethods = append(authMethods, agentAuth)
-	}
-	if len(cfg.PrivateKey) > 0 {
-		var signer ssh.Signer
-		var err error
-		if cfg.Passphrase != "" {
-			signer, err = ssh.ParsePrivateKeyWithPassphrase(cfg.PrivateKey, []byte(cfg.Passphrase))
-		} else {
-			signer, err = ssh.ParsePrivateKey(cfg.PrivateKey)
-		}
-		if err == nil {
-			authMethods = append(authMethods, ssh.PublicKeys(signer))
-		}
-	}
-	if cfg.Password != "" {
-		authMethods = append(authMethods, ssh.Password(cfg.Password))
+		methods = append(methods, "ssh-agent")
 	}
 
 	timeout := cfg.Timeout
@@ -383,13 +479,70 @@ func dialSSH(cfg Config) (*ssh.Client, error) {
 		timeout = 8 * time.Second
 	}
 
-	sshConfig := &ssh.ClientConfig{
+	return &ssh.ClientConfig{
 		User:            user,
 		Auth:            authMethods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         timeout,
+	}, methods, nil
+}
+
+// OfferAuthMethods reports the authentication methods a connection attempt
+// would offer, and validates that any referenced vault secret resolves. It does
+// not open a connection, so it is safe to call from a dry-run/test endpoint.
+func OfferAuthMethods(cfg Config) ([]string, error) {
+	sec, err := resolvedSecret(context.Background(), cfg)
+	if err != nil {
+		return nil, err
+	}
+	_, methods, err := buildClientConfig(cfg, sec)
+	if err != nil {
+		return nil, err
+	}
+	return methods, nil
+}
+
+// dialSSH dials TCP and completes the SSH handshake. When cfg.Dialer is set the
+// TCP hop is carried by that transport (tsnet mesh) instead of the host stack.
+func dialSSH(cfg Config, clientCfg *ssh.ClientConfig, methods []string) (*ssh.Client, error) {
+	port := cfg.Port
+	if port == 0 {
+		port = 22
+	}
+	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", port))
+
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 8 * time.Second
 	}
 
-	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", port))
-	return ssh.Dial("tcp", addr, sshConfig)
+	dial := func() (net.Conn, error) {
+		if cfg.Dialer != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			return cfg.Dialer(ctx, "tcp", addr)
+		}
+		return net.DialTimeout("tcp", addr, timeout)
+	}
+
+	conn, err := dial()
+	if err == nil {
+		_ = conn.SetDeadline(time.Now().Add(timeout))
+		clientConn, chans, reqs, handshakeErr := ssh.NewClientConn(conn, addr, clientCfg)
+		if handshakeErr != nil {
+			_ = conn.Close()
+			err = handshakeErr
+		} else {
+			_ = conn.SetDeadline(time.Time{})
+			return ssh.NewClient(clientConn, chans, reqs), nil
+		}
+	}
+
+	if len(methods) == 0 {
+		return nil, fmt.Errorf(
+			"ssh handshake failed to %s: %w (no authentication method available: no ssh-agent socket and no vaultSecretId configured)",
+			addr, err,
+		)
+	}
+	return nil, fmt.Errorf("ssh handshake failed to %s using %s: %w", addr, strings.Join(methods, ", "), err)
 }

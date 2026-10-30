@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { GlobalTaskItem, NodeItem, QueuedAnsibleTask } from '../types/index.ts';
-import type { DatacenterSection } from '../utils/navigationViewModel.ts';
+import type { DatacenterSettingPageId } from '../utils/navigationViewModel.ts';
 import { calculateClusterHealthScore } from '../utils/navigationViewModel.ts';
 import { formatBytes } from '../utils/orchestrator.ts';
 import { safeFetchJson } from '../utils/apiDefensive.ts';
@@ -20,10 +20,9 @@ export interface DatacenterSummaryViewProps {
   isQueueRunning?: boolean;
   onSelectNode: (node: NodeItem) => void;
   onOpenPlaybookModal: (playbookName?: string) => void;
-  onOpenPlaybookEditor: (playbookName?: string) => void;
-  onOpenGroupVars: () => void;
+  /** Navigates to a datacenter settings submenu page (playbooks, vars, mesh…). */
+  onOpenSetting: (page: DatacenterSettingPageId) => void;
   onOpenConsole?: () => void;
-  onOpenSection?: (section: DatacenterSection) => void;
   /** Upper bound on hosts probed for the storage summary (one SSH round-trip each). */
   maxStorageHosts?: number;
 }
@@ -77,10 +76,8 @@ export const DatacenterSummaryView: React.FC<DatacenterSummaryViewProps> = ({
   isQueueRunning = false,
   onSelectNode,
   onOpenPlaybookModal,
-  onOpenPlaybookEditor,
-  onOpenGroupVars,
+  onOpenSetting,
   onOpenConsole,
-  onOpenSection,
   maxStorageHosts = 6,
 }) => {
   const [probes, setProbes] = useState<NodeStorageProbe[]>([]);
@@ -133,8 +130,6 @@ export const DatacenterSummaryView: React.FC<DatacenterSummaryViewProps> = ({
   const vmCount = nodes.filter(n => n.group === 'tag:vm' || n.badge === 'VM').length;
   const lxcCount = nodes.filter(n => n.nodeType === 'lxc' || n.badge === 'LXC').length;
   const containerCount = nodes.filter(n => n.hasPodman || n.badge === 'PODMAN').length;
-
-  const openSection = (section: DatacenterSection) => onOpenSection?.(section);
 
   return (
     <div id="datacenter-overview" className="flex flex-col gap-4 w-full" data-testid="datacenter-summary-view">
@@ -223,7 +218,7 @@ export const DatacenterSummaryView: React.FC<DatacenterSummaryViewProps> = ({
             badgeClass="bg-[#1b2a38] text-[#8cd6cb] border-[#8cd6cb]/30"
             title="Manage Playbooks"
             description="Create and inspect YAML playbooks in ansible/playbooks"
-            onClick={() => onOpenPlaybookEditor()}
+            onClick={() => onOpenSetting('playbook-editor')}
           />
           <QuickActionButton
             testId="summary-quick-action-vars-vault"
@@ -233,7 +228,7 @@ export const DatacenterSummaryView: React.FC<DatacenterSummaryViewProps> = ({
             badgeClass="bg-[#291e3b] text-[#d9b9ff] border-[#d9b9ff]/30"
             title="Cluster Vars & Vault"
             description="Group variables and AES-256 encrypted secrets"
-            onClick={onOpenGroupVars}
+            onClick={() => onOpenSetting('datacenter-vars')}
           />
           <QuickActionButton
             testId="summary-quick-action-console"
@@ -243,27 +238,7 @@ export const DatacenterSummaryView: React.FC<DatacenterSummaryViewProps> = ({
             badgeClass="bg-[#2d281b] text-[#ffd580] border-[#ffd580]/30"
             title="Console & Tasks"
             description="Live job queue, ansible logs and SSH output"
-            onClick={() => (onOpenConsole ? onOpenConsole() : openSection('tasks'))}
-          />
-          <QuickActionButton
-            testId="summary-quick-action-storage"
-            icon="storage"
-            iconClass="text-[#8cd6cb]"
-            badge="Pools"
-            badgeClass="bg-[#1b2a38] text-[#8cd6cb] border-[#8cd6cb]/30"
-            title="Cluster Storage"
-            description="ZFS pools, mounts, NFS and Samba exports"
-            onClick={() => openSection('storage')}
-          />
-          <QuickActionButton
-            testId="summary-quick-action-playbook-library"
-            icon="library_books"
-            iconClass="text-[#b0c9ff]"
-            badge="Library"
-            badgeClass="bg-[#21263d] text-[#b0c9ff] border-[#b0c9ff]/30"
-            title="Playbook Library"
-            description="Browse the on-disk playbook library"
-            onClick={() => openSection('playbooks')}
+            onClick={() => onOpenConsole?.()}
           />
         </div>
       </div>
@@ -285,7 +260,7 @@ export const DatacenterSummaryView: React.FC<DatacenterSummaryViewProps> = ({
             <button
               type="button"
               data-testid="summary-open-console"
-              onClick={() => (onOpenConsole ? onOpenConsole() : openSection('tasks'))}
+              onClick={() => onOpenConsole?.()}
               className="text-[11px] font-mono text-[#8cd6cb] hover:underline cursor-pointer flex items-center gap-0.5"
             >
               <span>Open Console</span>
@@ -342,13 +317,6 @@ export const DatacenterSummaryView: React.FC<DatacenterSummaryViewProps> = ({
               <span className="material-symbols-outlined text-[18px] text-[#ffd580]">storage</span>
               <h2 className="text-xs font-mono font-bold text-[#dfe1fa] uppercase tracking-wider">Storage Summary</h2>
             </div>
-            <button
-              type="button"
-              onClick={() => openSection('storage')}
-              className="text-[11px] font-mono text-[#8cd6cb] hover:underline cursor-pointer"
-            >
-              Details
-            </button>
           </div>
 
           {storageLoading ? (
@@ -478,7 +446,7 @@ export const DatacenterSummaryView: React.FC<DatacenterSummaryViewProps> = ({
           </div>
           <button
             type="button"
-            onClick={() => document.getElementById('datacenter-topology')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+            onClick={() => onOpenSetting('connection/tailscale')}
             className="text-[11px] font-mono text-[#8cd6cb] hover:underline cursor-pointer"
           >
             Topology

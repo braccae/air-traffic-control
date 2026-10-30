@@ -11,11 +11,76 @@ import { GlobalSettingsPanel } from './GlobalSettingsPanel.tsx';
  * returns its mask, and GlobalSettingsPanel never loads a mask into the input.
  */
 const TAILSCALE_SETTINGS_ENDPOINT = '/api/settings/datacenter/connection/tailscale';
+const TAILSCALE_SELF_ENDPOINT = '/api/tailscale/self';
+
+/** Live registration state of ATC's own tsnet node (never contains the auth key). */
+export interface TsnetSelfStatus {
+  configured: boolean;
+  connected: boolean;
+  online: boolean;
+  mode: string; // "tsnet" | "host-socket" | "unconfigured"
+  hostname: string;
+  dnsName?: string;
+  tailscaleIps: string[];
+  backendState?: string;
+  authUrl?: string;
+  health?: string[];
+  keyExpiry?: string;
+  peerCount?: number;
+  lastUpAt?: string;
+  stateDir: string;
+  ephemeral: boolean;
+  error?: string;
+}
+
+const StatusRow: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
+  <div className="flex gap-2 min-w-0">
+    <span className="text-[#8d909b] shrink-0">{label}:</span>
+    <span className="text-[#dfe1fa] truncate" title={typeof value === 'string' ? value : undefined}>
+      {value}
+    </span>
+  </div>
+);
 
 export const DatacenterTailscalePage: React.FC = () => {
   const [page, setPage] = useState<GlobalSettingsPage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [self, setSelf] = useState<TsnetSelfStatus | null>(null);
+  const [selfLoading, setSelfLoading] = useState(true);
+  const [selfError, setSelfError] = useState<string | null>(null);
+  const [repairing, setRepairing] = useState(false);
+
+  const loadSelf = useCallback(async () => {
+    setSelfLoading(true);
+    setSelfError(null);
+    try {
+      const res = await fetch(TAILSCALE_SELF_ENDPOINT);
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Failed to read tsnet status (HTTP ${res.status})`);
+      }
+      setSelf(data.self as TsnetSelfStatus);
+    } catch (err: any) {
+      setSelfError(err?.message || 'Failed to read tsnet status');
+    } finally {
+      setSelfLoading(false);
+    }
+  }, []);
+
+  const repairMesh = useCallback(async () => {
+    setRepairing(true);
+    try {
+      const res = await fetch('/api/tailscale/repair', { method: 'POST' });
+      const data = await res.json().catch(() => null);
+      if (data?.self) setSelf(data.self as TsnetSelfStatus);
+    } catch {
+      // fall through to recheck
+    } finally {
+      setRepairing(false);
+      await loadSelf();
+    }
+  }, [loadSelf]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -39,20 +104,29 @@ export const DatacenterTailscalePage: React.FC = () => {
     void load();
   }, [load]);
 
-  const save = useCallback(async (values: Record<string, unknown>) => {
-    const res = await fetch(TAILSCALE_SETTINGS_ENDPOINT, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ values }),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(text || `Failed to save Tailscale settings (HTTP ${res.status})`);
-    }
-    const updated = (await res.json()) as GlobalSettingsPage;
-    setPage(updated);
-    return updated;
-  }, []);
+  useEffect(() => {
+    void loadSelf();
+  }, [loadSelf]);
+
+  const save = useCallback(
+    async (values: Record<string, unknown>) => {
+      const res = await fetch(TAILSCALE_SETTINGS_ENDPOINT, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(text || `Failed to save Tailscale settings (HTTP ${res.status})`);
+      }
+      const updated = (await res.json()) as GlobalSettingsPage;
+      setPage(updated);
+      // Re-resolve the live tsnet node: saving a new auth key registers it now.
+      void loadSelf();
+      return updated;
+    },
+    [loadSelf]
+  );
 
   if (loading) {
     return (
@@ -88,8 +162,134 @@ export const DatacenterTailscalePage: React.FC = () => {
     );
   }
 
+  const selfBadge = (() => {
+    if (selfLoading && !self) {
+      return { label: 'Checking…', className: 'bg-[#1b2a38] text-[#8cd6cb] border-[#8cd6cb]/30' };
+    }
+    if (selfError && !self) {
+      return { label: 'Unknown', className: 'bg-[#311c1c] text-[#ffb4ab] border-[#ffb4ab]/30' };
+    }
+    if (!self) {
+      return { label: 'Unknown', className: 'bg-[#1b2a38] text-[#8d909b] border-[#26293c]' };
+    }
+    if (!self.configured) {
+      return { label: 'Not configured', className: 'bg-[#311c1c] text-[#ffb4ab] border-[#ffb4ab]/30' };
+    }
+    if (self.connected && self.online) {
+      return { label: 'Online', className: 'bg-[#162620] text-[#8cd6cb] border-[#8cd6cb]/30' };
+    }
+    if (self.connected && !self.online) {
+      return { label: 'Backend up, control says offline', className: 'bg-[#291e0f] text-[#ffd580] border-[#ffd580]/30' };
+    }
+    return {
+      label: self.backendState || 'Not connected',
+      className: 'bg-[#291e0f] text-[#ffd580] border-[#ffd580]/30',
+    };
+  })();
+
   return (
     <div className="flex flex-col gap-3">
+      <div
+        data-testid="tsnet-self-status"
+        className="rounded-lg bg-[#121528] border border-[#26293c] p-3.5 shadow-md flex flex-col gap-2"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[18px] text-[#8cd6cb]">lan</span>
+            <h2 className="text-xs font-mono font-bold text-[#dfe1fa] uppercase tracking-wider">
+              ATC Mesh Identity
+            </h2>
+            <span
+              data-testid="tsnet-self-badge"
+              className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${selfBadge.className}`}
+            >
+              {selfBadge.label}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadSelf()}
+            disabled={selfLoading}
+            className="px-2.5 py-1 rounded text-xs font-mono text-[#dfe1fa] bg-[#171a2d] hover:bg-[#21263d] border border-[#26293c] transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            title="Re-read ATC's live tsnet registration state"
+          >
+            <span className="material-symbols-outlined text-[14px]">sync</span>
+            <span>{selfLoading ? 'Checking…' : 'Recheck'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void repairMesh()}
+            disabled={repairing}
+            className="px-2.5 py-1 rounded text-xs font-mono text-[#dfe1fa] bg-[#1f6feb] hover:bg-[#388bfd] border border-[#1f6feb] transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            title="Run the tsnet self-heal ladder (force-netmap-update, rebind, restart)"
+          >
+            <span className="material-symbols-outlined text-[14px]">build</span>
+            <span>{repairing ? 'Repairing…' : 'Repair mesh'}</span>
+          </button>
+        </div>
+
+        {selfError && (
+          <div role="alert" className="text-[11px] font-mono text-[#ffb4ab]">
+            Could not read ATC's tsnet status: {selfError}
+          </div>
+        )}
+
+        {selfLoading && !self && (
+          <p className="text-[11px] font-mono text-[#8d909b]">
+            Starting ATC's tsnet node and reading its registration state…
+          </p>
+        )}
+
+        {self && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px] font-mono">
+            <StatusRow label="Transport" value={self.mode} />
+            <StatusRow label="Node" value={self.hostname || '—'} />
+            {self.dnsName && <StatusRow label="Mesh name" value={self.dnsName} />}
+            <StatusRow
+              label="Addresses"
+              value={self.tailscaleIps.length > 0 ? self.tailscaleIps.join(', ') : 'none assigned'}
+            />
+            {self.backendState && <StatusRow label="Backend" value={self.backendState} />}
+            <StatusRow label="Online (control)" value={self.online ? 'yes' : 'no'} />
+            {self.peerCount !== undefined && (
+              <StatusRow label="Peers in netmap" value={self.peerCount} />
+            )}
+            {self.keyExpiry && <StatusRow label="Node key expiry" value={self.keyExpiry} />}
+            {self.health && self.health.length > 0 && (
+              <StatusRow label="Health" value={self.health.join('; ')} />
+            )}
+            <StatusRow label="State dir" value={self.stateDir} />
+            <StatusRow
+              label="Ephemeral"
+              value={`${self.ephemeral ? 'yes' : 'no'} (set by auth key at registration)`}
+            />
+          </div>
+        )}
+
+        {self?.error && (
+          <div role="alert" className="text-[11px] font-mono text-[#ffb4ab]">
+            {self.error}
+          </div>
+        )}
+
+        {self?.authUrl && (
+          <a
+            href={self.authUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[11px] font-mono text-[#79c0ff] underline"
+          >
+            Authorize this node in Tailscale
+          </a>
+        )}
+
+        {self?.mode === 'host-socket' && (
+          <p className="text-[11px] font-mono text-[#ffd580]">
+            ATC is borrowing the host's tailscaled socket (local development fallback). It has no
+            tsnet identity of its own until an auth key is saved.
+          </p>
+        )}
+      </div>
       <GlobalSettingsPanel page={page} save={save} />
       <p className="text-[11px] text-[#8d909b] font-mono leading-relaxed">
         With an auth key set, ATC joins the Tailscale mesh as its own node (direct mesh connectivity).

@@ -465,6 +465,11 @@ func (r *PlaybookRunnerState) Run(ctx context.Context, req RunRequest) (string, 
 	cmd := exec.CommandContext(ctx, playbookBin, args...)
 	cmd.Dir = r.repoRoot
 	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_FORCE_COLOR=0")
+	// ansible-core dropped the bundled `json` callback; use the repo's copy.
+	callbackDir := filepath.Join(r.repoRoot, "ansible", "plugins", "callback")
+	if _, statErr := os.Stat(callbackDir); statErr == nil {
+		cmd.Env = append(cmd.Env, "ANSIBLE_CALLBACK_PLUGINS="+callbackDir)
+	}
 
 	r.mu.Lock()
 	r.processes[taskId] = cmd

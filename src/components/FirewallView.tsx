@@ -4,7 +4,7 @@ import { validatePortOrRange, validateCidrOrIp, validateInterfaceName } from '..
 import { compileDaemonPluginMutation, stageTaskInQueue } from '../utils/drivers/index.ts';
 
 interface FirewallViewProps {
-  node: NodeItem;
+  node: NodeItem | null;
   pluginId?: string;
 }
 
@@ -21,10 +21,24 @@ export interface FirewallPortForwardInput {
   toport: string;
   toaddr?: string;
   zone?: string;
+  plugin?: string;
 }
 
 /**
- * Compiles a firewalld port-forward (NAT MASQ) mutation through the Go daemon and
+ * Returns the firewall flavour that can express NAT port forwarding for a
+ * plugin id (e.g. "firewall/nftables" -> "nftables").
+ */
+export function firewallNatFlavour(pluginId?: string): string | null {
+  const name = (pluginId || '').startsWith('firewall/') ? (pluginId as string).split('/')[1] : pluginId || 'firewalld';
+  const normalized = (name || 'firewalld').toLowerCase();
+  if (normalized === 'firewalld' || normalized === 'nftables' || normalized === 'iptables') {
+    return normalized;
+  }
+  return null;
+}
+
+/**
+ * Compiles a firewall port-forward (DNAT) mutation through the Go daemon and
  * stages it into the Ansible mutation queue. Fails loudly and honestly when the
  * daemon rejects the action or the queue is unreachable (Zero-Mock Policy).
  */
@@ -37,6 +51,10 @@ export async function stageFirewallPortForward(
   const toaddr = (input.toaddr || '').trim();
   const proto = ((input.proto || 'tcp').trim() || 'tcp').toLowerCase();
   const zone = ((input.zone || 'public').trim() || 'public');
+  const plugin = firewallNatFlavour(input.plugin);
+  if (!plugin) {
+    return { success: false, error: `Port forwarding is not supported for firewall plugin '${input.plugin}'` };
+  }
 
   const portVal = validatePortOrRange(port);
   if (!portVal.valid) {
@@ -46,6 +64,10 @@ export async function stageFirewallPortForward(
   const toPortVal = validatePortOrRange(toport);
   if (!toPortVal.valid) {
     return { success: false, error: toPortVal.error || 'Invalid internal destination port' };
+  }
+
+  if (plugin !== 'firewalld' && (portVal.normalized?.includes('-') || toPortVal.normalized?.includes('-'))) {
+    return { success: false, error: `Port ranges are not supported for ${plugin} DNAT; provide single ports` };
   }
 
   if (proto !== 'tcp' && proto !== 'udp') {
@@ -60,15 +82,18 @@ export async function stageFirewallPortForward(
   }
 
   try {
-    const task = await compileDaemonPluginMutation(node, 'firewall', 'firewalld', 'forward_port', {
+    const options: Record<string, unknown> = {
       port: portVal.normalized,
       proto,
       toport: toPortVal.normalized,
-      toaddr: toaddr || undefined,
-      zone,
-    });
+    };
+    if (toaddr) options.toaddr = toaddr;
+    if (plugin === 'firewalld') options.zone = zone;
+
+    const task = await compileDaemonPluginMutation(node, 'firewall', plugin, 'forward_port', options);
     const target = toaddr || 'same host';
-    task.title = `Forward ${zone} ${portVal.normalized}/${proto} to ${target}:${toPortVal.normalized} on ${
+    const scope = plugin === 'firewalld' ? `${zone} ` : '';
+    task.title = `Forward ${scope}${portVal.normalized}/${proto} to ${target}:${toPortVal.normalized} on ${
       node.shortName || node.name
     }`;
     const res = await stageTaskInQueue(task);
@@ -81,9 +106,95 @@ export async function stageFirewallPortForward(
   }
 }
 
+/**
+ * Stages the removal of an existing port forward (undoes the DNAT rule and its
+ * matching forward accept). Errors are surfaced verbatim.
+ */
+export async function removeFirewallPortForward(
+  node: NodeItem,
+  pluginId: string,
+  forward: FirewallPortForward
+): Promise<{ success: boolean; title?: string; error?: string }> {
+  const plugin = firewallNatFlavour(pluginId);
+  if (!plugin) {
+    return { success: false, error: `Port forwarding is not supported for firewall plugin '${pluginId}'` };
+  }
+  try {
+    const options: Record<string, unknown> = {
+      port: forward.port,
+      proto: forward.proto,
+      toport: forward.toport,
+      state: 'disabled',
+    };
+    if (forward.toaddr) options.toaddr = forward.toaddr;
+    if (plugin === 'firewalld') options.zone = 'public';
+
+    const task = await compileDaemonPluginMutation(node, 'firewall', plugin, 'forward_port', options);
+    task.title = `Remove port forward ${forward.port}/${forward.proto} -> ${
+      forward.toaddr || 'same host'
+    }:${forward.toport} on ${node.shortName || node.name}`;
+    const res = await stageTaskInQueue(task);
+    if (res.success) {
+      return { success: true, title: task.title };
+    }
+    return { success: false, error: res.error || 'Failed to stage port forward removal' };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Error staging port forward removal' };
+  }
+}
+
+/**
+ * Enables or disables masquerade on the host through POST
+ * /api/nodes/:id/firewall/masquerade. The endpoint applies the change on the
+ * real host and reports real errors (Zero-Mock Policy); no optimistic state.
+ */
+export async function setFirewallMasquerade(
+  node: NodeItem,
+  pluginId: string,
+  enabled: boolean
+): Promise<{ success: boolean; error?: string }> {
+  const plugin = firewallNatFlavour(pluginId);
+  if (!plugin) {
+    return { success: false, error: `Masquerade is not supported for firewall plugin '${pluginId}'` };
+  }
+  try {
+    const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/firewall/masquerade`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, plugin }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.success) {
+      return { success: false, error: data?.error || `Failed to ${enabled ? 'enable' : 'disable'} masquerade (status ${res.status})` };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Error updating masquerade' };
+  }
+}
+
 export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) => {
+  if (!node) {
+    return (
+      <div className="flex flex-col gap-3 font-mono">
+        <div className="bg-[#171a2d] border border-[#26293c] rounded p-3">
+          <div className="text-[11px] text-[#8d909b]">No node selected</div>
+        </div>
+      </div>
+    );
+  }
   const activePluginName = (pluginId && pluginId.startsWith('firewall/') ? pluginId.split('/')[1] : 'firewalld') || 'firewalld';
   const isFirewalld = activePluginName === 'firewalld';
+  // Firewall flavours with a real NAT implementation in this codebase.
+  const natFlavour = firewallNatFlavour(activePluginName);
+  // UFW exposes no native DNAT/masquerade operation, and pve-firewall owns the
+  // ruleset on Proxmox nodes. Both surface as greyed controls instead of
+  // pretending the mutation worked.
+  const isUfw = activePluginName === 'ufw';
+  const pveManaged = activePluginName === 'iptables' && (node.group === 'tag:pve' || node.badge === 'PVE');
+  const pveLockTitle = 'Not implemented yet';
+  const ufwLockTitle = 'UFW has no native DNAT/masquerade support';
+  const supportsNat = natFlavour !== null;
 
   const [rules, setRules] = useState<Array<{
     id: string;
@@ -117,18 +228,28 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
 
   // Port forwarding (NAT MASQ) state
   const [forwardPorts, setForwardPorts] = useState<FirewallPortForward[]>([]);
-  const [masquerade, setMasquerade] = useState<boolean>(false);
+  // null = the host did not report masquerade state (unknown, never guessed).
+  const [masquerade, setMasquerade] = useState<boolean | null>(null);
+  const [masqueradeBusy, setMasqueradeBusy] = useState(false);
+  const [adopting, setAdopting] = useState(false);
+  const [adoptMessage, setAdoptMessage] = useState<string | null>(null);
+  const [masqueradeError, setMasqueradeError] = useState<string | null>(null);
   const [fwdPort, setFwdPort] = useState('');
   const [fwdProto, setFwdProto] = useState('tcp');
   const [fwdToPort, setFwdToPort] = useState('');
   const [fwdToAddr, setFwdToAddr] = useState('');
   const [fwdZone, setFwdZone] = useState('public');
   const [stagingForward, setStagingForward] = useState(false);
+  const [removingForward, setRemovingForward] = useState<string | null>(null);
   const [fwdError, setFwdError] = useState<string | null>(null);
 
   const fetchFirewall = (refresh = false) => {
     setLoading(true);
     if (!isFirewalld) {
+      // Drop any previous host's NAT view first: a failed read must surface as
+      // unknown, never as stale masquerade/forward state.
+      setForwardPorts([]);
+      setMasquerade(null);
       fetch(`/api/nodes/${encodeURIComponent(node.id)}/plugins/firewall/${encodeURIComponent(activePluginName)}`)
         .then(res => res.json())
         .then(data => {
@@ -152,6 +273,9 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
             setBackendLabel(data.backend || activePluginName);
             setNftActive(Boolean(data.nftablesActive));
             setZones(data.zones || {});
+            // Real NAT state reported by the daemon; never inferred locally.
+            setForwardPorts(Array.isArray(data.forwardPorts) ? data.forwardPorts : []);
+            setMasquerade(typeof data.masquerade === 'boolean' ? data.masquerade : null);
           }
         })
         .catch(() => {})
@@ -175,16 +299,16 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
   };
 
   const fetchForwardPorts = () => {
-    if (!isFirewalld) {
-      setForwardPorts([]);
-      setMasquerade(false);
-      return;
-    }
+    // nftables / iptables NAT state is delivered by fetchFirewall from the same
+    // plugin read; only firewalld needs the dedicated forward-port query.
+    if (!isFirewalld) return;
+    setForwardPorts([]);
+    setMasquerade(null);
     fetch(`/api/nodes/${encodeURIComponent(node.id)}/plugins/firewall/firewalld`)
       .then(res => res.json())
       .then(data => {
         setForwardPorts(Array.isArray(data?.forwardPorts) ? data.forwardPorts : []);
-        if (typeof data?.masquerade === 'boolean') setMasquerade(data.masquerade);
+        setMasquerade(typeof data?.masquerade === 'boolean' ? data.masquerade : null);
       })
       .catch(() => {});
   };
@@ -301,6 +425,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
         toport: fwdToPort,
         toaddr: fwdToAddr,
         zone: fwdZone,
+        plugin: activePluginName,
       });
       if (!res.success) {
         setFwdError(res.error || 'Failed to stage port forward');
@@ -309,11 +434,75 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
       setFwdPort('');
       setFwdToPort('');
       setFwdToAddr('');
-      fetchForwardPorts();
+      refreshAll(true);
     } catch (err: any) {
       setFwdError(err?.message || 'Error staging port forward');
     } finally {
       setStagingForward(false);
+    }
+  };
+
+  const handleRemoveForward = async (fp: FirewallPortForward) => {
+    setFwdError(null);
+    setRemovingForward(`${fp.port}-${fp.proto}-${fp.toport}-${fp.toaddr || ''}`);
+    try {
+      const res = await removeFirewallPortForward(node, activePluginName, fp);
+      if (!res.success) {
+        setFwdError(res.error || 'Failed to stage port forward removal');
+        return;
+      }
+      refreshAll(true);
+    } catch (err: any) {
+      setFwdError(err?.message || 'Error staging port forward removal');
+    } finally {
+      setRemovingForward(null);
+    }
+  };
+
+  const handleToggleMasquerade = async () => {
+    setMasqueradeError(null);
+    setMasqueradeBusy(true);
+    try {
+      // Unknown state resolves to "enable": adding the rule is idempotent.
+      const next = masquerade !== true;
+      const res = await setFirewallMasquerade(node, activePluginName, next);
+      if (!res.success) {
+        setMasqueradeError(res.error || `Failed to ${next ? 'enable' : 'disable'} masquerade`);
+        return;
+      }
+      refreshAll(true);
+    } catch (err: any) {
+      setMasqueradeError(err?.message || 'Error updating masquerade');
+    } finally {
+      setMasqueradeBusy(false);
+    }
+  };
+
+  // Import NAT rules that already exist on the host (created outside ATC) into
+  // the managed model, so the next rendered drop-in keeps them.
+  const handleAdoptNat = async () => {
+    setAdopting(true);
+    setAdoptMessage(null);
+    setMasqueradeError(null);
+    try {
+      const res = await fetch(`/api/nodes/${encodeURIComponent(node.id)}/firewall/adopt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plugin: activePluginName }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        setMasqueradeError(data?.error || `Adopt failed (status ${res.status})`);
+        return;
+      }
+      setAdoptMessage(
+        `${data.adopted} rule${data.adopted === 1 ? '' : 's'} adopted · ${data.managed} managed in total.`,
+      );
+      refreshAll(true);
+    } catch (err: any) {
+      setMasqueradeError(err?.message || 'Error adopting NAT rules');
+    } finally {
+      setAdopting(false);
     }
   };
 
@@ -683,8 +872,8 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
         </table>
       </div>
 
-      {/* Port Forwarding (NAT MASQ) */}
-      {isFirewalld && (
+      {/* Port Forwarding (NAT MASQ / DNAT) */}
+      {supportsNat && (
       <div className="mt-4 pt-3 border-t border-[#26293c] font-mono text-xs">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -692,18 +881,72 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
             <h4 className="font-sans text-[13px] text-[#dfe1fa] font-bold">Port Forwarding (NAT MASQ)</h4>
             <span
               className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                masquerade
+                masquerade === true
                   ? 'bg-[#8cd6cb]/15 text-[#8cd6cb] border-[#8cd6cb]/30'
                   : 'bg-[#26293c] text-[#8d909b] border-[#434750]/40'
               }`}
             >
-              MASQUERADE: {masquerade ? 'ENABLED' : 'DISABLED'}
+              MASQUERADE: {masquerade === null ? 'UNKNOWN' : masquerade ? 'ENABLED' : 'DISABLED'}
             </span>
+            <button
+              type="button"
+              onClick={handleAdoptNat}
+              disabled={adopting || pveManaged}
+              data-testid="adopt-nat-rules"
+              title={pveManaged ? pveLockTitle : "Import NAT rules that already exist on this host into ATC's managed model"}
+              className="px-2 py-0.5 rounded text-[10px] font-bold border bg-[#171a2d] hover:bg-[#21263d] text-[#d9b9ff] border-[#d9b9ff]/40 cursor-pointer transition-colors disabled:opacity-50"
+            >
+              {adopting ? 'Adopting...' : 'Adopt Existing NAT'}
+            </button>
+            <button
+              type="button"
+              onClick={handleToggleMasquerade}
+              disabled={masqueradeBusy || isUfw || pveManaged}
+              title={
+                pveManaged
+                  ? pveLockTitle
+                  : isUfw
+                  ? ufwLockTitle
+                  : `${masquerade === true ? 'Disable' : 'Enable'} masquerade on ${node.shortName || node.name} (${activePluginName})`
+              }
+              className={`px-2 py-0.5 rounded text-[10px] font-bold border cursor-pointer transition-colors disabled:opacity-50 ${
+                masquerade === true
+                  ? 'bg-[#93000a]/20 hover:bg-[#93000a]/40 text-[#ffb4ab] border-[#ffb4ab]/40'
+                  : 'bg-[#b0c9ff] hover:bg-[#d8e2ff] text-[#002e68] border-[#434750]/40'
+              }`}
+            >
+              {masqueradeBusy ? 'Applying...' : masquerade === true ? 'Disable Masquerade' : 'Enable Masquerade'}
+            </button>
           </div>
           <p className="text-[10px] text-[#8d909b]">
-            Forward an external port to an internal host &amp; port; staged as a declarative firewalld task.
+            Forward an external port to an internal host &amp; port; staged as a declarative {activePluginName} task.
           </p>
         </div>
+
+        {(pveManaged || isUfw) && (
+          <div className="mt-2 p-2 bg-[#171a2d] border border-[#434750]/50 rounded text-[11px] text-[#8d909b] flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-[16px] text-[#ffd97d]">lock</span>
+            <span>
+              {pveManaged
+                ? 'Firewall is managed by pve-firewall — view only. Mutations are not implemented yet.'
+                : 'UFW cannot express DNAT or masquerade through its CLI; port forwarding and masquerade are read-only here.'}
+            </span>
+          </div>
+        )}
+
+        {adoptMessage && (
+          <div className="mt-2 p-2 bg-[#162620] border border-[#8cd6cb]/40 rounded text-[#8cd6cb] text-[11px] flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-[16px]">check_circle</span>
+            <span>{adoptMessage}</span>
+          </div>
+        )}
+
+        {masqueradeError && (
+          <div className="mt-2 p-2 bg-[#93000a]/20 border border-[#ffb4ab]/50 rounded text-[#ffb4ab] text-[11px] flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-[16px]">error</span>
+            <span>{masqueradeError}</span>
+          </div>
+        )}
 
         {fwdError && (
           <div className="mt-2 p-2 bg-[#93000a]/20 border border-[#ffb4ab]/50 rounded text-[#ffb4ab] text-[11px] flex items-center gap-1.5">
@@ -760,6 +1003,7 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
             />
           </div>
 
+          {isFirewalld && (
           <div>
             <label className="block text-[10px] text-[#8d909b] mb-0.5">ZONE</label>
             <select
@@ -774,12 +1018,13 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
               <option value="external">external</option>
             </select>
           </div>
+          )}
 
           <div className="flex justify-end lg:col-span-1">
             <button
               type="submit"
               disabled={stagingForward}
-              title="Stage firewalld port-forward task into Ansible Mutation Queue"
+              title={`Stage ${activePluginName} port-forward task into Ansible Mutation Queue`}
               className="w-full flex items-center justify-center gap-1.5 bg-[#d9b9ff] hover:bg-[#e9d4ff] text-[#2a0a54] font-bold px-3 py-1 rounded transition-colors shadow-sm cursor-pointer disabled:opacity-50"
             >
               <span className="material-symbols-outlined text-[15px]">alt_route</span>
@@ -796,24 +1041,38 @@ export const FirewallView: React.FC<FirewallViewProps> = ({ node, pluginId }) =>
                 <th className="px-3">Proto</th>
                 <th className="px-3">Internal Host</th>
                 <th className="px-3">Internal Port</th>
+                <th className="px-3 text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#26293c]/60">
               {forwardPorts.length === 0 ? (
                 <tr className="h-9">
-                  <td className="px-3 text-[#8d909b]" colSpan={4}>
-                    No port forwards configured in the active zone.
+                  <td className="px-3 text-[#8d909b]" colSpan={5}>
+                    No port forwards configured in the active {isFirewalld ? 'zone' : 'ruleset'}.
                   </td>
                 </tr>
               ) : (
-                forwardPorts.map((fp, i) => (
-                  <tr key={`${fp.port}-${fp.proto}-${fp.toport}-${i}`} className="h-9 hover:bg-[#26293c]/40 transition-colors">
-                    <td className="px-3 font-semibold text-[#dfe1fa]">{fp.port}</td>
-                    <td className="px-3 uppercase text-[#d9b9ff]">{fp.proto}</td>
-                    <td className="px-3 text-[#8d909b]">{fp.toaddr || 'same host'}</td>
-                    <td className="px-3 font-semibold text-[#dfe1fa]">{fp.toport}</td>
-                  </tr>
-                ))
+                forwardPorts.map((fp, i) => {
+                  const forwardKey = `${fp.port}-${fp.proto}-${fp.toport}-${fp.toaddr || ''}-${i}`;
+                  return (
+                    <tr key={forwardKey} className="h-9 hover:bg-[#26293c]/40 transition-colors">
+                      <td className="px-3 font-semibold text-[#dfe1fa]">{fp.port}</td>
+                      <td className="px-3 uppercase text-[#d9b9ff]">{fp.proto}</td>
+                      <td className="px-3 text-[#8d909b]">{fp.toaddr || 'same host'}</td>
+                      <td className="px-3 font-semibold text-[#dfe1fa]">{fp.toport}</td>
+                      <td className="px-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveForward(fp)}
+                          disabled={removingForward === `${fp.port}-${fp.proto}-${fp.toport}-${fp.toaddr || ''}`}
+                          className="px-2 py-0.5 bg-[#93000a]/20 hover:bg-[#93000a]/40 text-[#ffb4ab] border border-[#ffb4ab]/30 rounded text-[10px] cursor-pointer disabled:opacity-50"
+                        >
+                          {removingForward === `${fp.port}-${fp.proto}-${fp.toport}-${fp.toaddr || ''}` ? 'Removing...' : 'Remove'}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

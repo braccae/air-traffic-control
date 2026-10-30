@@ -239,6 +239,135 @@ func TestBuildFirewallAddCommand(t *testing.T) {
 	}
 }
 
+func TestBuildFirewallForwardPortCommandPerFlavour(t *testing.T) {
+	// iptables: nat PREROUTING DNAT + FORWARD accept with -C guards
+	cmdIpt, err := BuildFirewallAddCommand(FirewallRuleInput{
+		Plugin:   "iptables",
+		Port:     "8080",
+		Toport:   "80",
+		Protocol: "tcp",
+		Toaddr:   "192.168.1.10",
+	})
+	if err != nil {
+		t.Fatalf("iptables forward port failed: %v", err)
+	}
+	for _, want := range []string{
+		"sudo iptables -t nat -C PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 192.168.1.10:80 2>/dev/null || sudo iptables -t nat -A PREROUTING",
+		"sudo iptables -C FORWARD -p tcp -d 192.168.1.10 --dport 80 -j ACCEPT 2>/dev/null || sudo iptables -A FORWARD",
+	} {
+		if !strings.Contains(cmdIpt, want) {
+			t.Errorf("iptables forward command missing %q: %s", want, cmdIpt)
+		}
+	}
+	if strings.Contains(cmdIpt, "firewall-cmd") {
+		t.Errorf("iptables forward command must not use firewall-cmd: %s", cmdIpt)
+	}
+
+	// nftables: nat prerouting DNAT + ip filter forward accept, idempotent
+	cmdNft, err := BuildFirewallAddCommand(FirewallRuleInput{
+		Plugin:   "firewall/nftables",
+		Port:     "8080",
+		Toport:   "80",
+		Protocol: "tcp",
+		Toaddr:   "192.168.1.10",
+	})
+	if err != nil {
+		t.Fatalf("nftables forward port failed: %v", err)
+	}
+	for _, want := range []string{
+		"nft add chain inet filter prerouting",
+		"tcp dport 8080 dnat to 192.168.1.10:80",
+		"nft add chain inet filter forward",
+		"ip daddr 192.168.1.10 tcp dport 80 accept",
+		"grep -Fq",
+	} {
+		if !strings.Contains(cmdNft, want) {
+			t.Errorf("nftables forward command missing %q: %s", want, cmdNft)
+		}
+	}
+
+	// Ranges are rejected for raw NAT backends
+	if _, err := BuildFirewallAddCommand(FirewallRuleInput{Plugin: "iptables", Port: "8000-8080", Toport: "80"}); err == nil {
+		t.Errorf("expected port range to be rejected for iptables DNAT")
+	}
+
+	// Non-forward rules on raw backends must be staged through the plugin action
+	if _, err := BuildFirewallAddCommand(FirewallRuleInput{Plugin: "nftables", Port: "22"}); err == nil {
+		t.Errorf("expected nftables port rule without toport to be rejected")
+	}
+}
+
+func TestBuildFirewallMasqueradeCommand(t *testing.T) {
+	// nftables enable
+	nftEnable, err := BuildFirewallMasqueradeCommand("firewall/nftables", "", true)
+	if err != nil {
+		t.Fatalf("nftables masquerade enable failed: %v", err)
+	}
+	for _, want := range []string{
+		"sudo nft list table inet filter >/dev/null 2>&1 || sudo nft add table inet filter",
+		"sudo nft add chain inet filter postrouting",
+		"type nat hook postrouting priority srcnat",
+		"grep -qw masquerade || sudo nft add rule inet filter postrouting masquerade",
+	} {
+		if !strings.Contains(nftEnable, want) {
+			t.Errorf("nftables masquerade enable missing %q: %s", want, nftEnable)
+		}
+	}
+
+	// nftables disable removes by handle
+	nftDisable, err := BuildFirewallMasqueradeCommand("nftables", "", false)
+	if err != nil {
+		t.Fatalf("nftables masquerade disable failed: %v", err)
+	}
+	if !strings.Contains(nftDisable, `index($0,"masquerade")`) || !strings.Contains(nftDisable, "sudo nft delete rule inet filter postrouting handle") {
+		t.Errorf("nftables masquerade disable missing handle delete: %s", nftDisable)
+	}
+	if strings.Contains(nftDisable, "nft add rule inet filter postrouting masquerade") {
+		t.Errorf("nftables masquerade disable must not add the rule: %s", nftDisable)
+	}
+
+	// iptables enable / disable
+	iptEnable, err := BuildFirewallMasqueradeCommand("iptables", "", true)
+	if err != nil {
+		t.Fatalf("iptables masquerade enable failed: %v", err)
+	}
+	if iptEnable != "sudo iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -j MASQUERADE" {
+		t.Errorf("unexpected iptables masquerade enable: %s", iptEnable)
+	}
+
+	iptDisable, err := BuildFirewallMasqueradeCommand("iptables", "", false)
+	if err != nil {
+		t.Fatalf("iptables masquerade disable failed: %v", err)
+	}
+	if iptDisable != "sudo iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null && sudo iptables -t nat -D POSTROUTING -j MASQUERADE || true" {
+		t.Errorf("unexpected iptables masquerade disable: %s", iptDisable)
+	}
+
+	// firewalld keeps permanent zone semantics
+	fwdEnable, err := BuildFirewallMasqueradeCommand("firewalld", "trusted", true)
+	if err != nil {
+		t.Fatalf("firewalld masquerade enable failed: %v", err)
+	}
+	if !strings.Contains(fwdEnable, "--permanent --zone=trusted --add-masquerade") {
+		t.Errorf("unexpected firewalld masquerade enable: %s", fwdEnable)
+	}
+	fwdDisable, err := BuildFirewallMasqueradeCommand("firewall/firewalld", "trusted", false)
+	if err != nil {
+		t.Fatalf("firewalld masquerade disable failed: %v", err)
+	}
+	if !strings.Contains(fwdDisable, "--permanent --zone=trusted --remove-masquerade") {
+		t.Errorf("unexpected firewalld masquerade disable: %s", fwdDisable)
+	}
+
+	// Unsupported flavours fail loudly
+	if _, err := BuildFirewallMasqueradeCommand("ufw", "", true); err == nil {
+		t.Errorf("expected ufw masquerade to return an explicit error")
+	}
+	if _, err := BuildFirewallMasqueradeCommand("pf", "", true); err == nil {
+		t.Errorf("expected unknown firewall plugin to return an error")
+	}
+}
+
 func TestBuildFirewallDeleteCommand(t *testing.T) {
 	// Simple port
 	cmd, err := BuildFirewallDeleteCommand(FirewallDeleteInput{

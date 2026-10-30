@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -19,9 +20,63 @@ import (
 	"air-traffic-control/backend/pkg/clusterapi"
 	"air-traffic-control/backend/pkg/hostcache"
 	"air-traffic-control/backend/pkg/nodeapi"
+	"air-traffic-control/backend/pkg/plugin"
 	sshclient "air-traffic-control/backend/pkg/ssh"
 	"air-traffic-control/backend/pkg/terminal"
 )
+
+// isLocalNode checks if a node represents the local machine (localhost).
+// Mirrors the logic in terminal.OpenSSHPTY for consistency.
+func isLocalNode(node *nodeapi.Object) bool {
+	if node == nil {
+		return false
+	}
+	ip, _ := node.GetString("ip")
+	shortName, _ := node.GetString("shortName")
+	name, _ := node.GetString("name")
+	return ip == "127.0.0.1" ||
+		ip == "localhost" ||
+		ip == "::1" ||
+		shortName == "localhost" ||
+		name == "localhost"
+}
+
+// isLocalQuery checks if a query string (host/nodeId) explicitly refers to localhost.
+func isLocalQuery(query string) bool {
+	return query == "localhost" || query == "127.0.0.1" || query == "::1"
+}
+
+// ConnectionMetrics holds connection statistics for monitoring
+type ConnectionMetrics struct {
+	TotalConnections    atomic.Int64
+	ActiveConnections   atomic.Int64
+	TotalPTYSessions    atomic.Int64
+	ActivePTYSessions   atomic.Int64
+	FailedUpgrades      atomic.Int64
+	FailedPTYSpawns     atomic.Int64
+	BytesReceived       atomic.Int64
+	BytesSent           atomic.Int64
+	ConnectionErrors    atomic.Int64
+	LastConnectionTime  atomic.Int64 // Unix timestamp
+	LastDisconnectTime  atomic.Int64 // Unix timestamp
+}
+
+// GetSnapshot returns a copy of current metrics
+func (m *ConnectionMetrics) GetSnapshot() map[string]any {
+	return map[string]any{
+		"total_connections":   m.TotalConnections.Load(),
+		"active_connections":  m.ActiveConnections.Load(),
+		"total_pty_sessions":  m.TotalPTYSessions.Load(),
+		"active_pty_sessions": m.ActivePTYSessions.Load(),
+		"failed_upgrades":     m.FailedUpgrades.Load(),
+		"failed_pty_spawns":   m.FailedPTYSpawns.Load(),
+		"bytes_received":      m.BytesReceived.Load(),
+		"bytes_sent":          m.BytesSent.Load(),
+		"connection_errors":   m.ConnectionErrors.Load(),
+		"last_connection":     m.LastConnectionTime.Load(),
+		"last_disconnect":     m.LastDisconnectTime.Load(),
+	}
+}
 
 // AllowedPort checks if a port is in the allowed dev ports list.
 var allowedDevPorts = map[string]bool{
@@ -97,6 +152,10 @@ type HubOptions struct {
 	LogStore   *clusterapi.LogStore
 	SSHManager *sshclient.ClientManager
 	Resolver   terminal.NodeResolver
+	// FactsResolver resolves inventory nodes to plugin HostFacts so interactive
+	// PTY sessions can dial through the same connection-plugin transport
+	// (tsnet mesh) as command runners instead of bare TCP.
+	FactsResolver plugin.NodeResolver
 }
 
 type Hub struct {
@@ -110,11 +169,14 @@ type Hub struct {
 	queueStore *ansqueue.Store
 	connReg    *clusterapi.ConnectionRegistry
 	logStore   *clusterapi.LogStore
-	sshManager *sshclient.ClientManager
-	resolver   terminal.NodeResolver
+	sshManager    *sshclient.ClientManager
+	resolver      terminal.NodeResolver
+	factsResolver plugin.NodeResolver
 
 	connBroadcastTimer *time.Timer
 	connTimerMu        sync.Mutex
+
+	metrics ConnectionMetrics
 }
 
 func NewHub() *Hub {
@@ -131,8 +193,9 @@ func NewHubWithOptions(opts HubOptions) *Hub {
 		queueStore: opts.QueueStore,
 		connReg:    opts.ConnReg,
 		logStore:   opts.LogStore,
-		sshManager: opts.SSHManager,
-		resolver:   opts.Resolver,
+		sshManager:    opts.SSHManager,
+		resolver:      opts.Resolver,
+		factsResolver: opts.FactsResolver,
 	}
 }
 
@@ -157,6 +220,14 @@ func (h *Hub) SetOptions(opts HubOptions) {
 	if opts.Resolver != nil {
 		h.resolver = opts.Resolver
 	}
+	if opts.FactsResolver != nil {
+		h.factsResolver = opts.FactsResolver
+	}
+}
+
+// GetMetrics returns a snapshot of current connection metrics
+func (h *Hub) GetMetrics() map[string]any {
+	return h.metrics.GetSnapshot()
 }
 
 func (h *Hub) Run() {
@@ -166,21 +237,36 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			h.clients[client] = true
 			h.mu.Unlock()
+			h.RecordClusterLog(clusterapi.LogEntry{
+				Kind:    clusterapi.KindApp,
+				Level:   "info",
+				Source:  "atc/coordinator",
+				Message: fmt.Sprintf("websocket client connected (%s)", client.conn.RemoteAddr().String()),
+			})
 			h.sendInitialState(client)
 
 		case client := <-h.unregister:
-			h.mu.Lock()
-			if _, ok := h.clients[client]; ok {
-				delete(h.clients, client)
-				client.mu.Lock()
-				if !client.closed {
-					client.closed = true
-					close(client.send)
+				h.mu.Lock()
+				if _, ok := h.clients[client]; ok {
+					delete(h.clients, client)
+					client.mu.Lock()
+					if !client.closed {
+						client.closed = true
+						close(client.send)
+					}
+					client.mu.Unlock()
 				}
-				client.mu.Unlock()
-			}
-			h.mu.Unlock()
-			client.closeAllPTYSessions()
+				h.mu.Unlock()
+				h.metrics.ActiveConnections.Add(-1)
+				h.metrics.LastDisconnectTime.Store(time.Now().Unix())
+				log.Printf("websocket disconnected: active=%d", h.metrics.ActiveConnections.Load())
+				h.RecordClusterLog(clusterapi.LogEntry{
+					Kind:    clusterapi.KindApp,
+					Level:   "info",
+					Source:  "atc/coordinator",
+					Message: fmt.Sprintf("websocket client disconnected (%s)", client.conn.RemoteAddr().String()),
+				})
+				client.closeAllPTYSessions()
 
 		case message := <-h.broadcast:
 			h.mu.Lock()
@@ -211,6 +297,22 @@ func (h *Hub) BroadcastJSON(v interface{}) {
 			log.Println("websocket hub broadcast channel full, dropping message")
 		}
 	}
+}
+
+// boolPtr returns a pointer to b, for LogEntry.OK fields.
+func boolPtr(b bool) *bool { return &b }
+
+// RecordClusterLog persists an entry to the cluster log store and broadcasts it
+// to connected clients so the Cluster Syslog tab stays live.
+func (h *Hub) RecordClusterLog(entry clusterapi.LogEntry) {
+	if h.logStore == nil {
+		return
+	}
+	e := h.logStore.Record(entry)
+	h.BroadcastJSON(map[string]any{
+		"type":    "cluster_log_batch",
+		"entries": []clusterapi.LogEntry{e},
+	})
 }
 
 // BroadcastConnectionUpdate debounces and broadcasts connection snapshot.
@@ -335,9 +437,16 @@ func (h *Hub) sendInitialState(c *Client) {
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("websocket upgrade error:", err)
+		h.metrics.FailedUpgrades.Add(1)
+		h.metrics.ConnectionErrors.Add(1)
+		log.Printf("websocket upgrade error: %v (remote=%s, origin=%s)", err, r.RemoteAddr, r.Header.Get("Origin"))
 		return
 	}
+
+	h.metrics.TotalConnections.Add(1)
+	h.metrics.ActiveConnections.Add(1)
+	h.metrics.LastConnectionTime.Store(time.Now().Unix())
+	log.Printf("websocket connected: remote=%s origin=%s active=%d", r.RemoteAddr, r.Header.Get("Origin"), h.metrics.ActiveConnections.Load())
 
 	var releaseConn func()
 	if h.connReg != nil {
@@ -387,8 +496,13 @@ func (c *Client) readPump() {
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
+			if err != io.EOF && !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				c.hub.metrics.ConnectionErrors.Add(1)
+				log.Printf("websocket read error: %v", err)
+			}
 			break
 		}
+		c.hub.metrics.BytesReceived.Add(int64(len(message)))
 		c.handleMessage(message)
 	}
 }
@@ -428,8 +542,25 @@ func (c *Client) handleTerminalStart(msg ClientWSMessage) {
 		targetQuery = msg.NodeID
 	}
 
+	log.Printf("pty spawn requested: session=%s target=%s cols=%d rows=%d", sessionID, targetQuery, msg.Cols, msg.Rows)
+
+	// Explicitly handle localhost/127.0.0.1/::1 in query to use local PTY
+	isLocalHost := isLocalQuery(targetQuery)
+
 	var targetNode *nodeapi.Object
-	if c.hub.resolver != nil {
+	if c.hub.resolver != nil && !isLocalHost {
+		targetNode, _ = c.hub.resolver.FindNode(targetQuery)
+		// If resolved node represents localhost (by IP, shortName, or tailscaleHost), treat as local
+		if targetNode != nil {
+			if isLocalNode(targetNode) {
+				isLocalHost = true
+				shortName, _ := targetNode.GetString("shortName")
+			ip, _ := targetNode.GetString("ip")
+			log.Printf("pty target resolved to local node: session=%s target=%s shortName=%s ip=%s", sessionID, targetQuery, shortName, ip)
+			}
+		}
+	} else if c.hub.resolver != nil && isLocalHost {
+		// Still try to resolve for metadata even if query is explicitly local
 		targetNode, _ = c.hub.resolver.FindNode(targetQuery)
 	}
 
@@ -450,13 +581,65 @@ func (c *Client) handleTerminalStart(msg ClientWSMessage) {
 	var ptySession terminal.PTYSession
 	var err error
 
-	if pool != nil && targetNode != nil {
+	if isLocalHost {
+		log.Printf("pty opening local session: session=%s cols=%d rows=%d", sessionID, cols, rows)
+		ptySession, err = terminal.OpenLocalPTY(cols, rows)
+	} else if targetNode != nil && c.hub.factsResolver != nil {
+		// Interactive PTYs must ride the same transport as command runners:
+		// tailnet nodes go over ATC's own tsnet node via the connection plugin.
+		// The legacy ssh pool dials bare TCP, which cannot reach tailnet-only
+		// addresses (100.x) and produced the "dial tcp 100.x: i/o timeout"
+		// terminal failures.
+		nodeID, _ := targetNode.GetString("id")
+		log.Printf("pty opening SSH session via connection plugin: session=%s target=%s node=%s", sessionID, targetQuery, nodeID)
+		facts, found, factsErr := c.hub.factsResolver.ResolveNode(nodeID)
+		switch {
+		case factsErr != nil:
+			err = fmt.Errorf("pty: failed to resolve facts for node %s: %w", nodeID, factsErr)
+		case !found:
+			err = fmt.Errorf("pty: node %s not found in inventory", nodeID)
+		default:
+			client, clientErr := plugin.ResolveSSHClient(facts)
+			if clientErr != nil {
+				err = fmt.Errorf("pty: %w", clientErr)
+			} else {
+				// The client is pooled by the connection plugin: only the
+				// session is ours to close, never the client.
+				ptySession, err = terminal.OpenSSHPTYWithClient(client, cols, rows)
+				if err != nil {
+					// The pooled client may be stale (e.g. after a tsnet
+					// re-registration): evict and retry once with a fresh dial.
+					plugin.EvictSSHClient(facts)
+					if c2, e2 := plugin.ResolveSSHClient(facts); e2 == nil {
+						ptySession, err = terminal.OpenSSHPTYWithClient(c2, cols, rows)
+					} else {
+						err = fmt.Errorf("pty: %w", e2)
+					}
+				}
+			}
+		}
+	} else if pool != nil && targetNode != nil {
+		log.Printf("pty opening SSH session: session=%s target=%s", sessionID, targetQuery)
 		ptySession, err = terminal.OpenSSHPTY(context.Background(), pool, targetNode, cols, rows)
 	} else {
-		ptySession, err = terminal.OpenLocalPTY(cols, rows)
+		// Zero-mock invariant: never substitute a local shell for a remote
+		// target that failed to resolve — that would silently show the
+		// operator a shell on the wrong machine.
+		err = fmt.Errorf("pty: target %q did not resolve to an inventory node; refusing to substitute a local shell", targetQuery)
 	}
 
 	if err != nil {
+		c.hub.metrics.FailedPTYSpawns.Add(1)
+		c.hub.metrics.ConnectionErrors.Add(1)
+		log.Printf("pty spawn error: session=%s target=%s local=%v err=%v", sessionID, targetQuery, isLocalHost, err)
+		c.hub.RecordClusterLog(clusterapi.LogEntry{
+			Kind:    clusterapi.KindApp,
+			Level:   "error",
+			Source:  "atc/coordinator",
+			Host:    targetQuery,
+			Message: fmt.Sprintf("PTY spawn failed for %s: %v", targetQuery, err),
+			OK:      boolPtr(false),
+		})
 		c.sendJSON(map[string]any{
 			"type":      "terminal_data",
 			"sessionId": sessionID,
@@ -475,6 +658,18 @@ func (c *Client) handleTerminalStart(msg ClientWSMessage) {
 		})
 		return
 	}
+
+	c.hub.metrics.TotalPTYSessions.Add(1)
+	c.hub.metrics.ActivePTYSessions.Add(1)
+	log.Printf("pty session started: session=%s target=%s local=%v active_pty=%d", sessionID, targetQuery, isLocalHost, c.hub.metrics.ActivePTYSessions.Load())
+	c.hub.RecordClusterLog(clusterapi.LogEntry{
+		Kind:    clusterapi.KindApp,
+		Level:   "info",
+		Source:  "atc/coordinator",
+		Host:    targetQuery,
+		Message: fmt.Sprintf("PTY session started for %s", targetQuery),
+		OK:      boolPtr(true),
+	})
 
 	c.mu.Lock()
 	// Close any previous session under this ID
@@ -503,6 +698,8 @@ func (c *Client) handleTerminalStart(msg ClientWSMessage) {
 			delete(c.ptySessions, sessionID)
 			c.mu.Unlock()
 			_ = ptySession.Close()
+			c.hub.metrics.ActivePTYSessions.Add(-1)
+			log.Printf("pty session closed: session=%s active_pty=%d", sessionID, c.hub.metrics.ActivePTYSessions.Load())
 
 			if releaseSSHConn != nil {
 				releaseSSHConn()
@@ -527,17 +724,10 @@ func (c *Client) handleTerminalStart(msg ClientWSMessage) {
 					"sessionId": sessionID,
 					"data":      chunk,
 				})
-				// Also send terminal_output (matching requirement 2)
-				c.sendJSON(map[string]any{
-					"type":      "terminal_output",
-					"nodeId":    msg.NodeID,
-					"sessionId": sessionID,
-					"data":      chunk,
-				})
 			}
 			if rErr != nil {
 				if rErr != io.EOF {
-					// Stream closed or error
+					log.Printf("pty read error: session=%s err=%v", sessionID, rErr)
 				}
 				break
 			}
@@ -579,9 +769,17 @@ func (c *Client) handleTerminalInput(msg ClientWSMessage) {
 		if targetQuery == "" {
 			targetQuery = msg.NodeID
 		}
+		isLocalHost := isLocalQuery(targetQuery)
+
 		var targetNode *nodeapi.Object
-		if c.hub.resolver != nil {
+		if c.hub.resolver != nil && !isLocalHost {
 			targetNode, _ = c.hub.resolver.FindNode(targetQuery)
+			// If resolved node represents localhost (by IP, shortName, or tailscaleHost), treat as local
+			if targetNode != nil {
+				if isLocalNode(targetNode) {
+					isLocalHost = true
+				}
+			}
 		}
 		out, exitCode := terminal.ParseTerminalCommand(msg.Command, targetNode)
 		_ = exitCode
@@ -654,10 +852,20 @@ func (c *Client) writePump() {
 	for message := range c.send {
 		w, err := c.conn.NextWriter(websocket.TextMessage)
 		if err != nil {
+			c.hub.metrics.ConnectionErrors.Add(1)
+			log.Printf("websocket write error (next writer): %v", err)
 			return
 		}
-		_, _ = w.Write(message)
+		n, err := w.Write(message)
+		if err != nil {
+			c.hub.metrics.ConnectionErrors.Add(1)
+			log.Printf("websocket write error: %v", err)
+			return
+		}
+		c.hub.metrics.BytesSent.Add(int64(n))
 		if err := w.Close(); err != nil {
+			c.hub.metrics.ConnectionErrors.Add(1)
+			log.Printf("websocket write close error: %v", err)
 			return
 		}
 	}

@@ -88,3 +88,28 @@ test('ansible-collections datacenter settings page renders collection manager wi
   assert.ok(html.includes('community.general.run0'));
   assert.ok(html.includes('Install Collection'));
 });
+
+test('scheduled jobs lives under the Ansible Engine submenu', () => {
+  const html = renderToString(
+    React.createElement(DatacenterSettingsView, { page: 'ansible-schedules', nodes: [] })
+  );
+  assert.ok(html.includes('data-setting-id="ansible-schedules"'));
+  assert.ok(html.includes('#/datacenter/settings/automation/ansible-schedules'));
+  assert.ok(html.includes('data-testid="datacenter-cron-schedules"'));
+  assert.ok(html.includes("Scheduled Playbooks"));
+  assert.ok(html.includes("New Schedule"));
+});
+
+test('tailnet mesh topology renders on the Tailscale Mesh page, not the overview', () => {
+  const html = renderToString(
+    React.createElement(DatacenterSettingsView, { page: 'connection/tailscale', nodes: [] })
+  );
+  assert.ok(html.includes('data-testid="datacenter-topology"'));
+  assert.ok(html.includes('Tailnet Mesh Topology'));
+  assert.ok(!html.includes('data-testid="datacenter-ansible-config-card"'));
+
+  const overviewHtml = renderToString(
+    React.createElement(DatacenterSettingsView, { page: 'ansible-forks' })
+  );
+  assert.ok(!overviewHtml.includes('data-testid="datacenter-topology"'));
+});

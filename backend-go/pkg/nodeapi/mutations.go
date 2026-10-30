@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -145,8 +146,25 @@ func (a *API) stagePluginTask(
 	become bool,
 	secretsMasked map[string]string,
 ) {
+	_, _ = a.stagePluginTaskID(node, category, pluginID, action, opts, fallbackTitle, fallbackModule, fallbackSteps, become, secretsMasked)
+}
+
+// stagePluginTaskID behaves like stagePluginTask but reports the queued task id
+// so the caller can execute exactly that task.
+func (a *API) stagePluginTaskID(
+	node *Object,
+	category string,
+	pluginID string,
+	action string,
+	opts map[string]any,
+	fallbackTitle string,
+	fallbackModule string,
+	fallbackSteps []ansqueue.Step,
+	become bool,
+	secretsMasked map[string]string,
+) (string, error) {
 	if a.queueStore == nil {
-		return
+		return "", errors.New("ansible queue is not configured")
 	}
 
 	ansNode := ansNodeFromObject(node)
@@ -239,8 +257,12 @@ func (a *API) stagePluginTask(
 		},
 	}
 
-	_, _ = a.queueStore.Enqueue(task)
+	enqueued, err := a.queueStore.Enqueue(task)
 	a.emitQueueUpdated()
+	if err != nil {
+		return "", err
+	}
+	return enqueued.ID, nil
 }
 
 func (a *API) runCommand(ctx context.Context, targetNode *Object, cmd string, timeout time.Duration) (string, error) {
@@ -385,6 +407,23 @@ func (a *API) handleInterfaceConnect(w http.ResponseWriter, r *http.Request, nod
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "output": strings.TrimSpace(out)})
 }
 
+// firewallManagedByPve reports whether Proxmox's pve-firewall owns the host
+// ruleset. ATC must not write into that ruleset: pve-firewall rewrites its
+// chains on every reload, so mutations would appear to work and then vanish.
+func (a *API) firewallManagedByPve(ctx context.Context, node *Object) bool {
+	out, err := a.runCommand(ctx, node, `if [ -d /etc/pve ] && systemctl is-active --quiet pve-firewall 2>/dev/null; then echo PVE; fi`, 5*time.Second)
+	return err == nil && strings.Contains(out, "PVE")
+}
+
+// rejectPveManagedFirewall writes the standard 409 for view-only hosts.
+func rejectPveManagedFirewall(w http.ResponseWriter) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"success":  false,
+		"viewOnly": true,
+		"error":    "Firewall is managed by pve-firewall; ATC mutations are not implemented yet",
+	})
+}
+
 // ---------------------------------------------------------------------------
 // 3. POST /api/nodes/:id/firewall/rules
 // ---------------------------------------------------------------------------
@@ -400,18 +439,18 @@ func (a *API) handleFirewallAddRule(w http.ResponseWriter, r *http.Request, node
 		return
 	}
 
+	if a.firewallManagedByPve(r.Context(), targetNode) {
+		rejectPveManagedFirewall(w)
+		return
+	}
+
 	var body FirewallRuleInput
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
 
-	cmd, err := BuildFirewallAddCommand(body)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
-		return
-	}
-
+	flavour := normalizeFirewallFlavour(body.Plugin)
 	action := "allow_port"
 	opts := map[string]any{
 		"port":  body.Port,
@@ -428,36 +467,109 @@ func (a *API) handleFirewallAddRule(w http.ResponseWriter, r *http.Request, node
 		opts["service"] = body.Service
 	}
 
-	a.stagePluginTask(
-		targetNode,
-		"firewall",
-		"firewall/firewalld",
-		action,
-		opts,
-		"Configure firewall rule",
-		"ansible.posix.firewalld",
-		[]ansqueue.Step{
-			{
-				Name:       "Configure firewall rule",
-				Module:     "ansible.posix.firewalld",
-				Parameters: opts,
-			},
-		},
-		true,
-		nil,
-	)
+	// Every firewall mutation runs as an Ansible task. firewalld uses its native
+	// module (permanent + immediate); the raw flavours are persisted through an
+	// ATC-owned drop-in that the same play writes and activates.
+	steps := []ansqueue.Step{}
+	pluginID := "firewall/" + flavour
+	if flavour == "firewalld" {
+		steps = nil // compiled by the plugin Actor
+	} else {
+		targetID, _ := targetNode.GetString("id")
+		rule := hostcache.FirewallRule{
+			ID:        firewallRuleID(targetID, flavour, action, body),
+			HostID:    targetID,
+			Plugin:    flavour,
+			Kind:      action,
+			Params:    firewallRuleParams(action, body),
+			Permanent: true,
+		}
+		if err := a.store.UpsertFirewallRule(rule); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+		rules, err := a.store.ListFirewallRules(targetID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+		steps = firewallPersistSteps(flavour, rules)
+	}
 
-	out, runErr := a.runCommand(r.Context(), targetNode, cmd, 8*time.Second)
+	title := fmt.Sprintf("Configure %s firewall rule", flavour)
+	out, runErr := a.applyFirewallTask(r.Context(), targetNode, title, pluginID, action, opts, steps)
 	if targetID, ok := targetNode.GetString("id"); ok && targetID != "" {
 		_ = a.store.InvalidateHostSections(targetID)
 	}
-
 	if runErr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": runErr.Error()})
+		// The task is durably queued even when the play cannot reach the host.
+		// Report the honest split instead of pretending it applied.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success": false, "staged": true, "applied": false,
+			"error": runErr.Error(), "output": strings.TrimSpace(out),
+		})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "output": strings.TrimSpace(out)})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "staged": true, "applied": true, "output": strings.TrimSpace(out)})
+}
+
+// applyFirewallTask stages a firewall mutation, runs exactly that task through
+// the Ansible queue, and returns its output. No direct SSH mutation remains.
+func (a *API) applyFirewallTask(ctx context.Context, node *Object, title, pluginID, action string, opts map[string]any, steps []ansqueue.Step) (string, error) {
+	id, err := a.stagePluginTaskID(node, "firewall", pluginID, action, opts, title, "ansible.builtin.command", steps, true, nil)
+	if err != nil {
+		return "", err
+	}
+	if id == "" {
+		return "", errors.New("firewall task could not be staged")
+	}
+
+	result, err := a.queueStore.ExecuteNextTask(ctx, ansqueue.Options{
+		WorkDir:   ansqueue.ResolveWorkDir(),
+		TaskID:    id,
+		TaskStore: a.store,
+	})
+	if err != nil {
+		return "", err
+	}
+	if result.Result != nil {
+		if result.Result.Error != "" {
+			return "", errors.New(result.Result.Error)
+		}
+		return fmt.Sprintf("task %s applied via ansible", result.Result.TaskID), nil
+	}
+	return "", nil
+}
+
+// firewallRuleID is a deterministic id, so re-applying the same rule updates it
+// instead of stacking duplicates in the model.
+func firewallRuleID(hostID, flavour, action string, body FirewallRuleInput) string {
+	parts := []string{hostID, flavour, action, body.Port, body.Protocol, body.Toport, body.Toaddr, body.Service}
+	clean := make([]string, 0, len(parts))
+	for _, p := range parts {
+		clean = append(clean, strings.NewReplacer("/", "-", ":", "-", " ", "").Replace(strings.TrimSpace(p)))
+	}
+	return "fw-" + strings.Join(clean, "-")
+}
+
+// firewallRuleParams maps the rule input onto the model parameters.
+func firewallRuleParams(action string, body FirewallRuleInput) map[string]string {
+	params := map[string]string{
+		"port":  strings.TrimSpace(body.Port),
+		"proto": strings.TrimSpace(body.Protocol),
+	}
+	if params["proto"] == "" {
+		params["proto"] = "tcp"
+	}
+	if action == "forward_port" {
+		params["toport"] = strings.TrimSpace(body.Toport)
+		params["toaddr"] = strings.TrimSpace(body.Toaddr)
+	}
+	if action == "allow_service" {
+		params["service"] = strings.TrimSpace(body.Service)
+	}
+	return params
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +584,11 @@ func (a *API) handleFirewallDeleteRule(w http.ResponseWriter, r *http.Request, n
 	targetNode, err := a.findNode(nodeID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+
+	if a.firewallManagedByPve(r.Context(), targetNode) {
+		rejectPveManagedFirewall(w)
 		return
 	}
 
@@ -492,6 +609,38 @@ func (a *API) handleFirewallDeleteRule(w http.ResponseWriter, r *http.Request, n
 	}
 	if rawRule == "" {
 		rawRule = body.RawRule
+	}
+
+	// Keep the managed model in sync: a deleted rule must not be resurrected by
+	// the next rendered drop-in. `ruleID` is "<port>/<proto>" for raw flavours.
+	if targetID, ok := targetNode.GetString("id"); ok && targetID != "" {
+		if rules, listErr := a.store.ListFirewallRules(targetID); listErr == nil {
+			port := strings.SplitN(ruleID, "/", 2)[0]
+			for _, rule := range rules {
+				if rule.Params["port"] == port {
+					_ = a.store.DeleteFirewallRule(targetID, rule.ID)
+				}
+			}
+		}
+	}
+
+	// Raw flavours are model-backed: re-render the ATC-owned drop-in instead of
+	// poking the host directly, so persistence and runtime stay in sync.
+	if targetID, ok := targetNode.GetString("id"); ok && targetID != "" {
+		if managed, listErr := a.store.ListFirewallRules(targetID); listErr == nil && len(managed) > 0 {
+			flavour := managed[0].Plugin
+			steps := firewallPersistSteps(flavour, managed)
+			if len(steps) > 0 {
+				out, runErr := a.applyFirewallTask(r.Context(), targetNode, "Remove "+flavour+" NAT rule", "firewall/"+flavour, "delete_rule", map[string]any{"rule": ruleID}, steps)
+				_ = a.store.InvalidateHostSections(targetID)
+				if runErr != nil {
+					writeJSON(w, http.StatusOK, map[string]any{"success": false, "staged": true, "applied": false, "error": runErr.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"success": true, "staged": true, "applied": true, "output": strings.TrimSpace(out)})
+				return
+			}
+		}
 	}
 
 	cmd, err := BuildFirewallDeleteCommand(FirewallDeleteInput{
@@ -1723,6 +1872,46 @@ func (a *API) handlePrivilegeTest(w http.ResponseWriter, r *http.Request, nodeID
 // 19. Packages Check & Apply
 // ---------------------------------------------------------------------------
 
+// packageCheckTimeout bounds the whole package check so a hung registry, SSH
+// session or container runtime cannot leave the UI spinning forever. Callers
+// may override it with ?timeout=<seconds> (capped at 300s).
+const packageCheckTimeout = 30 * time.Second
+
+// pluginRunnerAdapter adapts the nodeapi CommandRunner to the plugin.Runner
+// contract for a specific target node. The caller owns the deadline (timeout 0
+// means "inherit the caller's context"), so no nested timeout is added.
+type pluginRunnerAdapter struct {
+	api  *API
+	node *Object
+}
+
+func (r *pluginRunnerAdapter) RunCommand(ctx context.Context, cmd string) (string, error) {
+	return r.api.runCommand(ctx, r.node, cmd, 0)
+}
+
+// writeOfflinePackageCheck returns a successful HTTP response carrying an
+// explicit offline/unmonitored marker so the frontend can stop its spinner and
+// show a host-unreachable state instead of waiting forever.
+func (a *API) writeOfflinePackageCheck(w http.ResponseWriter, targetID, reason string) {
+	result := map[string]any{
+		"success":        false,
+		"offline":        true,
+		"unmonitored":    true,
+		"manager":        "unknown",
+		"isImmutable":    false,
+		"updatesCount":   0,
+		"updates":        []any{},
+		"lastChecked":    time.Now().UTC().Format(time.RFC3339),
+		"rebootRequired": false,
+		"error":          reason,
+	}
+	if a.store != nil && targetID != "" {
+		b, _ := json.Marshal(result)
+		_ = a.store.UpsertHostSection(targetID, "packages", b)
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (a *API) handlePackagesCheck(w http.ResponseWriter, r *http.Request, nodeID string) {
 	targetNode, err := a.findNode(nodeID)
 	if err != nil {
@@ -1731,8 +1920,26 @@ func (a *API) handlePackagesCheck(w http.ResponseWriter, r *http.Request, nodeID
 	}
 	targetID, _ := targetNode.GetString("id")
 
-	// Fast probe package manager
-	out, _ := a.runCommand(r.Context(), targetNode, "which bootc 2>/dev/null || which rpm-ostree 2>/dev/null || which dnf 2>/dev/null || which apt-get 2>/dev/null || which apk 2>/dev/null || echo 'none'", 8*time.Second)
+	timeout := packageCheckTimeout
+	if raw := strings.TrimSpace(r.URL.Query().Get("timeout")); raw != "" {
+		if secs, parseErr := strconv.Atoi(raw); parseErr == nil && secs > 0 && secs <= 300 {
+			timeout = time.Duration(secs) * time.Second
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	// Fast probe package manager. The 8s inner bound keeps detection snappy;
+	// the outer deadline bounds the whole request.
+	out, probeErr := a.runCommand(ctx, targetNode, "which bootc 2>/dev/null || which rpm-ostree 2>/dev/null || which dnf 2>/dev/null || which apt-get 2>/dev/null || which apk 2>/dev/null || echo 'none'", 8*time.Second)
+	if probeErr != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			a.writeOfflinePackageCheck(w, targetID, fmt.Sprintf("package manager probe timed out after %s", timeout))
+			return
+		}
+		a.writeOfflinePackageCheck(w, targetID, fmt.Sprintf("package manager probe failed: %v", probeErr))
+		return
+	}
 	trimmed := strings.TrimSpace(out)
 
 	manager := "dnf"
@@ -1757,6 +1964,70 @@ func (a *API) handlePackagesCheck(w http.ResponseWriter, r *http.Request, nodeID
 		"updates":        []any{},
 		"lastChecked":    time.Now().UTC().Format(time.RFC3339),
 		"rebootRequired": false,
+	}
+
+	// Execute the real check through the registered plugin Reader. This restores
+	// update checking that the Go port dropped, and gives every manager the same
+	// 30s guard. A plugin read that exceeds the deadline is reported as
+	// offline/unmonitored rather than an indefinite wait.
+	pluginID := "package/" + manager
+	if manager == "rpm-ostree" {
+		pluginID = "package/rpmostree"
+	}
+	if p, ok := plugin.Get(pluginID); ok {
+		if reader, ok := p.(plugin.Reader); ok {
+			facts := plugin.HostFacts{
+				NodeID:        targetID,
+				OSFamily:      "linux",
+				ActivePackage: pluginID,
+			}
+			data, readErr := reader.Read(ctx, &pluginRunnerAdapter{api: a, node: targetNode}, facts)
+			if readErr != nil {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(readErr, context.DeadlineExceeded) {
+					a.writeOfflinePackageCheck(w, targetID, fmt.Sprintf("package check timed out after %s", timeout))
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{
+					"success":        false,
+					"manager":        manager,
+					"isImmutable":    isImmutable,
+					"updates":        []any{},
+					"updatesCount":   0,
+					"lastChecked":    time.Now().UTC().Format(time.RFC3339),
+					"rebootRequired": false,
+					"error":          fmt.Sprintf("package check failed: %v", readErr),
+				})
+				return
+			}
+			if m, ok := data.(map[string]any); ok {
+				// Pass every field the reader produced straight through. The
+				// handler used to whitelist a handful of keys, which silently
+				// dropped manager-specific data such as bootc's booted/rollback/
+				// staged image references.
+				for key, value := range m {
+					if key == "success" {
+						continue
+					}
+					result[key] = value
+				}
+				// rpm-ostree reports deployments instead of an updates array; surface
+				// a staged deployment as a pending update when present.
+				if manager == "rpm-ostree" {
+					if pending, _ := m["pendingDeployment"].(bool); pending {
+						if origin, _ := m["stagedOrigin"].(string); origin != "" {
+							result["updates"] = []any{map[string]any{
+								"name":       origin,
+								"newVersion": m["stagedVersion"],
+								"repository": "ostree",
+								"security":   false,
+							}}
+							result["updatesCount"] = 1
+							result["rebootRequired"] = true
+						}
+					}
+				}
+			}
+		}
 	}
 
 	if a.store != nil {
@@ -1886,3 +2157,216 @@ func (a *API) handlePackagesApply(w http.ResponseWriter, r *http.Request, nodeID
 	})
 }
 
+// POST /api/nodes/:id/firewall/masquerade
+//
+// firewalld uses the native ansible.posix.firewalld module (permanent +
+// immediate). The raw flavours record the desired state and re-render the
+// ATC-owned drop-in, which the same Ansible task writes and activates.
+func (a *API) handleFirewallMasquerade(w http.ResponseWriter, r *http.Request, nodeID string) {
+	if r.Method != http.MethodPost {
+		a.notFound(w, r)
+		return
+	}
+	targetNode, err := a.findNode(nodeID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+
+	if a.firewallManagedByPve(r.Context(), targetNode) {
+		rejectPveManagedFirewall(w)
+		return
+	}
+
+	var body struct {
+		Enabled *bool  `json:"enabled"`
+		Plugin  string `json:"plugin"`
+		Zone    string `json:"zone"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	if body.Enabled == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "enabled is required"})
+		return
+	}
+
+	flavour := normalizeFirewallFlavour(body.Plugin)
+	if flavour != "firewalld" && flavour != "nftables" && flavour != "iptables" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   fmt.Sprintf("masquerade is not supported for firewall plugin %q", flavour),
+		})
+		return
+	}
+
+	action := "masquerade"
+	opts := map[string]any{"enabled": *body.Enabled, "plugin": flavour}
+	if strings.TrimSpace(body.Zone) != "" {
+		opts["zone"] = body.Zone
+	}
+	if strings.TrimSpace(body.Zone) != "" {
+		opts["zone"] = body.Zone
+	}
+
+	steps := []ansqueue.Step{}
+	pluginID := "firewall/" + flavour
+	if flavour != "firewalld" {
+		targetID, _ := targetNode.GetString("id")
+		if *body.Enabled {
+			if err := a.store.UpsertFirewallRule(hostcache.FirewallRule{
+				ID:        "fw-" + targetID + "-" + flavour + "-masquerade",
+				HostID:    targetID,
+				Plugin:    flavour,
+				Kind:      "masquerade",
+				Params:    map[string]string{},
+				Permanent: true,
+			}); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+		} else {
+			existing, listErr := a.store.ListFirewallRules(targetID)
+			if listErr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": listErr.Error()})
+				return
+			}
+			for _, rule := range existing {
+				if rule.Kind == "masquerade" {
+					_ = a.store.DeleteFirewallRule(targetID, rule.ID)
+				}
+			}
+		}
+		rules, listErr := a.store.ListFirewallRules(targetID)
+		if listErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": listErr.Error()})
+			return
+		}
+		steps = firewallPersistSteps(flavour, rules)
+	}
+
+	verb := "Enable"
+	if !*body.Enabled {
+		verb = "Disable"
+	}
+	title := fmt.Sprintf("%s masquerade for %s firewall", verb, flavour)
+
+	out, runErr := a.applyFirewallTask(r.Context(), targetNode, title, pluginID, action, opts, steps)
+	if targetID, ok := targetNode.GetString("id"); ok && targetID != "" {
+		_ = a.store.InvalidateHostSections(targetID)
+	}
+	if runErr != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success": false, "staged": true, "applied": false, "enabled": *body.Enabled,
+			"plugin": flavour, "error": runErr.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true, "staged": true, "applied": true, "enabled": *body.Enabled,
+		"plugin": flavour, "output": strings.TrimSpace(out),
+	})
+}
+
+// POST /api/nodes/:id/firewall/adopt
+//
+// Imports NAT state that already exists on the host (masquerade and DNAT rules
+// created outside ATC) into the managed model, so the next render keeps them
+// instead of silently dropping them.
+func (a *API) handleFirewallAdopt(w http.ResponseWriter, r *http.Request, nodeID string) {
+	if r.Method != http.MethodPost {
+		a.notFound(w, r)
+		return
+	}
+	targetNode, err := a.findNode(nodeID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+
+	if a.firewallManagedByPve(r.Context(), targetNode) {
+		rejectPveManagedFirewall(w)
+		return
+	}
+
+	var body struct {
+		Plugin string `json:"plugin"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	flavour := normalizeFirewallFlavour(body.Plugin)
+	if flavour != "nftables" && flavour != "iptables" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "only nftables and iptables hosts have an importable NAT model",
+		})
+		return
+	}
+
+	p, ok := plugin.Get("firewall/" + flavour)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "firewall plugin not registered"})
+		return
+	}
+	reader, ok := p.(plugin.Reader)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "firewall plugin cannot read host state"})
+		return
+	}
+
+	targetID, _ := targetNode.GetString("id")
+	data, readErr := reader.Read(r.Context(), &pluginRunnerAdapter{api: a, node: targetNode}, hostFactsFromNode(targetNode))
+	if readErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"success": false, "error": readErr.Error()})
+		return
+	}
+	state, _ := data.(map[string]any)
+
+	adopted := 0
+	if masq, ok := state["masquerade"].(bool); ok && masq {
+		if err := a.store.UpsertFirewallRule(hostcache.FirewallRule{
+			ID:        "fw-" + targetID + "-" + flavour + "-masquerade",
+			HostID:    targetID,
+			Plugin:    flavour,
+			Kind:      "masquerade",
+			Params:    map[string]string{},
+			Permanent: true,
+			Adopted:   true,
+		}); err == nil {
+			adopted++
+		}
+	}
+
+	if raw, ok := state["forwardPorts"].([]any); ok {
+		for _, entry := range raw {
+			item, _ := entry.(map[string]any)
+			port, _ := item["port"].(string)
+			proto, _ := item["proto"].(string)
+			toPort, _ := item["toport"].(string)
+			toAddr, _ := item["toaddr"].(string)
+			if strings.TrimSpace(port) == "" {
+				continue
+			}
+			rule := hostcache.FirewallRule{
+				ID:        "fw-" + targetID + "-" + flavour + "-forward-" + port + "-" + proto,
+				HostID:    targetID,
+				Plugin:    flavour,
+				Kind:      "forward_port",
+				Params:    map[string]string{"port": port, "proto": firstNonEmptyString(proto, "tcp"), "toport": toPort, "toaddr": toAddr},
+				Permanent: true,
+				Adopted:   true,
+			}
+			if err := a.store.UpsertFirewallRule(rule); err == nil {
+				adopted++
+			}
+		}
+	}
+
+	rules, _ := a.store.ListFirewallRules(targetID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"adopted": adopted,
+		"managed": len(rules),
+	})
+}

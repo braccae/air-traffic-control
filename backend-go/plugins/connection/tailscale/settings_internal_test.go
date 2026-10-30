@@ -2,6 +2,7 @@ package tailscale
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -131,7 +132,7 @@ func TestSettingsPageDeclaresMaskedAuthKey(t *testing.T) {
 	if byName[FieldHostname].Default != DefaultHostname {
 		t.Fatalf("hostname default = %v, want %q", byName[FieldHostname].Default, DefaultHostname)
 	}
-	if byName[FieldEphemeral].Default != true {
+	if byName[FieldEphemeral].Default != false {
 		t.Fatalf("ephemeral default = %v, want true", byName[FieldEphemeral].Default)
 	}
 }
@@ -174,7 +175,7 @@ func TestEffectiveSettingsAppliesPersistedValues(t *testing.T) {
 }
 
 func TestEffectiveSettingsFallsBackToEnvAndDefaults(t *testing.T) {
-	withSettingsStore(t)
+	store := withSettingsStore(t)
 	t.Setenv("TS_AUTHKEY", "tskey-auth-env")
 	t.Setenv("TS_CONTROL_URL", "")
 
@@ -185,11 +186,12 @@ func TestEffectiveSettingsFallsBackToEnvAndDefaults(t *testing.T) {
 	if cfg.Hostname != DefaultHostname {
 		t.Fatalf("Hostname = %q, want %q", cfg.Hostname, DefaultHostname)
 	}
-	if cfg.StateDir != DefaultStateDir {
-		t.Fatalf("StateDir = %q, want %q", cfg.StateDir, DefaultStateDir)
+	wantStateDir := filepath.Join(filepath.Dir(store.DBPath()), "tsnet")
+	if cfg.StateDir != wantStateDir {
+		t.Fatalf("StateDir = %q, want %q", cfg.StateDir, wantStateDir)
 	}
-	if !cfg.Ephemeral {
-		t.Fatalf("Ephemeral = false, want default true")
+	if cfg.Ephemeral {
+		t.Fatalf("Ephemeral = true, want default false")
 	}
 }
 
@@ -293,6 +295,37 @@ func TestEnsureTsnetFailsLoudlyWithoutKeyOrFallback(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no auth key configured") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestSelfStatusReportsUnconfiguredNode proves the status surface tells the
+// truth when tsnet has neither an auth key nor prior node state: not configured,
+// not connected, and the exact reason the operator must fix.
+func TestSelfStatusReportsUnconfiguredNode(t *testing.T) {
+	withSettingsStore(t)
+	t.Setenv("TS_AUTHKEY", "")
+	t.Setenv("TS_CONTROL_URL", "")
+
+	p := New(WithStateDir(t.TempDir()), WithHostname("atc-status-test"))
+	st := p.SelfStatus(context.Background())
+
+	if st.Configured {
+		t.Fatalf("Configured = true without an auth key or node state")
+	}
+	if st.Connected {
+		t.Fatalf("Connected = true while unconfigured")
+	}
+	if st.Mode != "unconfigured" {
+		t.Fatalf("Mode = %q, want %q", st.Mode, "unconfigured")
+	}
+	if !strings.Contains(st.Error, "no auth key configured") {
+		t.Fatalf("Error = %q, want the real configuration failure", st.Error)
+	}
+	if st.Hostname != "atc-status-test" {
+		t.Fatalf("Hostname = %q, want the configured hostname", st.Hostname)
+	}
+	if st.TailscaleIPs == nil {
+		t.Fatalf("TailscaleIPs must be an empty slice, not nil")
 	}
 }
 

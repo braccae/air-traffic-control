@@ -136,23 +136,15 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		}
 	}
 
-	if configured == 0 {
-		return plugin.Detection{
-			Detected: false,
-			Status:   "NO CONFIG",
-			Details:  "No database engine overrides configured; set <engine>_host/_port/_user/_database in Edit Node.",
-		}, nil
-	}
-
-	det := plugin.Detection{
-		Detected: reachable > 0 || cliPresent > 0,
-		Status:   fmt.Sprintf("%d/%d reachable", reachable, configured),
-		Details:  strings.Join(detailParts, "; "),
-	}
-	if det.Details == "" {
-		det.Details = "Configured engines are not reachable over TCP; queries will use CLI fallback."
-	}
-	return det, nil
+	// The unified driver is an internal implementation detail of the SQL/NoSQL
+	// data browser views: it must never appear as its own sidebar tab. Queries
+	// are still served via the /plugins/.../query endpoint regardless of
+	// detection.
+	return plugin.Detection{
+		Detected: false,
+		Status:   "INTERNAL",
+		Details:  "Native driver backend for the SQL/NoSQL data browsers; not a standalone module.",
+	}, nil
 }
 
 // Read returns per-engine driver connectivity for diagnostics.
@@ -228,6 +220,17 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 }
 
 // connConfig is the resolved connection configuration for one engine.
+// noDeadlineConn wraps a net.Conn whose transport cannot honour deadlines
+// (SSH channels, tsnet) and makes the deadline setters no-ops instead of
+// returning "deadline not supported".
+type noDeadlineConn struct {
+	net.Conn
+}
+
+func (c noDeadlineConn) SetDeadline(time.Time) error      { return nil }
+func (c noDeadlineConn) SetReadDeadline(time.Time) error  { return nil }
+func (c noDeadlineConn) SetWriteDeadline(time.Time) error { return nil }
+
 type connConfig struct {
 	Engine   string
 	Kind     string
@@ -237,6 +240,19 @@ type connConfig struct {
 	Password string
 	Database string
 	Socket   string
+	// DialFunc, when set, is used to open TCP connections for this host (e.g.
+	// routing tailnet addresses through ATC's tsnet node). A nil DialFunc means
+	// use the default net.Dialer.
+	DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+	// tunnel is the shared SSH-tunnel target. It is a pointer so discovery can
+	// retarget an already-built DialFunc at a container IP/port.
+	tunnel *dialTarget
+}
+
+// dialTarget is the address the SSH tunnel dials on the remote host.
+type dialTarget struct {
+	host string
+	port int
 }
 
 func (c connConfig) address() string {
@@ -307,20 +323,20 @@ func resolveEngineConfig(spec engineSpec, req plugin.QueryRequest, h plugin.Host
 	cfg := connConfig{Engine: spec.Name, Kind: spec.Kind}
 	cfg.Host = strings.TrimSpace(req.Host)
 	cfg.User = strings.TrimSpace(req.User)
+	// For SQL engines a local tunnel connection commonly uses peer/OS auth, so
+	// defaulting to the SSH user is helpful. For redis/mongo it is harmful: it
+	// makes the driver attempt SASL auth with an unknown user.
+	if cfg.User == "" && spec.Kind == "sql" {
+		cfg.User = strings.TrimSpace(h.Overrides["user"])
+	}
+
 	cfg.Password = req.Password
 	cfg.Database = strings.TrimSpace(req.Database)
 	cfg.Socket = strings.TrimSpace(req.Socket)
 	cfg.Port = req.Port
-
-	if cfg.Host == "" {
-		cfg.Host = firstOverride(h.Overrides, spec.OverrideKeys, "_host")
-	}
-	if cfg.Host == "" {
-		cfg.Host = strings.TrimSpace(h.HostRoute)
-	}
-	if cfg.Host == "" {
-		cfg.Host = "127.0.0.1"
-	}
+	// Resolve the port BEFORE building the SSH tunnel: the tunnel closure
+	// captures the port, so applying the override afterwards would dial the
+	// engine's default port instead of the configured/container-published one.
 	if cfg.Port == 0 {
 		if raw := firstOverride(h.Overrides, spec.OverrideKeys, "_port"); raw != "" {
 			if n, err := strconv.Atoi(raw); err == nil {
@@ -330,6 +346,62 @@ func resolveEngineConfig(spec engineSpec, req plugin.QueryRequest, h plugin.Host
 	}
 	if cfg.Port == 0 {
 		cfg.Port = spec.DefaultPort
+	}
+
+	if cfg.Host == "" {
+		cfg.Host = firstOverride(h.Overrides, spec.OverrideKeys, "_host")
+	}
+	if cfg.Host == "" {
+		cfg.Host = strings.TrimSpace(h.Overrides["ip"])
+	}
+	if cfg.Host == "" {
+		cfg.Host = strings.TrimSpace(h.Overrides["host"])
+	}
+	if cfg.Host == "" {
+		cfg.Host = strings.TrimSpace(h.HostRoute)
+	}
+	if cfg.Host == "" {
+		cfg.Host = "127.0.0.1"
+	}
+	// Prefer an SSH tunnel to localhost on the target node: this mirrors the
+	// legacy CLI path (psql/redis-cli running ON the host, connecting to
+	// 127.0.0.1) and avoids needing the CLI tools or DB credentials for a
+	// remote connection. Only fall back to a direct (possibly tsnet-routed)
+	// dial when an explicit host override was provided.
+	explicitHost := firstOverride(h.Overrides, spec.OverrideKeys, "_host")
+	if strings.TrimSpace(cfg.Host) == "" || strings.TrimSpace(cfg.Host) == strings.TrimSpace(h.HostRoute) || explicitHost == "" {
+		if sshClient, err := plugin.ResolveSSHClient(h); err == nil && sshClient != nil {
+			port := cfg.Port
+			if port <= 0 {
+				port = spec.DefaultPort
+			}
+			target := &dialTarget{host: "127.0.0.1", port: port}
+			cfg.tunnel = target
+			cfg.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				conn, err := sshClient.Dial("tcp", net.JoinHostPort(target.host, strconv.Itoa(target.port)))
+				if err != nil {
+					return nil, err
+				}
+				// SSH channels do not implement net.Conn deadlines ("ssh:
+				// tcpChan: deadline not supported"), which the redis and mongo
+				// drivers set unconditionally. Wrap so those calls are no-ops.
+				return noDeadlineConn{Conn: conn}, nil
+			}
+		} else {
+			_ = err
+		}
+	}
+	if cfg.DialFunc == nil {
+		// Route tailnet addresses through ATC's own tsnet node.
+		if d, err := plugin.ResolveDialer(h); err == nil && d != nil {
+			cfg.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				conn, err := d.Dial(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+				return noDeadlineConn{Conn: conn}, nil
+			}
+		}
 	}
 	if cfg.Socket == "" {
 		cfg.Socket = firstOverride(h.Overrides, spec.OverrideKeys, "_socket")

@@ -3,6 +3,7 @@ package iptables
 import (
 	"context"
 	"fmt"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -134,6 +135,77 @@ type ParsedFirewallRule struct {
 	Source    string `json:"source"`
 	Interface string `json:"interface"`
 	Comment   string `json:"comment"`
+}
+
+// NATForwardPort describes one DNAT port-forward entry observed in the nat table.
+type NATForwardPort struct {
+	Port   string `json:"port"`
+	Proto  string `json:"proto"`
+	ToPort string `json:"toport"`
+	ToAddr string `json:"toaddr,omitempty"`
+}
+
+// ParseIptablesNAT inspects `iptables -t nat -S` output for masquerade on
+// POSTROUTING and DNAT forwards on PREROUTING.
+func ParseIptablesNAT(raw string) (bool, []NATForwardPort) {
+	forwardPorts := []NATForwardPort{}
+	masquerade := false
+
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "-A ") {
+			continue
+		}
+		fields := tokenizeIptablesLine(trimmed)
+		chain := ""
+		if len(fields) > 1 {
+			chain = fields[1]
+		}
+		proto := "tcp"
+		port := "all"
+		jump := ""
+		toDest := ""
+
+		for i := 0; i < len(fields); i++ {
+			switch fields[i] {
+			case "-p":
+				if i+1 < len(fields) {
+					proto = strings.ToLower(fields[i+1])
+					i++
+				}
+			case "--dport", "--dports":
+				if i+1 < len(fields) {
+					port = strings.ReplaceAll(fields[i+1], ":", "-")
+					i++
+				}
+			case "-j":
+				if i+1 < len(fields) {
+					jump = strings.ToUpper(fields[i+1])
+					i++
+				}
+			case "--to-destination", "--to":
+				if i+1 < len(fields) {
+					toDest = fields[i+1]
+					i++
+				}
+			}
+		}
+
+		if chain == "POSTROUTING" && jump == "MASQUERADE" {
+			masquerade = true
+			continue
+		}
+		if chain == "PREROUTING" && jump == "DNAT" && toDest != "" {
+			fp := NATForwardPort{Port: port, Proto: proto, ToPort: toDest}
+			if idx := strings.LastIndex(toDest, ":"); idx >= 0 {
+				fp.ToAddr = strings.Trim(toDest[:idx], "[]")
+				fp.ToPort = toDest[idx+1:]
+			}
+			forwardPorts = append(forwardPorts, fp)
+		}
+	}
+
+	return masquerade, forwardPorts
 }
 
 func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (plugin.Detection, error) {
@@ -333,7 +405,9 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 
 	cmd := "(sudo -n iptables -S 2>&1 || iptables -S 2>&1 || /usr/sbin/iptables -S 2>&1 || /sbin/iptables -S 2>&1 || echo 'NO_IPTABLES'); " +
 		"echo '===IP6==='; " +
-		"(sudo -n ip6tables -S 2>&1 || ip6tables -S 2>&1 || /usr/sbin/ip6tables -S 2>&1 || /sbin/ip6tables -S 2>&1 || echo 'NO_IP6TABLES')"
+		"(sudo -n ip6tables -S 2>&1 || ip6tables -S 2>&1 || /usr/sbin/ip6tables -S 2>&1 || /sbin/ip6tables -S 2>&1 || echo 'NO_IP6TABLES'); " +
+		"echo '===NAT==='; " +
+		"(sudo -n iptables -t nat -S 2>&1 || iptables -t nat -S 2>&1 || echo 'NO_IPTABLES')"
 	out, err := r.RunCommand(ctx, cmd)
 	if err != nil {
 		return nil, err
@@ -341,9 +415,13 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 
 	parts := strings.Split(out, "===IP6===")
 	v4Raw := strings.TrimSpace(parts[0])
-	var v6Raw string
+	var v6Raw, natRaw string
 	if len(parts) > 1 {
-		v6Raw = strings.TrimSpace(parts[1])
+		rest := strings.SplitN(parts[1], "===NAT===", 2)
+		v6Raw = strings.TrimSpace(rest[0])
+		if len(rest) > 1 {
+			natRaw = strings.TrimSpace(rest[1])
+		}
 	}
 
 	hasV4 := !strings.Contains(v4Raw, "NO_IPTABLES") && (strings.Contains(v4Raw, "-P ") || strings.Contains(v4Raw, "-A "))
@@ -367,6 +445,7 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 			ports = append(ports, fmt.Sprintf("%s/%s", rule.Port, rule.Proto))
 		}
 	}
+	masquerade, forwardPorts := ParseIptablesNAT(natRaw)
 
 	status := "inactive"
 	if hasV4 || hasV6 || len(rules) > 0 {
@@ -374,12 +453,14 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}
 
 	return map[string]any{
-		"status":   status,
-		"backend":  "iptables",
-		"zones":    map[string]any{},
-		"services": []string{},
-		"ports":    ports,
-		"rules":    rules,
+		"status":       status,
+		"backend":      "iptables",
+		"zones":        map[string]any{},
+		"services":     []string{},
+		"ports":        ports,
+		"rules":        rules,
+		"masquerade":   masquerade,
+		"forwardPorts": forwardPorts,
 	}, nil
 }
 
@@ -438,6 +519,38 @@ func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
 			ConfirmPrompt:    "Delete this iptables port rule from the host firewall?",
 			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
 		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "masquerade",
+				Label:       "Toggle Masquerade",
+				Description: "Enable or disable source NAT masquerade on the nat POSTROUTING chain",
+				Options: []plugin.OptionSchema{
+					{Name: "enabled", Type: "bool", Required: false, Default: true, Description: "true adds -j MASQUERADE, false removes it"},
+				},
+			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
+		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "forward_port",
+				Label:       "Forward Port (DNAT)",
+				Description: "Forward an external port to an internal host and port with nat PREROUTING DNAT plus a matching FORWARD accept",
+				Options: []plugin.OptionSchema{
+					{Name: "port", Type: "string", Required: true, Description: "External port (single port, e.g. 8080)"},
+					{Name: "proto", Type: "string", Required: false, Default: "tcp", Description: "Protocol: tcp or udp"},
+					{Name: "toport", Type: "string", Required: true, Description: "Internal destination port (e.g. 80)"},
+					{Name: "toaddr", Type: "string", Required: false, Description: "Internal destination IP (blank = same host)"},
+					{Name: "state", Type: "select", Enum: []string{"enabled", "disabled"}, Default: "enabled", Description: "Rule state"},
+				},
+			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
+		},
 	}
 }
 
@@ -451,16 +564,128 @@ func (p *Plugin) Actions() []plugin.ActionSpec {
 }
 
 func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
-	norm := strings.ToLower(strings.TrimSpace(action))
-	if norm == "port" {
-		norm = "allow_port"
-	}
+	norm := normalizeIPTablesAction(action)
 	for _, spec := range p.ManagementActions() {
 		if strings.EqualFold(spec.Name, norm) {
-			return newapi.ValidateManagementOptions(spec, opts)
+			if err := newapi.ValidateManagementOptions(spec, opts); err != nil {
+				return err
+			}
+			switch norm {
+			case "masquerade":
+				_, err := resolveMasqueradeEnabled(opts)
+				return err
+			case "forward_port":
+				_, err := parseNATForwardOptions(opts)
+				return err
+			}
+			return nil
 		}
 	}
 	return fmt.Errorf("unsupported iptables action: %s", action)
+}
+
+func normalizeIPTablesAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "port", "allow_port":
+		return "allow_port"
+	case "deny_port":
+		return "deny_port"
+	case "delete_port":
+		return "delete_port"
+	case "forward_port", "forward-port", "port_forward":
+		return "forward_port"
+	case "masquerade", "toggle_masquerade":
+		return "masquerade"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+// resolveMasqueradeEnabled reads the boolean "enabled" option (also accepting
+// enabled/disabled strings and a "state" selector) for the masquerade action.
+func resolveMasqueradeEnabled(opts map[string]any) (bool, error) {
+	if raw, ok := opts["enabled"]; ok && raw != nil {
+		switch v := raw.(type) {
+		case bool:
+			return v, nil
+		case string:
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "true", "enabled", "enable", "yes", "1", "on":
+				return true, nil
+			case "false", "disabled", "disable", "no", "0", "off":
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("invalid enabled value %v: must be a boolean or enabled/disabled", raw)
+	}
+	if st, ok := opts["state"].(string); ok && strings.TrimSpace(st) != "" {
+		switch strings.ToLower(strings.TrimSpace(st)) {
+		case "enabled", "present":
+			return true, nil
+		case "disabled", "absent":
+			return false, nil
+		}
+		return false, fmt.Errorf("invalid state %q: must be enabled or disabled", st)
+	}
+	return true, nil
+}
+
+// natForwardSpec is the normalized form of a DNAT port-forward request.
+type natForwardSpec struct {
+	Port   string
+	Proto  string
+	ToPort string
+	ToAddr string
+	Absent bool
+}
+
+func parseNATForwardOptions(opts map[string]any) (natForwardSpec, error) {
+	spec := natForwardSpec{Proto: "tcp"}
+
+	rawPort, _ := opts["port"].(string)
+	port, err := normalizePortSpec(rawPort)
+	if err != nil {
+		return spec, err
+	}
+	if strings.Contains(port, ":") {
+		return spec, fmt.Errorf("port ranges are not supported for DNAT forwarding; provide a single external port")
+	}
+	spec.Port = port
+
+	if rawProto, ok := opts["proto"].(string); ok && strings.TrimSpace(rawProto) != "" {
+		proto := strings.ToLower(strings.TrimSpace(rawProto))
+		if proto != "tcp" && proto != "udp" {
+			return spec, fmt.Errorf("invalid protocol %q: must be tcp or udp", rawProto)
+		}
+		spec.Proto = proto
+	}
+
+	rawTo, _ := opts["toport"].(string)
+	toPort, err := normalizePortSpec(rawTo)
+	if err != nil {
+		return spec, fmt.Errorf("internal destination port: %w", err)
+	}
+	if strings.Contains(toPort, ":") {
+		return spec, fmt.Errorf("port ranges are not supported for DNAT forwarding; provide a single internal port")
+	}
+	spec.ToPort = toPort
+
+	if rawAddr, ok := opts["toaddr"].(string); ok && strings.TrimSpace(rawAddr) != "" {
+		addr := strings.TrimSpace(rawAddr)
+		if net.ParseIP(addr) == nil {
+			return spec, fmt.Errorf("invalid destination address %q: must be an IP address", addr)
+		}
+		spec.ToAddr = addr
+	}
+
+	if st, ok := opts["state"].(string); ok && strings.EqualFold(strings.TrimSpace(st), "disabled") {
+		spec.Absent = true
+	}
+	if en, ok := opts["enabled"].(bool); ok && !en {
+		spec.Absent = true
+	}
+
+	return spec, nil
 }
 
 func (p *Plugin) CompileTask(ctx context.Context, h plugin.HostFacts, req newapi.TaskRequest) (plugin.TaskSpec, error) {
@@ -510,7 +735,7 @@ func normalizePortSpec(raw string) (string, error) {
 }
 
 func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any) (plugin.TaskSpec, error) {
-	norm := strings.ToLower(strings.TrimSpace(action))
+	norm := normalizeIPTablesAction(action)
 	switch norm {
 	case "allow_port", "port", "deny_port", "delete_port":
 		if err := p.ValidateAction(h, norm, opts); err != nil {
@@ -585,6 +810,91 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 					Name:   title,
 					Module: "ansible.builtin.iptables",
 					Params: params,
+				},
+			},
+		}, nil
+
+	case "masquerade":
+		if err := p.ValidateAction(h, norm, opts); err != nil {
+			return plugin.TaskSpec{}, err
+		}
+		enabled, err := resolveMasqueradeEnabled(opts)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+
+		// Documented last resort (AGENTS.md §5): no native Ansible module covers
+		// the paired NAT/FORWARD rule set this action manages. The explicit
+		// `-C ... || -A ...` guard keeps the mutation idempotent without
+		// flushing or reordering the operator's existing nat table.
+		cmd := "iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -j MASQUERADE"
+		title := "Enable iptables masquerade on nat POSTROUTING"
+		if !enabled {
+			cmd = "iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null && iptables -t nat -D POSTROUTING -j MASQUERADE || true"
+			title = "Disable iptables masquerade on nat POSTROUTING"
+		}
+
+		return plugin.TaskSpec{
+			Name: title,
+			Steps: []plugin.TaskStep{
+				{
+					Name:   title,
+					Module: "ansible.builtin.shell",
+					Params: map[string]any{
+						"cmd":    cmd,
+						"become": true,
+					},
+				},
+			},
+		}, nil
+
+	case "forward_port":
+		if err := p.ValidateAction(h, norm, opts); err != nil {
+			return plugin.TaskSpec{}, err
+		}
+		spec, err := parseNATForwardOptions(opts)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+
+		destination := fmt.Sprintf("%s:%s", spec.ToAddr, spec.ToPort)
+		dnatRule := fmt.Sprintf("-p %s --dport %s -j DNAT --to-destination %s", spec.Proto, spec.Port, destination)
+		forwardRule := fmt.Sprintf("-p %s --dport %s -j ACCEPT", spec.Proto, spec.ToPort)
+		if spec.ToAddr != "" {
+			forwardRule = fmt.Sprintf("-p %s -d %s --dport %s -j ACCEPT", spec.Proto, spec.ToAddr, spec.ToPort)
+		}
+
+		target := "same host"
+		if spec.ToAddr != "" {
+			target = spec.ToAddr
+		}
+
+		// Documented last resort (AGENTS.md §5): the DNAT + FORWARD pair needs two
+		// coordinated rules; explicit `-C ... || -A ...` guards keep it idempotent.
+		dnatCheck := fmt.Sprintf("iptables -t nat -C PREROUTING %s", dnatRule)
+		dnatAdd := fmt.Sprintf("iptables -t nat -A PREROUTING %s", dnatRule)
+		fwdCheck := fmt.Sprintf("iptables -C FORWARD %s", forwardRule)
+		fwdAdd := fmt.Sprintf("iptables -A FORWARD %s", forwardRule)
+
+		cmd := fmt.Sprintf("%s 2>/dev/null || %s; %s 2>/dev/null || %s", dnatCheck, dnatAdd, fwdCheck, fwdAdd)
+		title := fmt.Sprintf("Forward iptables %s/%s to %s:%s", spec.Port, spec.Proto, target, spec.ToPort)
+		if spec.Absent {
+			dnatDel := fmt.Sprintf("iptables -t nat -D PREROUTING %s", dnatRule)
+			fwdDel := fmt.Sprintf("iptables -D FORWARD %s", forwardRule)
+			cmd = fmt.Sprintf("%s 2>/dev/null && %s; %s 2>/dev/null && %s; true", dnatCheck, dnatDel, fwdCheck, fwdDel)
+			title = fmt.Sprintf("Remove iptables port forward %s/%s to %s:%s", spec.Port, spec.Proto, target, spec.ToPort)
+		}
+
+		return plugin.TaskSpec{
+			Name: title,
+			Steps: []plugin.TaskStep{
+				{
+					Name:   title,
+					Module: "ansible.builtin.shell",
+					Params: map[string]any{
+						"cmd":    cmd,
+						"become": true,
+					},
 				},
 			},
 		}, nil

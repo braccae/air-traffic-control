@@ -187,3 +187,25 @@ func TestRcloneRemotesCRUDAndMounts(t *testing.T) {
 		t.Fatalf("remote should be deleted")
 	}
 }
+
+func TestMaskRemoteConfig(t *testing.T) {
+	if got := MaskVaultValue("secret_key"); got != "•••••••• (vault: secret_key)" {
+		t.Fatalf("expected '•••••••• (vault: secret_key)', got %q", got)
+	}
+	if got := MaskVaultValue(""); got != "••••••••" {
+		t.Fatalf("expected '••••••••', got %q", got)
+	}
+
+	cfg := `{"endpoint":"https://s3.example.com","access_key":"vault:my_key","secret_key":"enc:v1:aes256cipher"}`
+	masked := MaskRemoteConfig(cfg, "backup-s3")
+
+	if masked["endpoint"] != "https://s3.example.com" {
+		t.Fatalf("endpoint should not be masked, got %q", masked["endpoint"])
+	}
+	if masked["access_key"] != "•••••••• (vault: my_key)" {
+		t.Fatalf("access_key masking mismatch, got %q", masked["access_key"])
+	}
+	if masked["secret_key"] != "•••••••• (vault: rclone_backup_s3_secret_key)" {
+		t.Fatalf("secret_key masking mismatch, got %q", masked["secret_key"])
+	}
+}

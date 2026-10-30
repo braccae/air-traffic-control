@@ -151,6 +151,30 @@ func TestTerminalExec_FallbackExecution(t *testing.T) {
 	}
 }
 
+func TestTerminalExec_LocalhostWithoutNode(t *testing.T) {
+	runner := &mockRunner{out: "localhost-ok\n"}
+	store := &mockStore{}
+	// Resolver returns nil, simulating localhost query or node not found
+	api := terminal.NewAPI(&mockResolver{node: nil}, runner, store)
+
+	mux := http.NewServeMux()
+	api.Register(mux)
+
+	body := bytes.NewBufferString(`{"command": "echo hello", "host": "localhost"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/terminal/exec", body)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	var res terminal.ExecResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !res.Success || res.Output != "localhost-ok" {
+		t.Fatalf("expected successful execution on localhost without node, got: %+v", res)
+	}
+}
+
 func TestLocalPTY_OpenAndResize(t *testing.T) {
 	session, err := terminal.OpenLocalPTY(80, 24)
 	if err != nil {
@@ -166,5 +190,20 @@ func TestLocalPTY_OpenAndResize(t *testing.T) {
 	_, err = session.Write([]byte("echo hello-pty\n"))
 	if err != nil {
 		t.Fatalf("session.Write failed: %v", err)
+	}
+}
+
+func TestRedactSecretsMasksInlineCredentials(t *testing.T) {
+	cases := map[string]string{
+		`PGPASSWORD='b3ff5d6a' psql -p 5432 -c '\dt'`: `PGPASSWORD='••••••••' psql -p 5432 -c '\dt'`,
+		`psql --password=hunter2 -c '\dt'`:            `psql --password=•••••••• -c '\dt'`,
+		`MYSQL_PWD=rootpass mysql -uroot`:             `MYSQL_PWD=•••••••• mysql -uroot`,
+		`redis-cli --token s3cr3t ping`:               `redis-cli --token •••••••• ping`,
+		`systemctl status nginx`:                      `systemctl status nginx`,
+	}
+	for input, want := range cases {
+		if got := terminal.RedactSecrets(input); got != want {
+			t.Errorf("RedactSecrets(%q) = %q, want %q", input, got, want)
+		}
 	}
 }

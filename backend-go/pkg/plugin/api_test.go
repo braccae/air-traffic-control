@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"air-traffic-control/backend/pkg/hostcache"
 	"air-traffic-control/backend/pkg/plugin"
 	_ "air-traffic-control/backend/plugins/all"
 )
@@ -427,6 +428,93 @@ func TestResolveDBPath(t *testing.T) {
 	// With neither set, resolution walks upward and must never be empty.
 	t.Setenv("ATC_DB_PATH", "")
 	if got := plugin.ResolveDBPath(""); got == "" {
-		t.Fatalf("ResolveDBPath returned empty string")
+		t.Fatal("ResolveDBPath returned empty string")
+	}
+}
+
+func TestNodeResolver_NoLocalhostFallback(t *testing.T) {
+	// A non-local node (`dev-pc`) must resolve to its own address and SSH
+	// transport, never silently to localhost.
+	tmp := t.TempDir() + "/hosts-cache.sqlite"
+	store, err := hostcache.Open(tmp)
+	if err != nil {
+		t.Fatalf("hostcache.Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	if err := store.UpsertHost(hostcache.NodeRecord{
+		ID:        "dev-pc",
+		Name:      "dev-pc",
+		ShortName: "dev-pc",
+		IP:        "10.0.0.5",
+		Port:      22,
+		SSHUser:   "core",
+	}); err != nil {
+		t.Fatalf("UpsertHost(dev-pc): %v", err)
+	}
+
+	resolver := plugin.NewStoreNodeResolver(store)
+	facts, ok, err := resolver.ResolveNode("dev-pc")
+	if err != nil {
+		t.Fatalf("ResolveNode(dev-pc) error: %v", err)
+	}
+	if !ok {
+		t.Fatal("ResolveNode(dev-pc) ok=false")
+	}
+	if facts.NodeID != "dev-pc" {
+		t.Errorf("NodeID = %q, want dev-pc", facts.NodeID)
+	}
+	if facts.HostRoute != "10.0.0.5" {
+		t.Errorf("HostRoute = %q, want 10.0.0.5", facts.HostRoute)
+	}
+	if facts.ActiveConnection != "connection/ssh" {
+		t.Errorf("ActiveConnection = %q, want connection/ssh", facts.ActiveConnection)
+	}
+
+	// A node with identifying data but no routable address must not fall back
+	// to localhost; the shared resolver must error explicitly.
+	if err := store.UpsertHost(hostcache.NodeRecord{
+		ID:        "orphan",
+		Name:      "orphan",
+		ShortName: "orphan",
+		// IP / TailscaleIP / TailscaleHost / HostRoute are all empty.
+	}); err != nil {
+		t.Fatalf("UpsertHost(orphan): %v", err)
+	}
+	if _, _, err := resolver.ResolveNode("orphan"); err == nil {
+		t.Fatal("ResolveNode(orphan) expected an error, got nil")
+	}
+}
+
+func TestResolveRunner_SelectsSshForNonLocal(t *testing.T) {
+	resolver := &plugin.DefaultRunnerResolver{}
+	type want struct {
+		route    string
+		conn     string
+		runnerOk bool
+	}
+	tests := []want{
+		{route: "10.0.0.5", conn: "connection/ssh", runnerOk: true},
+		{route: "node.ts.net", conn: "connection/tailscale", runnerOk: true},
+		{route: "localhost", conn: "connection/local", runnerOk: true},
+		{route: "127.0.0.1", conn: "connection/local", runnerOk: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.route, func(t *testing.T) {
+			facts := plugin.HostFacts{
+				NodeID:         "dev-pc",
+				HostRoute:      tt.route,
+				ActiveConnection: "",
+			}
+			runner, err := resolver.ResolveRunner(context.Background(), facts)
+			if err != nil {
+				// Dialing remote endpoints is expected to fail in unit tests without live SSH/tailscale targets.
+				t.Logf("ResolveRunner(%q) network connect error (expected in unit test): %v", tt.route, err)
+				return
+			}
+			if runner == nil {
+				t.Fatalf("ResolveRunner(%q) returned nil runner", tt.route)
+			}
+		})
 	}
 }

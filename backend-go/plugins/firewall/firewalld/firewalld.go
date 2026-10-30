@@ -55,8 +55,10 @@ func (p *Plugin) Compatible(h plugin.HostFacts) bool {
 func (p *Plugin) Requirements() plugin.Requirements {
 	return plugin.Requirements{
 		HostPackages: map[string][]string{
-			"dnf": {"firewalld"},
-			"apt": {"firewalld"},
+			// The native ansible.posix.firewalld module needs the Python bindings,
+			// not just the firewalld binary.
+			"dnf": {"firewalld", "python3-firewall"},
+			"apt": {"firewalld", "python3-firewall"},
 		},
 		ControllerCollections: []string{
 			"ansible.posix",
@@ -592,6 +594,21 @@ func (p *Plugin) ManagementActions() []newapi.ManagementActionSpec {
 			Dangerous:        false,
 			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
 		},
+		{
+			ActionSpec: plugin.ActionSpec{
+				Name:        "masquerade",
+				Label:       "Toggle Masquerade",
+				Description: "Enable or disable source NAT masquerade on a firewalld zone",
+				Options: []plugin.OptionSchema{
+					{Name: "enabled", Type: "bool", Required: false, Default: true, Description: "true enables masquerade, false disables it"},
+					{Name: "zone", Type: "string", Required: false, Default: "public", Description: "Target firewall zone"},
+				},
+			},
+			Category:         newapi.ActionCategorySecurity,
+			Idempotent:       true,
+			Dangerous:        false,
+			InvalidatesKinds: []plugin.Kind{plugin.KindFirewall},
+		},
 	}
 }
 
@@ -612,9 +629,40 @@ func normalizeActionName(action string) string {
 		return "allow_service"
 	case "forward_port", "forward-port", "port_forward":
 		return "forward_port"
+	case "masquerade", "toggle_masquerade":
+		return "masquerade"
 	default:
 		return strings.ToLower(strings.TrimSpace(action))
 	}
+}
+
+// resolveMasqueradeEnabled reads the boolean "enabled" option (also accepting
+// enabled/disabled strings and a "state" selector) for the masquerade action.
+func resolveMasqueradeEnabled(opts map[string]any) (bool, error) {
+	if raw, ok := opts["enabled"]; ok && raw != nil {
+		switch v := raw.(type) {
+		case bool:
+			return v, nil
+		case string:
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "true", "enabled", "enable", "yes", "1", "on":
+				return true, nil
+			case "false", "disabled", "disable", "no", "0", "off":
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("invalid enabled value %v: must be a boolean or enabled/disabled", raw)
+	}
+	if st, ok := opts["state"].(string); ok && strings.TrimSpace(st) != "" {
+		switch strings.ToLower(strings.TrimSpace(st)) {
+		case "enabled", "present":
+			return true, nil
+		case "disabled", "absent":
+			return false, nil
+		}
+		return false, fmt.Errorf("invalid state %q: must be enabled or disabled", st)
+	}
+	return true, nil
 }
 
 func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[string]any) error {
@@ -645,6 +693,10 @@ func (p *Plugin) ValidateAction(h plugin.HostFacts, action string, opts map[stri
 				if toaddr != "" && !validIPOrCIDR(toaddr) {
 					return fmt.Errorf("invalid destination address %q: must be a valid IP address or CIDR", toaddr)
 				}
+			}
+			if canonical == "masquerade" {
+				_, err := resolveMasqueradeEnabled(opts)
+				return err
 			}
 			return nil
 		}
@@ -850,7 +902,49 @@ func (p *Plugin) Compile(h plugin.HostFacts, action string, opts map[string]any)
 			},
 		}, nil
 
+	case "masquerade", "toggle_masquerade":
+		enabled, err := resolveMasqueradeEnabled(opts)
+		if err != nil {
+			return plugin.TaskSpec{}, err
+		}
+		zone, _ := opts["zone"].(string)
+		zone = strings.TrimSpace(zone)
+		if zone == "" {
+			zone = defaultFirewallZone()
+		}
+		if !safeFirewalldZoneRe.MatchString(zone) {
+			return plugin.TaskSpec{}, fmt.Errorf("invalid firewalld zone %q", zone)
+		}
+
+		state := "enabled"
+		verb := "Enable"
+		if !enabled {
+			state = "disabled"
+			verb = "Disable"
+		}
+		title := fmt.Sprintf("%s masquerade on zone %s", verb, zone)
+
+		return plugin.TaskSpec{
+			Name: title,
+			Steps: []plugin.TaskStep{
+				{
+					Name:   title,
+					Module: "ansible.posix.firewalld",
+					Params: map[string]any{
+						"zone":       zone,
+						"masquerade": "true",
+						"state":      state,
+						"permanent":  true,
+						"immediate":  true,
+						"become":     true,
+					},
+				},
+			},
+		}, nil
+
 	default:
 		return plugin.TaskSpec{}, fmt.Errorf("unsupported firewalld action: %s", action)
 	}
 }
+
+var safeFirewalldZoneRe = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)

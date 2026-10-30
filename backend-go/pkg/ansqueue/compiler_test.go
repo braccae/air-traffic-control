@@ -456,3 +456,48 @@ func TestBuildersStayNativeFirst(t *testing.T) {
 		t.Fatalf("container state = %v", ctr.Steps[0].Parameters["state"])
 	}
 }
+
+func TestRun0ElevationIsSkippedForRootLogins(t *testing.T) {
+	rootTask := Task{
+		Title:           "nft rule",
+		TargetNodeName:  "fred",
+		TargetHostRoute: "fred.leo-banjo.ts.net",
+		TargetSSHUser:   "root",
+		BecomeMethod:    "run0",
+		Connection:      &Connection{Plugin: "connection/tailscale", Host: "fred.leo-banjo.ts.net", Port: 22, User: "root", BecomeMethod: "run0"},
+		Steps:           []Step{{Name: "noop", Module: "ansible.builtin.command", Parameters: map[string]any{"cmd": "true"}}},
+	}
+
+	playbook := CompileOnTheFlyPlaybook(rootTask)
+	if strings.Contains(playbook, "become: true") {
+		t.Fatalf("root login must not enable become:\n%s", playbook)
+	}
+
+	inv, err := GenerateTaskInventory(rootTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(inv, "community.general.run0") {
+		t.Fatalf("root login must not carry a become method:\n%s", inv)
+	}
+	if strings.Contains(inv, "-tt") {
+		t.Fatalf("root login must not force a TTY:\n%s", inv)
+	}
+
+	// A non-root login still elevates through run0 and needs the TTY flag.
+	userTask := rootTask
+	conn := *rootTask.Connection
+	conn.User = "core"
+	userTask.Connection = &conn
+	userTask.TargetSSHUser = "core"
+	userInv, err := GenerateTaskInventory(userTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(userInv, "community.general.run0") {
+		t.Fatalf("non-root login must keep the run0 become method:\n%s", userInv)
+	}
+	if !strings.Contains(userInv, "-tt") {
+		t.Fatalf("run0 requires -tt in the ssh args:\n%s", userInv)
+	}
+}

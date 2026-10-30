@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"air-traffic-control/backend/pkg/ansqueue"
 	"air-traffic-control/backend/pkg/cache"
 	"air-traffic-control/backend/pkg/clusterapi"
+	"air-traffic-control/backend/pkg/collections"
 	"air-traffic-control/backend/pkg/contextmenu"
 	"air-traffic-control/backend/pkg/cronapi"
 	"air-traffic-control/backend/pkg/glances"
@@ -29,6 +31,7 @@ import (
 	"air-traffic-control/backend/pkg/rcloneapi"
 	"air-traffic-control/backend/pkg/readonlyapi"
 	"air-traffic-control/backend/pkg/restic"
+	"air-traffic-control/backend/pkg/secrets"
 	"air-traffic-control/backend/pkg/ssh"
 	"air-traffic-control/backend/pkg/tailscale"
 	"air-traffic-control/backend/pkg/taskapi"
@@ -37,6 +40,7 @@ import (
 	"air-traffic-control/backend/pkg/vaultapi"
 	"air-traffic-control/backend/pkg/websocket"
 	_ "air-traffic-control/backend/plugins/all"
+	tsconn "air-traffic-control/backend/plugins/connection/tailscale"
 	"air-traffic-control/backend/webui"
 )
 
@@ -124,13 +128,136 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string, 
 
 	mux.HandleFunc("/api/tailscale/peers", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+
+		// Prefer ATC's own tsnet netmap when it is the active transport: that
+		// is the set of peers ATC can actually reach and authenticate as. The
+		// host tailscaled view (below) is only used in the local-dev host-socket
+		// fallback mode.
+		if provider, ok := plugin.Get(tsconn.SettingsPageID); ok {
+			if tp, ok := provider.(interface {
+				TsnetPeers(context.Context) ([]tailscale.PeerStatus, error)
+			}); ok {
+				ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+				defer cancel()
+				if peers, err := tp.TsnetPeers(ctx); err == nil && peers != nil {
+					// Build a self entry from the plugin's self status so the
+					// envelope keeps the same shape as the host path.
+					self := tailscale.PeerStatus{}
+					if sp, ok := provider.(interface {
+						SelfStatus(context.Context) tsconn.SelfStatus
+					}); ok {
+						ss := sp.SelfStatus(ctx)
+						self.HostName = ss.Hostname
+						self.DNSName = ss.DNSName
+						self.TailscaleIPs = ss.TailscaleIPs
+						self.Online = ss.Online
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"success": true,
+						"source":  "tsnet",
+						"self":    self,
+						"peers":   peers,
+					})
+					return
+				}
+			}
+		}
+
 		status, err := tailscale.GetLocalStatus()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("tailscale status unavailable: %v", err),
+			})
 			return
 		}
-		json.NewEncoder(w).Encode(status)
+		peers := make([]tailscale.PeerStatus, 0, len(status.Peer))
+		for _, p := range status.Peer {
+			peers = append(peers, p)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"source":  "host-socket",
+			"self":    status.Self,
+			"peers":   peers,
+		})
 	})
+
+	// ATC's own tsnet identity (distinct from the host tailscaled view above).
+	// The handler always returns the real status payload — including the exact
+	// failure reason when no key is configured — so the UI never shows a
+	// fabricated "connected" state.
+	handleTailscaleSelf := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "method not allowed"})
+			return
+		}
+		provider, ok := plugin.Get(tsconn.SettingsPageID)
+		if !ok {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": false,
+				"error":   "connection/tailscale plugin is not registered",
+			})
+			return
+		}
+		selfProvider, ok := provider.(interface {
+			SelfStatus(context.Context) tsconn.SelfStatus
+		})
+		if !ok {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": false,
+				"error":   "connection/tailscale plugin does not expose tsnet status",
+			})
+			return
+		}
+		// First registration can take a while; bound it so the request never hangs.
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"self":    selfProvider.SelfStatus(ctx),
+		})
+	}
+	mux.HandleFunc("/api/tailscale/self", handleTailscaleSelf)
+	// Compatibility alias: older clients link to /api/tailscale/status.
+	mux.HandleFunc("/api/tailscale/status", handleTailscaleSelf)
+
+	handleTailscaleRepair := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "method not allowed"})
+			return
+		}
+		provider, ok := plugin.Get(tsconn.SettingsPageID)
+		if !ok {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "connection/tailscale plugin is not registered"})
+			return
+		}
+		repairProvider, ok := provider.(interface {
+			Repair(context.Context) (tsconn.SelfStatus, []string, error)
+		})
+		if !ok {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "connection/tailscale plugin does not expose repair"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		defer cancel()
+		status, steps, err := repairProvider.Repair(ctx)
+		payload := map[string]any{"success": err == nil, "self": status, "steps": steps}
+		if err != nil {
+			payload["error"] = err.Error()
+		}
+		_ = json.NewEncoder(w).Encode(payload)
+	}
+	mux.HandleFunc("/api/tailscale/repair", handleTailscaleRepair)
 
 	mux.HandleFunc("/api/restic/snapshots", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -232,6 +359,14 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string, 
 			vAPI.Register(mux)
 		}
 
+		// Install the process-wide Ansible Vault credential resolver. Every SSH
+		// path (command runner, PTY, connection plugin, probe) resolves a node's
+		// vaultSecretId through this single decryptor.
+		secrets.SetDefault(secrets.NewResolver(secrets.Options{
+			Store:    store,
+			RepoRoot: ansqueue.ResolveWorkDir(),
+		}))
+
 		// Mount ported Rclone Remotes and Mounts API routes
 		if rcAPI, err := rcloneapi.NewAPI(rcloneapi.Options{
 			Store:      store,
@@ -277,10 +412,49 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string, 
 		if nAPI, err := nodeapi.New(nodeapi.Options{
 			Store:        store,
 			QueueStore:   qStore,
-			Runner:       nodeapi.NewSSHRunner(sshManager.Pool()),
+			Runner:       nodeapi.NewCompositeRunner(nodeapi.NewLocalRunner("sh", ""), nodeapi.NewSSHRunner(sshManager.Pool())),
 			Broadcast:    queueBroadcast,
 			Fallback:     pluginAPI.NodeRoutesHandler(),
-			SeedBaseline: true,
+			SeedBaseline: false,
+			TailscaleStatus: func() (*tailscale.Status, error) {
+				// Prefer ATC's own tsnet netmap: it sees peers (e.g. tag:pve hosts)
+				// that the host tailscaled cannot see due to ACLs.
+				provider, ok := plugin.Get(tsconn.SettingsPageID)
+				if ok {
+					if tp, ok := provider.(interface {
+						TsnetPeers(context.Context) ([]tailscale.PeerStatus, error)
+					}); ok {
+						ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+						defer cancel()
+						peers, err := tp.TsnetPeers(ctx)
+						if err == nil && peers != nil {
+							st := &tailscale.Status{}
+							st.Peer = make(map[string]tailscale.PeerStatus)
+							for _, p := range peers {
+								key := p.ID
+								if key == "" {
+									key = p.DNSName
+								}
+								st.Peer[key] = p
+							}
+							// Self entry from the plugin's self status.
+							if sp, ok := provider.(interface {
+								SelfStatus(context.Context) tsconn.SelfStatus
+							}); ok {
+								ss := sp.SelfStatus(ctx)
+								st.Self.HostName = ss.Hostname
+								st.Self.DNSName = ss.DNSName
+								st.Self.TailscaleIPs = ss.TailscaleIPs
+								st.Self.Online = ss.Online
+								st.Self.OS = "linux"
+							}
+							return st, nil
+						}
+					}
+				}
+				return tailscale.GetLocalStatus()
+			},
+			EnsureLocalhost: nodeapi.EnsureLocalhostNode,
 			OnNodeUpdated: func(nodeID string) {
 				if pluginAPI != nil && pluginAPI.Cache() != nil {
 					pluginAPI.Cache().Invalidate(nodeID)
@@ -293,31 +467,52 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string, 
 			nodeAPI.Register(mux)
 		}
 
-		// Mount Terminal exec API (/api/terminal/exec)
-		termRunner := nodeapi.NewSSHRunner(sshManager.Pool())
-		termAPI := terminal.NewAPI(nodeAPI, termRunner, store)
-		termAPI.Register(mux)
-
 		// Provide dependencies to WebSocket Hub
 		if hub != nil {
 			var connReg *clusterapi.ConnectionRegistry
 			var logStore *clusterapi.LogStore
-			if clAPI, err := clusterapi.NewAPI(clusterapi.Options{Store: store}); err == nil {
+			if clAPI, err := clusterapi.NewAPI(clusterapi.Options{
+				Store: store,
+				TsnetPing: func(ctx context.Context, target string) (string, bool, *string, error) {
+					provider, ok := plugin.Get(tsconn.SettingsPageID)
+					if !ok {
+						return "", false, nil, fmt.Errorf("connection/tailscale plugin is not registered")
+					}
+					tp, ok := provider.(interface {
+						TsnetPing(context.Context, string) (string, bool, *string, error)
+					})
+					if !ok {
+						return "", false, nil, fmt.Errorf("connection/tailscale plugin does not expose tsnet ping")
+					}
+					return tp.TsnetPing(ctx, target)
+				},
+			}); err == nil {
 				connReg = clAPI.ConnReg()
 				logStore = clAPI.LogStore()
 			}
 			hub.SetOptions(websocket.HubOptions{
-				Store:      store,
-				QueueStore: qStore,
-				ConnReg:    connReg,
-				LogStore:   logStore,
-				SSHManager: sshManager,
-				Resolver:   nodeAPI,
+				Store:         store,
+				QueueStore:    qStore,
+				ConnReg:       connReg,
+				LogStore:      logStore,
+				SSHManager:    sshManager,
+				Resolver:      nodeAPI,
+				FactsResolver: pluginAPI.NodeResolver(),
 			})
 		}
 	}
 
-	// Wire global & categorized settings pages, context menus, inventory node types, and task types
+	// Mount Terminal exec API (/api/terminal/exec) unconditionally so terminal
+	// execution routes work whether backed by persistent store or baseline inventory.
+	termRunner := nodeapi.NewCompositeRunner(nodeapi.NewLocalRunner("sh", ""), nodeapi.NewSSHRunner(sshManager.Pool()))
+	termAPI := terminal.NewAPI(nodeAPI, termRunner, store)
+	termAPI.Register(mux)
+
+	// Credential connectivity test: resolves a vaultSecretId reference and runs
+	// an identity command on the real host (no fabricated success).
+	mux.HandleFunc("/api/ssh/test", nodeapi.NewSSHTestHandler(sshManager.Pool()))
+
+	// Wire global & categorized settings pages
 	pluginAPI.RegisterSettingsRoutes(mux)
 
 	settingsHandler := settingsframework.NewHandler(pluginAPI.Registry(), pluginAPI.SettingsStore())
@@ -385,7 +580,7 @@ func main() {
 	}
 
 	port := flag.Int("port", 8080, "HTTP and WebSocket server port")
-	dbFlag := flag.String("db", ":memory:", "Path to hosts-cache.sqlite (use :memory: for in-memory mode). Empty = ATC_DB_PATH or auto-detected from the repo root.")
+	dbFlag := flag.String("db", "", "Path to hosts-cache.sqlite (use :memory: for in-memory mode). Empty = ATC_DB_PATH or auto-detected from the repo root.")
 	flag.Parse()
 
 	log.Printf("Starting Air Traffic Control Go Core Daemon on port %d...", *port)
@@ -422,7 +617,44 @@ func main() {
 		log.Fatalf("Failed to open host cache: %v", err)
 	}
 
+	// Periodically snapshot the in-memory cache to disk (300s ticker). In file
+	// mode Backup is a no-op, so this is safe to run unconditionally.
+	updater := NewHostDataUpdater(300 * time.Second)
+	updater.SetStore(hostStore)
+	updater.Start()
+	defer updater.Stop()
+
 	mux, pluginAPI := newServerMux(hub, podmanMgr, *dbFlag, hostStore)
+
+	// Keep the controller's Galaxy collections in sync with what the
+	// coordinator can do: baseline catalog first, then anything a detected host
+	// capability needs (wired into the plugin probe path). Operator opt-outs and
+	// the version cache live in global_settings, so a deliberate removal sticks.
+	collectionMgr := collections.New(ansqueue.ResolveWorkDir())
+	collectionMgr.SetStateStore(plugin.GlobalSettingsStore())
+	collections.SetDefault(collectionMgr)
+	plugin.SetCollectionsManager(collectionMgr)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		if installed := collectionMgr.EnsureCatalog(ctx); len(installed) > 0 {
+			log.Printf("ansible collections: installed baseline catalog entries: %v", installed)
+		}
+	}()
+
+	// Opt-in weekly upgrade pass. It no-ops unless the operator enabled it, and
+	// it skips pinned and disabled collections.
+	go func() {
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			collectionMgr.MaybeAutoUpdate(ctx)
+			cancel()
+			<-ticker.C
+		}
+	}()
+
 	log.Printf("Air Traffic Control backend listening on :%d", *port)
 
 	// Initialize and start the background cache manager (3s interval). It must
@@ -472,15 +704,34 @@ func (u *HostDataUpdater) Start() {
 		ticker := time.NewTicker(u.interval)
 		defer ticker.Stop()
 
+		// Run an initial backup immediately so the snapshot exists
+		// without having to wait for the first ticker interval.
+		if u.store != nil {
+			if s, ok := u.store.(interface{ Backup() error }); ok {
+				if err := s.Backup(); err != nil {
+					log.Printf("host updater: backup error: %v", err)
+				}
+			}
+		}
+
 		for {
 			select {
 			case <-u.stop:
+				if u.store != nil {
+					if s, ok := u.store.(interface{ Backup() error }); ok {
+						if err := s.Backup(); err != nil {
+							log.Printf("host updater: backup error: %v", err)
+						}
+					}
+				}
 				return
 			case <-ticker.C:
 				// Backup in-memory store if available
 				if u.store != nil {
 					if s, ok := u.store.(interface{ Backup() error }); ok {
-						_ = s.Backup()
+						if err := s.Backup(); err != nil {
+							log.Printf("host updater: backup error: %v", err)
+						}
 					}
 				}
 				// TODO: Implement actual host data refresh

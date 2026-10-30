@@ -1,0 +1,29 @@
+# Container for running the ATC Playwright e2e suite.
+#
+# The Playwright base image already ships Chromium, Firefox and WebKit plus the
+# system libraries they need, so no browserless/CDP sidecar is required.
+#
+# Usage:
+#   podman build -f Dockerfile.playwright-tests -t localhost/atc-playwright-tests:latest .
+#   podman run --rm -it --network=host \
+#     -v /var/home/core/Projects/air-traffic-control:/work \
+#     localhost/atc-playwright-tests:latest
+#
+# Vite (:5173) and the Go daemon (:18090) run on the host. With --network=host
+# the tests reach them directly; without it, use host.containers.internal.
+
+FROM mcr.microsoft.com/playwright:v1.64.0-noble
+
+WORKDIR /work
+
+# Copy package files first so dependency installation can be cached.
+COPY package.json package-lock.json ./
+
+RUN npm ci --no-audit --no-fund
+
+# Copy the full project (for running tests)
+COPY . .
+
+EXPOSE 5173
+
+CMD ["npx", "playwright", "test", "--reporter=line", "--workers=3"]

@@ -2,7 +2,7 @@ import React from 'react';
 import type { NodeItem } from '../types/index.ts';
 
 interface TailscaleMeshCardProps {
-  node: NodeItem;
+  node: NodeItem | null;
   peers?: NodeItem[];
   onReauth?: () => void;
   onEditNode?: () => void;
@@ -16,6 +16,7 @@ export const TailscaleMeshCard: React.FC<TailscaleMeshCardProps> = ({
   onEditNode,
   onOpenExplorer,
 }) => {
+  if (!node) return null;
   // Show up to 6 direct cluster peers with real latency and status
   const peerList = peers.filter((p) => p.id !== node.id);
 
@@ -27,7 +28,7 @@ export const TailscaleMeshCard: React.FC<TailscaleMeshCardProps> = ({
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-[#8cd6cb] text-[18px]">vpn_key</span>
             <span className="font-sans text-sm text-[#dfe1fa] font-semibold">
-              Tailscale Mesh ({node.datacenter || 'leo-banjo.ts.net'})
+              Tailscale Mesh ({node.datacenter || node.tailscaleHost?.split('.').slice(1).join('.') || 'unknown'})
             </span>
           </div>
           <div className="flex items-center gap-2">

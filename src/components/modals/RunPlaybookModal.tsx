@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { VarsSecretsEditor } from '../VarsSecretsEditor';
+import type { NodeItem } from '../../types/index.ts';
 
 interface RunPlaybookModalProps {
   isOpen: boolean;
@@ -15,6 +16,7 @@ interface RunPlaybookModalProps {
     extraVars?: string
   ) => void;
   onOpenEditor?: (playbook: string) => void;
+  nodes?: NodeItem[];
 }
 
 export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
@@ -25,6 +27,7 @@ export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
   initialPlaybook,
   onRunPlaybook,
   onOpenEditor,
+  nodes = [],
 }) => {
   const [playbook, setPlaybook] = useState(initialPlaybook || 'site.yml');
   const [availablePlaybooks, setAvailablePlaybooks] = useState<string[]>([
@@ -203,14 +206,13 @@ export const RunPlaybookModal: React.FC<RunPlaybookModalProps> = ({
                 className="w-full bg-[#1b1e31] border border-[#26293c] rounded px-2.5 py-1.5 text-[#dfe1fa] outline-none"
               >
                 <option value="tag:host">tag:host (Cluster Nodes)</option>
-                <option value="likes-it-cold">likes-it-cold.leo-banjo.ts.net</option>
-                <option value="ping">ping.leo-banjo.ts.net</option>
-                <option value="dev-pc">dev-pc.leo-banjo.ts.net</option>
-                <option value="fred">fred.leo-banjo.ts.net</option>
-                <option value="the-freezer">the-freezer.leo-banjo.ts.net</option>
-                <option value="chuck">chuck.leo-banjo.ts.net</option>
-                <option value="larry">larry.leo-banjo.ts.net</option>
-                <option value="orangepizero3">orangepizero3.leo-banjo.ts.net</option>
+                {nodes
+                  .filter(n => n.tailscaleHost && n.shortName)
+                  .map(n => (
+                    <option key={n.id} value={n.shortName}>
+                      {n.shortName}.{n.tailscaleHost.split('.').slice(1).join('.')}
+                    </option>
+                  ))}
                 <option value="all">all (Full Tailnet)</option>
               </select>
             </div>

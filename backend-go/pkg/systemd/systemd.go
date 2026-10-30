@@ -475,3 +475,72 @@ func truncate(s string, max int) string {
 	}
 	return s[:max] + "…"
 }
+
+// UserManager identifies a per-user systemd manager reachable through
+// /run/user/<uid>.
+type UserManager struct {
+	UID  string `json:"uid"`
+	Name string `json:"name"`
+}
+
+// ListUserManagers discovers the user managers present on a host by scanning
+// /run/user for live session runtime directories. It never invents a user: a
+// UID without a resolvable name is still reported with its numeric UID.
+func ListUserManagers(ctx context.Context, r plugin.Runner) ([]UserManager, error) {
+	if r == nil {
+		return nil, fmt.Errorf("runner is required")
+	}
+	cmd := `for d in /run/user/*; do [ -d "$d" ] || continue; uid=${d##*/}; ` +
+		`case "$uid" in *[!0-9]*) continue;; esac; ` +
+		`name=$(id -nu "$uid" 2>/dev/null || echo "$uid"); echo "$uid $name"; done`
+	out, err := r.RunCommand(ctx, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to enumerate user managers: %w (output: %s)", err, strings.TrimSpace(out))
+	}
+
+	managers := make([]UserManager, 0, 4)
+	seen := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 1 || !isNumeric(fields[0]) || seen[fields[0]] {
+			continue
+		}
+		name := fields[0]
+		if len(fields) > 1 {
+			name = fields[1]
+		}
+		seen[fields[0]] = true
+		managers = append(managers, UserManager{UID: fields[0], Name: name})
+	}
+	sort.Slice(managers, func(i, j int) bool { return managers[i].UID < managers[j].UID })
+	return managers, nil
+}
+
+func isNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// UserRunner prefixes every command so `systemctl --user` / `journalctl --user`
+// target the selected user's manager instead of the SSH login user's.
+type UserRunner struct {
+	Base plugin.Runner
+	UID  string
+}
+
+// RunCommand implements plugin.Runner.
+func (u UserRunner) RunCommand(ctx context.Context, cmd string) (string, error) {
+	if strings.TrimSpace(u.UID) == "" {
+		return u.Base.RunCommand(ctx, cmd)
+	}
+	uid := strings.TrimSpace(u.UID)
+	prefix := fmt.Sprintf(`runuser -u "$(id -nu %s)" -- env XDG_RUNTIME_DIR=/run/user/%s DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%s/bus `, uid, uid, uid)
+	return u.Base.RunCommand(ctx, prefix+cmd)
+}

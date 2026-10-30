@@ -32,11 +32,11 @@
             document.documentElement.setAttribute('data-theme-choice', stored);
           }
           if (resolved === 'latte') {
-            document.documentElement.classList.add('theme-latte');
-            document.documentElement.classList.remove('theme-macchiato');
+            document.documentElement.classList.add('theme-latte', 'latte');
+            document.documentElement.classList.remove('theme-macchiato', 'macchiato');
           } else {
-            document.documentElement.classList.add('theme-macchiato');
-            document.documentElement.classList.remove('theme-latte');
+            document.documentElement.classList.add('theme-macchiato', 'macchiato');
+            document.documentElement.classList.remove('theme-latte', 'latte');
           }
         } catch (_) {}
       })();

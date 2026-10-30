@@ -86,6 +86,7 @@ func (a *API) Register(mux *http.ServeMux) {
 
 	// systemd: unit list, per-unit property state, and per-unit journal, all
 	// read from systemd's own machine-readable interfaces.
+	mux.HandleFunc("/api/nodes/{id}/systemd/users", a.handleSystemdUsers)
 	mux.HandleFunc("/api/nodes/{id}/systemd/units", a.handleSystemdUnits)
 	mux.HandleFunc("/api/nodes/{id}/systemd/unit", a.handleSystemdUnit)
 	mux.HandleFunc("/api/nodes/{id}/systemd/journal", a.handleSystemdJournal)

@@ -9,8 +9,8 @@ import (
 	"air-traffic-control/backend/pkg/plugin"
 	"air-traffic-control/backend/pkg/plugin/newapi"
 	"air-traffic-control/backend/pkg/plugin/settingsframework"
-	"air-traffic-control/backend/plugins/firewall/firewalld"
 	_ "air-traffic-control/backend/plugins/all"
+	"air-traffic-control/backend/plugins/firewall/firewalld"
 )
 
 type mockRunner struct {
@@ -180,6 +180,44 @@ func TestFirewalldPlugin_CompileForwardPort(t *testing.T) {
 	}
 }
 
+func TestFirewalldPlugin_CompileMasquerade(t *testing.T) {
+	p, ok := plugin.Get("firewall/firewalld")
+	if !ok {
+		t.Fatalf("firewall/firewalld not registered")
+	}
+	actor := p.(plugin.Actor)
+	facts := plugin.HostFacts{NodeID: "node1"}
+
+	enableTask, err := actor.Compile(facts, "masquerade", map[string]any{"enabled": true, "zone": "trusted"})
+	if err != nil {
+		t.Fatalf("compile masquerade enable failed: %v", err)
+	}
+	if len(enableTask.Steps) != 1 || enableTask.Steps[0].Module != "ansible.posix.firewalld" {
+		t.Fatalf("unexpected masquerade enable steps: %+v", enableTask.Steps)
+	}
+	params := enableTask.Steps[0].Params
+	if params["zone"] != "trusted" || params["masquerade"] != "true" || params["state"] != "enabled" || params["permanent"] != true {
+		t.Errorf("unexpected masquerade enable params: %+v", params)
+	}
+
+	disableTask, err := actor.Compile(facts, "masquerade", map[string]any{"enabled": false, "zone": "public"})
+	if err != nil {
+		t.Fatalf("compile masquerade disable failed: %v", err)
+	}
+	if disableTask.Steps[0].Params["state"] != "disabled" {
+		t.Errorf("expected state=disabled, got %+v", disableTask.Steps[0].Params)
+	}
+
+	for _, bad := range []map[string]any{
+		{"enabled": "maybe"},
+		{"enabled": true, "zone": "bad zone"},
+	} {
+		if _, err := actor.Compile(facts, "masquerade", bad); err == nil {
+			t.Errorf("expected an error for invalid masquerade options %+v", bad)
+		}
+	}
+}
+
 func TestFirewalldPlugin_CompileForwardPortValidation(t *testing.T) {
 	p, ok := plugin.Get("firewall/firewalld")
 	if !ok {
@@ -273,7 +311,7 @@ func TestFirewalldPlugin_ProbeDetectionStates(t *testing.T) {
 	t.Run("inactive when only command -v firewall-cmd resolves", func(t *testing.T) {
 		runner := &mockRunner{
 			responses: map[string]string{
-				"firewall-cmd --state":     "not running\n",
+				"firewall-cmd --state":    "not running\n",
 				"command -v firewall-cmd": "/usr/bin/firewall-cmd\n",
 			},
 		}
@@ -356,8 +394,8 @@ func TestFirewalldPlugin_NewAPICompliance(t *testing.T) {
 	}
 	mgmtActions := mgmt.ManagementActions()
 	legacyActions := mgmt.Actions()
-	if len(mgmtActions) != 3 || len(legacyActions) != len(mgmtActions) {
-		t.Fatalf("expected 3 management actions matching legacy actions, got %d vs %d", len(mgmtActions), len(legacyActions))
+	if len(mgmtActions) != 4 || len(legacyActions) != len(mgmtActions) {
+		t.Fatalf("expected 4 management actions matching legacy actions, got %d vs %d", len(mgmtActions), len(legacyActions))
 	}
 	for i, ma := range mgmtActions {
 		if ma.Name != legacyActions[i].Name {

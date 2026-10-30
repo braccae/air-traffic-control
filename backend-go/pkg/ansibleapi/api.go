@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"air-traffic-control/backend/pkg/ansqueue"
+	"air-traffic-control/backend/pkg/collections"
 	"air-traffic-control/backend/pkg/hostcache"
 )
 
@@ -28,6 +29,9 @@ type API struct {
 	ansibleCfgPath string
 	playbooksDir   string
 	broadcast      func(map[string]any)
+	// collections backs the update/remove/enable endpoints. Nil falls back to
+	// the process-wide manager.
+	collections *collections.Manager
 }
 
 // APIOptions configures the Ansible API.
@@ -98,9 +102,16 @@ func (a *API) Register(mux *http.ServeMux) {
 	// 3. Inventory & Galaxy
 	mux.HandleFunc("/api/ansible/inventory", a.handleAnsibleInventory)
 	mux.HandleFunc("/api/ansible/collections", a.handleGalaxyCollections)
+	mux.HandleFunc("/api/ansible/collections/catalog", a.handleGalaxyCatalog)
 	mux.HandleFunc("/api/ansible/collections/", a.handleGalaxyCollectionsSubtree)
 	mux.HandleFunc("/api/ansible/collections/install", a.handleGalaxyInstall)
 	mux.HandleFunc("/api/ansible/collections/remove", a.handleGalaxyRemove)
+	mux.HandleFunc("/api/ansible/collections/enable", a.handleGalaxyEnable)
+	mux.HandleFunc("/api/ansible/collections/update", a.handleGalaxyUpdate)
+	mux.HandleFunc("/api/ansible/collections/updates", a.handleGalaxyUpdates)
+	mux.HandleFunc("/api/ansible/collections/pin", a.handleGalaxyPin)
+	mux.HandleFunc("/api/ansible/collections/unpin", a.handleGalaxyUnpin)
+	mux.HandleFunc("/api/ansible/collections/auto-update", a.handleGalaxyAutoUpdate)
 
 	// 4. Module specs
 	mux.HandleFunc("/api/ansible/modules", a.handleAnsibleModules)
@@ -333,6 +344,11 @@ func (a *API) handleGalaxyInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A manual install always wins over a previous opt-out.
+	if mgr := a.collectionManager(); mgr != nil {
+		_ = mgr.SetDisabled(req.Collection, false)
+	}
+
 	if a.store != nil {
 		t := hostcache.Task{
 			ID:          fmt.Sprintf("task-galaxy-%d", time.Now().UnixMilli()),
@@ -362,15 +378,53 @@ func (a *API) handleGalaxyInstall(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /api/ansible/collections/catalog
+//
+// The baseline catalog is the single source of truth for what the coordinator
+// keeps installed: the datacenter settings page renders exactly this list.
+func (a *API) handleGalaxyCatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+		return
+	}
+	names := make([]string, 0, len(collections.Catalog))
+	for _, entry := range collections.Catalog {
+		names = append(names, entry.Name)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":     true,
+		"catalog":     collections.Catalog,
+		"collections": names,
+	})
+}
+
 // GET & DELETE /api/ansible/collections
 func (a *API) handleGalaxyCollections(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		items, err := ListGalaxyCollections(a.repoRoot)
+		disabled := []string{}
+		pinned := map[string]string{}
+		autoUpdate := false
+		if mgr := a.collectionManager(); mgr != nil {
+			disabled = mgr.Disabled()
+			pinned = mgr.Pinned()
+			autoUpdate = mgr.AutoUpdateEnabled()
+		}
+		required := []string{}
+		for _, item := range items {
+			if collections.Required(item.Name) {
+				required = append(required, item.Name)
+			}
+		}
 		if err != nil && len(items) == 0 {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"success":     true,
 				"collections": []GalaxyCollectionItem{},
+				"disabled":    disabled,
+				"required":    required,
+				"pinned":      pinned,
+				"autoUpdate":  autoUpdate,
 				"warning":     err.Error(),
 			})
 			return
@@ -378,6 +432,10 @@ func (a *API) handleGalaxyCollections(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"success":     true,
 			"collections": items,
+			"disabled":    disabled,
+			"required":    required,
+			"pinned":      pinned,
+			"autoUpdate":  autoUpdate,
 		})
 	case http.MethodDelete:
 		a.handleGalaxyRemove(w, r)
@@ -401,7 +459,7 @@ func (a *API) handleGalaxyCollectionsSubtree(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
 		return
 	}
-	a.removeCollectionByName(w, strings.TrimSpace(trimmed))
+	a.removeCollectionByName(w, strings.TrimSpace(trimmed), false)
 }
 
 // POST /api/ansible/collections/remove
@@ -412,6 +470,7 @@ func (a *API) handleGalaxyRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Collection string `json:"collection"`
+		Force      bool   `json:"force"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Collection) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -420,10 +479,10 @@ func (a *API) handleGalaxyRemove(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	a.removeCollectionByName(w, strings.TrimSpace(req.Collection))
+	a.removeCollectionByName(w, strings.TrimSpace(req.Collection), req.Force)
 }
 
-func (a *API) removeCollectionByName(w http.ResponseWriter, collection string) {
+func (a *API) removeCollectionByName(w http.ResponseWriter, collection string, force bool) {
 	if !CollectionNameRegex.MatchString(collection) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false,
@@ -431,6 +490,22 @@ func (a *API) removeCollectionByName(w http.ResponseWriter, collection string) {
 		})
 		return
 	}
+	// community.general provides every become plugin ATC relies on and
+	// ansible.posix backs the firewall/mount/service modules used by the
+	// mutation queue. Removing either silently breaks real operations.
+	if collections.Required(collection) && !force {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"success":    false,
+			"collection": collection,
+			"required":   true,
+			"error": fmt.Sprintf(
+				"%s is required by ATC's mutation pipeline (privilege escalation / service & firewall modules) and cannot be removed without force",
+				collection,
+			),
+		})
+		return
+	}
+
 	out, err := RemoveGalaxyCollection(a.repoRoot, collection)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -464,6 +539,21 @@ func (a *API) removeCollectionByName(w http.ResponseWriter, collection string) {
 			a.broadcast(map[string]any{"type": "task_started", "task": t})
 		}
 	}
+	// Record the opt-out so the startup catalog and host-feature triggers stop
+	// reinstalling it. Without this "Remove" would undo itself within minutes.
+	disabled := []string{}
+	if mgr := a.collectionManager(); mgr != nil {
+		if setErr := mgr.SetDisabled(collection, true); setErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"success":    false,
+				"collection": collection,
+				"error":      fmt.Sprintf("collection removed but the opt-out could not be persisted: %v", setErr),
+			})
+			return
+		}
+		disabled = mgr.Disabled()
+	}
+
 	items, _ := ListGalaxyCollections(a.repoRoot)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":     true,
@@ -471,6 +561,7 @@ func (a *API) removeCollectionByName(w http.ResponseWriter, collection string) {
 		"message":     fmt.Sprintf("Collection %s removed successfully", collection),
 		"output":      out,
 		"collections": items,
+		"disabled":    disabled,
 	})
 }
 
@@ -1071,4 +1162,305 @@ func (a *API) handleGroupVars(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Collection lifecycle: updates, opt-out and re-enable
+// ---------------------------------------------------------------------------
+
+// collectionManager returns the wired manager, falling back to the process-wide
+// one installed at startup.
+func (a *API) collectionManager() *collections.Manager {
+	if a != nil && a.collections != nil {
+		return a.collections
+	}
+	return collections.Default()
+}
+
+// SetCollectionsManager wires the collection manager explicitly (tests use this
+// to avoid depending on global startup wiring).
+func (a *API) SetCollectionsManager(m *collections.Manager) {
+	if a != nil {
+		a.collections = m
+	}
+}
+
+// GET /api/ansible/collections/updates
+//
+// Compares installed versions with the newest published ones. A collection whose
+// lookup failed reports checkError instead of a fabricated "up to date".
+func (a *API) handleGalaxyUpdates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+		return
+	}
+	mgr := a.collectionManager()
+	if mgr == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"success": false,
+			"error":   "Collection manager is not initialised",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	statuses := mgr.CheckUpdates(ctx)
+	updatesAvailable := 0
+	for _, status := range statuses {
+		if status.UpdateAvailable {
+			updatesAvailable++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":          true,
+		"updates":          statuses,
+		"updatesAvailable": updatesAvailable,
+	})
+}
+
+// POST /api/ansible/collections/update  {"collection":"ns.name"} or {"all":true}
+func (a *API) handleGalaxyUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+		return
+	}
+	var req struct {
+		Collection string `json:"collection"`
+		All        bool   `json:"all"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "Invalid JSON body"})
+		return
+	}
+	req.Collection = strings.TrimSpace(req.Collection)
+	if !req.All && req.Collection == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "Provide a collection name or {\"all\":true}",
+		})
+		return
+	}
+	if req.Collection != "" && !CollectionNameRegex.MatchString(req.Collection) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "Invalid collection name. Format must be <namespace>.<collection>",
+		})
+		return
+	}
+	if req.Collection != "" && req.Collection == "ansible.builtin" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "ansible.builtin ships with ansible-core and cannot be updated independently",
+		})
+		return
+	}
+
+	mgr := a.collectionManager()
+	if mgr == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"success": false,
+			"error":   "Collection manager is not initialised",
+		})
+		return
+	}
+
+	names := []string{}
+	if !req.All {
+		names = append(names, req.Collection)
+	}
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Minute)
+	defer cancel()
+
+	results := mgr.Update(ctx, names)
+	// An explicit update is also an explicit "I want this installed".
+	for _, name := range names {
+		for _, result := range results {
+			if result.Name == name && result.Error == "" {
+				_ = mgr.SetDisabled(name, false)
+			}
+		}
+	}
+	installErr := ""
+	for _, result := range results {
+		if result.Error != "" && installErr == "" {
+			installErr = result.Error
+		}
+	}
+
+	items, _ := ListGalaxyCollections(a.repoRoot)
+	status := http.StatusOK
+	if installErr != "" {
+		status = http.StatusInternalServerError
+	}
+	writeJSON(w, status, map[string]any{
+		"success":     installErr == "",
+		"results":     results,
+		"collections": items,
+		"error":       installErr,
+	})
+}
+
+// POST /api/ansible/collections/enable  {"collection":"ns.name"}
+func (a *API) handleGalaxyEnable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+		return
+	}
+	var req struct {
+		Collection string `json:"collection"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Collection) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "collection is required"})
+		return
+	}
+	req.Collection = strings.TrimSpace(req.Collection)
+	if !CollectionNameRegex.MatchString(req.Collection) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "Invalid collection name. Format must be <namespace>.<collection>",
+		})
+		return
+	}
+
+	mgr := a.collectionManager()
+	if mgr == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"success": false,
+			"error":   "Collection manager is not initialised",
+		})
+		return
+	}
+
+	if err := mgr.SetDisabled(req.Collection, false); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Minute)
+	defer cancel()
+	installed := mgr.Ensure(ctx, []string{req.Collection}, "re-enabled by operator")
+
+	items, _ := ListGalaxyCollections(a.repoRoot)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":     true,
+		"collection":  req.Collection,
+		"reinstalled": len(installed) > 0,
+		"collections": items,
+		"disabled":    mgr.Disabled(),
+	})
+}
+
+// POST /api/ansible/collections/pin  {"collection":"ns.name","version":"1.2.3"}
+//
+// An empty version pins whatever is installed right now, which is the common
+// "hold this working version" action.
+func (a *API) handleGalaxyPin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+		return
+	}
+	var req struct {
+		Collection string `json:"collection"`
+		Version    string `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Collection) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "collection is required"})
+		return
+	}
+	req.Collection = strings.TrimSpace(req.Collection)
+	if !CollectionNameRegex.MatchString(req.Collection) || req.Collection == "ansible.builtin" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "Invalid collection name. Format must be <namespace>.<collection>",
+		})
+		return
+	}
+
+	mgr := a.collectionManager()
+	if mgr == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"success": false, "error": "Collection manager is not initialised"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	version, err := mgr.Pin(ctx, req.Collection, req.Version)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success":    false,
+			"collection": req.Collection,
+			"error":      err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":    true,
+		"collection": req.Collection,
+		"version":    version,
+		"pinned":     mgr.Pinned(),
+	})
+}
+
+// POST /api/ansible/collections/unpin  {"collection":"ns.name"}
+func (a *API) handleGalaxyUnpin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+		return
+	}
+	var req struct {
+		Collection string `json:"collection"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Collection) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "collection is required"})
+		return
+	}
+	req.Collection = strings.TrimSpace(req.Collection)
+
+	mgr := a.collectionManager()
+	if mgr == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"success": false, "error": "Collection manager is not initialised"})
+		return
+	}
+	if err := mgr.Unpin(req.Collection); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":    true,
+		"collection": req.Collection,
+		"pinned":     mgr.Pinned(),
+	})
+}
+
+// POST /api/ansible/collections/auto-update  {"enabled":true}
+func (a *API) handleGalaxyAutoUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "Invalid JSON body"})
+		return
+	}
+	mgr := a.collectionManager()
+	if mgr == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"success": false, "error": "Collection manager is not initialised"})
+		return
+	}
+	if err := mgr.SetAutoUpdate(req.Enabled); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":    true,
+		"autoUpdate": mgr.AutoUpdateEnabled(),
+	})
 }

@@ -18,6 +18,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"air-traffic-control/backend/pkg/collections"
 	"air-traffic-control/backend/pkg/hostcache"
 )
 
@@ -112,7 +113,11 @@ func (r *storeNodeResolver) ResolveNode(nodeID string) (HostFacts, bool, error) 
 	if record.Port > 0 {
 		portStr = fmt.Sprintf("%d", record.Port)
 	}
-	return buildHostFacts(record.ID, record.IP, portStr, record.SSHUser, record.TailscaleIP, record.TailscaleHost, record.NodeJSON), true, nil
+	facts, err := buildHostFacts(record.ID, record.IP, portStr, record.SSHUser, record.TailscaleIP, record.TailscaleHost, record.VaultSecretID, record.NodeJSON)
+	if err != nil {
+		return facts, false, err
+	}
+	return facts, true, nil
 }
 
 // RunnerResolver creates or retrieves a Runner for given HostFacts
@@ -245,6 +250,8 @@ type sqliteNodeRecord struct {
 	PrivilegeMethod string            `json:"privilegeMethod"`
 	APIPort         int               `json:"apiPort"`
 	APIUser         string            `json:"apiUser"`
+	VaultSecretID   string            `json:"vaultSecretId"`
+	AuthMethod      string            `json:"authMethod"`
 	PluginOverrides map[string]string `json:"pluginOverrides"`
 
 	// Explicit HostFacts fields (supported when NodeJSON carries direct HostFacts)
@@ -256,7 +263,7 @@ type sqliteNodeRecord struct {
 	Overrides        map[string]string `json:"overrides"`
 }
 
-func buildHostFacts(id, ip, portStr, sshUser, tailscaleIP, tailscaleHost string, rawJSON []byte) HostFacts {
+func buildHostFacts(id, ip, portStr, sshUser, tailscaleIP, tailscaleHost, vaultSecretID string, rawJSON []byte) (HostFacts, error) {
 	var parsed sqliteNodeRecord
 	if len(rawJSON) > 0 {
 		_ = json.Unmarshal(rawJSON, &parsed)
@@ -281,11 +288,25 @@ func buildHostFacts(id, ip, portStr, sshUser, tailscaleIP, tailscaleHost string,
 	if parsed.TailscaleHost == "" {
 		parsed.TailscaleHost = tailscaleHost
 	}
+	if parsed.VaultSecretID == "" {
+		parsed.VaultSecretID = vaultSecretID
+	}
+	if parsed.Overrides == nil {
+		parsed.Overrides = make(map[string]string)
+	}
+	if parsed.VaultSecretID != "" {
+		parsed.Overrides["vaultSecretId"] = parsed.VaultSecretID
+	}
+	// Surface the declared auth method so connection plugins can tell a keyless
+	// Tailscale SSH host (none-auth is expected) from a host that simply has no
+	// credentials configured.
+	if parsed.AuthMethod != "" {
+		parsed.Overrides["authMethod"] = parsed.AuthMethod
+	}
 
 	isLocalHost := parsed.IP == "127.0.0.1" ||
 		parsed.IP == "localhost" ||
-		strings.EqualFold(parsed.ShortName, "dev-pc") ||
-		strings.HasPrefix(strings.ToLower(parsed.TailscaleHost), "dev-pc")
+		parsed.IP == "::1"
 
 	route := strings.TrimSpace(parsed.HostRoute)
 	if route == "" {
@@ -298,7 +319,7 @@ func buildHostFacts(id, ip, portStr, sshUser, tailscaleIP, tailscaleHost string,
 		} else if parsed.IP != "" {
 			route = parsed.IP
 		} else {
-			route = "127.0.0.1"
+			return HostFacts{}, fmt.Errorf("node %q has no routable address (no hostRoute, tailscaleIp, tailscaleHost, or ip)", id)
 		}
 	}
 
@@ -351,6 +372,10 @@ func buildHostFacts(id, ip, portStr, sshUser, tailscaleIP, tailscaleHost string,
 	if parsed.SSHUser != "" {
 		overrides["user"] = parsed.SSHUser
 	}
+	if parsed.IP != "" {
+		overrides["ip"] = parsed.IP
+		overrides["host"] = parsed.IP
+	}
 	if parsed.Port > 0 {
 		overrides["port"] = fmt.Sprintf("%d", parsed.Port)
 	}
@@ -369,7 +394,7 @@ func buildHostFacts(id, ip, portStr, sshUser, tailscaleIP, tailscaleHost string,
 		ActiveElevation:  activeElev,
 		ActivePackage:    activePkg,
 		Overrides:        overrides,
-	}
+	}, nil
 }
 
 // ResolveNode queries SQLite for node facts
@@ -377,11 +402,17 @@ func (r *SQLiteNodeResolver) ResolveNode(nodeID string) (HostFacts, bool, error)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	var id, ip, sshUser, tailscaleIP, tailscaleHost, nodeJSON string
+	var id string = ""
+	var ip string = ""
+	var sshUser string = ""
+	var tailscaleIP string = ""
+	var tailscaleHost string = ""
+	var nodeJSON string = ""
+	var vaultSecretID sql.NullString
 	var port int
 
-	row := r.db.QueryRow("SELECT id, ip, port, ssh_user, tailscale_ip, tailscale_host, node_json FROM hosts WHERE id = ? OR name = ? OR short_name = ?", nodeID, nodeID, nodeID)
-	err := row.Scan(&id, &ip, &port, &sshUser, &tailscaleIP, &tailscaleHost, &nodeJSON)
+	row := r.db.QueryRow("SELECT id, ip, port, ssh_user, tailscale_ip, tailscale_host, vault_secret_id, node_json FROM hosts WHERE id = ? OR name = ? OR short_name = ?", nodeID, nodeID, nodeID)
+	err := row.Scan(&id, &ip, &port, &sshUser, &tailscaleIP, &tailscaleHost, &vaultSecretID, &nodeJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return HostFacts{}, false, nil
@@ -393,7 +424,14 @@ func (r *SQLiteNodeResolver) ResolveNode(nodeID string) (HostFacts, bool, error)
 	if port > 0 {
 		portStr = fmt.Sprintf("%d", port)
 	}
-	return buildHostFacts(id, ip, portStr, sshUser, tailscaleIP, tailscaleHost, []byte(nodeJSON)), true, nil
+	facts, err := buildHostFacts(
+		id, ip, portStr, sshUser, tailscaleIP, tailscaleHost,
+		vaultSecretID.String, []byte(nodeJSON),
+	)
+	if err != nil {
+		return facts, false, err
+	}
+	return facts, true, nil
 }
 
 // In-memory Probe Cache Entry
@@ -485,6 +523,9 @@ type API struct {
 	runnerResolver RunnerResolver
 	cache          *ProbeCache
 	settingsStore  *SettingsStore
+	// collections installs controller-side Galaxy collections the detected
+	// capabilities need. Optional: nil disables the auto-install behaviour.
+	collections *collections.Manager
 }
 
 // NodeResolver returns the wired node resolver. It may be nil when no store or
@@ -530,6 +571,29 @@ func (a *API) Cache() *ProbeCache {
 	return a.cache
 }
 
+// globalCollections is the process-wide collection manager installed at
+// startup. Resident plugins and late-constructed API instances use it so a
+// detected capability can install its modules without extra wiring.
+var (
+	globalCollectionsMu sync.RWMutex
+	globalCollections   *collections.Manager
+)
+
+// SetCollectionsManager publishes the process-wide Galaxy collection manager.
+func SetCollectionsManager(m *collections.Manager) {
+	globalCollectionsMu.Lock()
+	defer globalCollectionsMu.Unlock()
+	globalCollections = m
+}
+
+// GlobalCollectionsManager returns the process-wide manager, or nil when none
+// has been installed (unit tests).
+func GlobalCollectionsManager() *collections.Manager {
+	globalCollectionsMu.RLock()
+	defer globalCollectionsMu.RUnlock()
+	return globalCollections
+}
+
 // APIOptions holds dependencies for initializing API
 type APIOptions struct {
 	Registry       *Registry
@@ -539,6 +603,8 @@ type APIOptions struct {
 	// SettingsStore backs the global settings pages endpoint. When nil, the
 	// store is auto-wired against hosts-cache.sqlite.
 	SettingsStore *SettingsStore
+	// Collections keeps Galaxy collections in sync with detected capabilities.
+	Collections *collections.Manager
 	// Store optionally provides a pre-initialized hostcache store. When set,
 	// the NodeResolver is auto-wired from this store, bypassing DBPath.
 	Store *hostcache.Store
@@ -602,6 +668,7 @@ func NewAPI(opts APIOptions) *API {
 		runnerResolver: runnerRes,
 		cache:          cache,
 		settingsStore:  settingsStore,
+		collections:    pickCollections(opts.Collections),
 	}
 }
 
@@ -834,6 +901,7 @@ func (a *API) handleNodePlugins(w http.ResponseWriter, r *http.Request, nodeID s
 		}
 
 		if det.Detected {
+			a.ensureCollections(p, det, facts)
 			result = append(result, NodePluginItem{
 				ID:        meta.ID,
 				Kind:      meta.Kind,
@@ -911,6 +979,7 @@ func (a *API) handleNodeModules(w http.ResponseWriter, r *http.Request, nodeID s
 
 		item.Detection = det
 		if det.Detected {
+			a.ensureCollections(p, det, facts)
 			item.Status = "active"
 		} else {
 			item.Status = "available"
@@ -1360,4 +1429,79 @@ func coerceSettingField(f SettingsField, raw any) (any, error) {
 		}
 		return raw.(string), nil
 	}
+}
+
+// ensureCollections installs the Galaxy collections that a detected capability
+// needs. It runs off the request path so a slow galaxy download never blocks a
+// probe response.
+func (a *API) ensureCollections(p Plugin, det Detection, facts HostFacts) {
+	if a == nil {
+		return
+	}
+	if a.collections != nil {
+		ensureCollectionsWith(a.collections, p, det, facts)
+		return
+	}
+	EnsureCollectionsForDetection(p, det, facts)
+}
+
+// EnsureCollectionsForDetection installs the Galaxy collections a detected
+// capability needs, using the process-wide manager. Probing code (the node
+// plugin endpoints and the background cache manager) calls this so a newly
+// discovered PostgreSQL/MariaDB/MongoDB/Podman/Proxmox capability pulls its
+// module tree without waiting for an operator to open the host's Modules tab.
+func EnsureCollectionsForDetection(p Plugin, det Detection, facts HostFacts) {
+	ensureCollectionsWith(GlobalCollectionsManager(), p, det, facts)
+}
+
+func ensureCollectionsWith(mgr *collections.Manager, p Plugin, det Detection, facts HostFacts) {
+	if mgr == nil || !det.Detected || p == nil {
+		return
+	}
+	meta := p.Meta()
+
+	names := collections.CollectionsForPlugin(meta.ID, det.Details)
+	names = append(names, p.Requirements().ControllerCollections...)
+	if strings.EqualFold(strings.TrimSpace(facts.OSFamily), "windows") {
+		names = append(names, collections.AnsibleWindows)
+	}
+
+	needed := dedupeCollections(names)
+	if len(needed) == 0 {
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		installed := mgr.Ensure(ctx, needed, "detected "+meta.ID)
+		if len(installed) > 0 {
+			log.Printf("plugin: installed Galaxy collections for %s: %v", meta.ID, installed)
+		}
+	}()
+}
+
+// dedupeCollections removes blanks, aliases and duplicates from a plugin's
+// collection requirements.
+func dedupeCollections(names []string) []string {
+	seen := make(map[string]bool, len(names))
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" || name == "ansible.builtin" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
+// pickCollections prefers the explicitly wired manager and falls back to the
+// process-wide one installed at startup.
+func pickCollections(explicit *collections.Manager) *collections.Manager {
+	if explicit != nil {
+		return explicit
+	}
+	return GlobalCollectionsManager()
 }

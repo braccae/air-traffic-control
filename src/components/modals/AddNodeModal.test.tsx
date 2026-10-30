@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToString } from 'react-dom/server';
-import { AddNodeModal, type AddNodeModalProps, type TailscalePeerOption } from './AddNodeModal.tsx';
+import {
+  AddNodeModal,
+  matchesTailscaleTag,
+  type AddNodeModalProps,
+  type TailscalePeerOption,
+} from './AddNodeModal.tsx';
 
 const samplePeers: TailscalePeerOption[] = [
   {
@@ -80,7 +85,7 @@ test('AddNodeModal Manual SSH tab renders SSH defaults, vault badge, and local t
   assert.ok(html.includes('SSH PORT') || html.includes('SSH Port') || html.includes('22'));
   assert.ok(html.includes('core'), 'Default SSH user should be core');
   assert.ok(html.includes('(Local testing only)'), 'ssh-agent forwarding must be explicitly marked with (Local testing only)');
-  assert.ok(html.includes('Ansible Vault') || html.includes('Vault Encryption'), 'Must display Vault encryption badge or indicator');
+  assert.ok(html.includes('SSH Vault Secrets'), 'Must display the SSH Vault Secrets panel');
 });
 
 test('AddNodeModal WinRM tab renders WinRM port 5985, transport NTLM, and Administrator user', () => {
@@ -97,11 +102,14 @@ test('AddNodeModal WinRM tab renders WinRM port 5985, transport NTLM, and Admini
   assert.ok(html.includes('Administrator'), 'Default WinRM user must be Administrator');
   assert.ok(html.includes('NTLM') || html.includes('ntlm'), 'Default WinRM transport should be NTLM');
   assert.ok(html.includes('WinRM'), 'Must mention WinRM');
-  assert.ok(html.includes('Ansible Vault') || html.includes('Vault Encryption'), 'Must indicate Vault encryption for credentials');
+  assert.ok(
+    html.includes('WinRM onboarding is not implemented'),
+    'WinRM must be honestly marked as not implemented'
+  );
   assert.ok(html.includes('GROUP / TAG') || html.includes('tag:host'), 'WinRM tab must include group / tag selector');
 });
 
-test('AddNodeModal Follow Tag tab renders tag input, live peer count preview, and Follow Tag & Sync Nodes action', () => {
+test('AddNodeModal Follow Tag tab asks for a plain tag name and offers Follow Tag & Sync Nodes', () => {
   const html = renderToString(
     React.createElement(AddNodeModal, {
       isOpen: true,
@@ -112,11 +120,26 @@ test('AddNodeModal Follow Tag tab renders tag input, live peer count preview, an
     })
   );
 
-  assert.ok(html.includes('tag:worker') || html.includes('Tag name') || html.includes('TAG NAME'), 'Must include Tag name field');
-  assert.ok(html.includes('Follow Tag &amp; Sync Nodes') || html.includes('Follow Tag & Sync Nodes'), 'Must include Follow Tag & Sync Nodes button');
-  assert.ok(html.includes('Matching Peers') || html.includes('matching peer'), 'Must show live matching peers count preview');
-  // Matching peer name preview for likes-it-cold which has tag:worker
-  assert.ok(html.includes('likes-it-cold'), 'Matching peer likes-it-cold should be listed in preview');
+  assert.ok(html.includes('TAG NAME'), 'Must include Tag name field');
+  // The operator types a plain tag name; the tag: prefix is shown separately.
+  assert.ok(html.includes('placeholder="pve"'), 'Tag input must ask for a plain tag name (pve)');
+  assert.ok(html.includes('tag:'), 'The tag: prefix must be displayed as a fixed prefix');
+  assert.ok(
+    html.includes('Follow Tag &amp; Sync Nodes') || html.includes('Follow Tag & Sync Nodes'),
+    'Must include Follow Tag & Sync Nodes button'
+  );
+  assert.ok(html.includes('Matching Peers:'), 'Must show live matching peers preview');
+  // No tag is preselected, so nothing matches yet.
+  assert.ok(!html.includes('likes-it-cold'), 'No peers should match an empty tag');
+});
+
+test('matchesTailscaleTag normalizes the tag: prefix', () => {
+  assert.equal(matchesTailscaleTag(['tag:host'], 'host'), true);
+  assert.equal(matchesTailscaleTag(['tag:pve'], 'pve'), true);
+  assert.equal(matchesTailscaleTag(['tag:pve'], 'tag:pve'), true);
+  assert.equal(matchesTailscaleTag(['tag:worker'], 'host'), false);
+  assert.equal(matchesTailscaleTag(undefined, 'host'), false);
+  assert.equal(matchesTailscaleTag(['tag:host'], ''), false);
 });
 
 test('AddNodeModal Manual SSH tab includes secret encryption policy notice', () => {
@@ -130,7 +153,10 @@ test('AddNodeModal Manual SSH tab includes secret encryption policy notice', () 
   );
 
   assert.ok(html.includes('ansible-vault encrypt_string'), 'Must reference ansible-vault encrypt_string');
-  assert.ok(html.includes('strictly never written to disk or SQLite'), 'Must confirm zero cleartext persistence');
+  assert.ok(
+    html.includes('Plaintext is never written to SQLite'),
+    'Must confirm zero cleartext persistence'
+  );
 });
 
 test('AddNodeModal WinRM tab includes HTTPS toggle with port 5986 option', () => {

@@ -1,8 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Ghostty, Terminal, FitAddon } from 'ghostty-web';
-import { Terminal as TerminalIcon, TerminalSquare, Minus, Square, Copy, X } from 'lucide-react';
+import { Terminal as TerminalIcon, TerminalSquare, Minus, Square, Copy, X, Wifi, WifiOff, RotateCcw } from 'lucide-react';
 import type { NodeItem } from '../types/index.ts';
-import { parseTerminalCommand } from '../utils/orchestrator.ts';
 import {
   formatGhosttyBanner,
   formatGhosttyPrompt,
@@ -25,10 +24,31 @@ import {
   type QuickCommandItem,
 } from '../utils/quickCommandsManager.ts';
 
+// WebSocket connection configuration
+const WS_RECONNECT_BASE_DELAY = 1000; // 1 second
+const WS_RECONNECT_MAX_DELAY = 30000; // 30 seconds
+const WS_RECONNECT_MAX_ATTEMPTS = 10;
+const WS_RECONNECT_JITTER = 0.3; // 30% jitter
+
+function getWebSocketUrl(): string {
+  // Allow override via Vite env var (e.g., VITE_WS_URL=ws://127.0.0.1:18090/ws)
+  if (import.meta.env.VITE_WS_URL) {
+    return import.meta.env.VITE_WS_URL;
+  }
+  // Default: same-origin /ws path (works with Vite proxy in dev, Go server in prod)
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/ws`;
+}
+
 let ghosttyLoadPromise: Promise<Ghostty> | null = null;
 function loadGhosttyEngine(): Promise<Ghostty> {
   if (!ghosttyLoadPromise) {
     ghosttyLoadPromise = Ghostty.load('/ghostty-vt.wasm');
+    // A failed WASM fetch must not poison the module for the rest of the page
+    // lifetime: drop the rejected promise so the next mount retries the load.
+    ghosttyLoadPromise.catch(() => {
+      ghosttyLoadPromise = null;
+    });
   }
   return ghosttyLoadPromise;
 }
@@ -64,13 +84,37 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
 }) => {
   const [running, setRunning] = useState(false);
   const [engineReady, setEngineReady] = useState(false);
+  const [engineError, setEngineError] = useState<string | null>(null);
   const [lastOutputText, setLastOutputText] = useState('');
-  const [connStatus, setConnStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('connected');
+  // 'connecting' until the backend actually acks the socket open — never
+  // default to 'connected' before a real connection exists.
+  const [connStatus, setConnStatus] = useState<'connecting' | 'connected' | 'reconnecting' | 'disconnected'>('connecting');
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  // Authoritative counter lives in a ref: the WS close handler is captured by
+  // the mount effect and would otherwise read a forever-stale `0` from state,
+  // so WS_RECONNECT_MAX_ATTEMPTS could never trip.
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumping this nonce re-runs the mount effect (used by the engine-error
+  // Retry button).
+  const [mountNonce, setMountNonce] = useState(0);
   const [showQuickMenu, setShowQuickMenu] = useState(false);
   const [quickCommands, setQuickCommands] = useState<QuickCommandItem[]>(() => loadQuickCommands());
 
   const currentThemeMode: ResolvedTheme = resolvedTheme || resolveTheme(themeChoice);
   const ghosttyTheme = getGhosttyTheme(currentThemeMode);
+
+  // Track intentional close to avoid reconnecting after unmount
+  const intentionalCloseRef = useRef(false);
+  // Track if component is mounted
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const handleQuickCommandsUpdated = (event: Event) => {
@@ -113,6 +157,14 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
     onResizeEnd: (newSize) => {
       onUpdateSize(newSize);
       fitAddonRef.current?.fit();
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && fitAddonRef.current) {
+        wsRef.current.send(JSON.stringify({
+          type: 'terminal_resize',
+          sessionId: session.id,
+          cols: termRef.current?.cols ?? 80,
+          rows: termRef.current?.rows ?? 24,
+        }));
+      }
     },
     onPositionChange: (newPos) => {
       setPosition(newPos);
@@ -191,10 +243,13 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
           const data = await resp.json();
           output = data.output || '';
         } else {
-          output = parseTerminalCommand(trimmed, node).output;
+          const data = await resp.json().catch(() => null);
+          throw new Error(data?.error || `HTTP ${resp.status}`);
         }
-      } catch {
-        output = parseTerminalCommand(trimmed, node).output;
+      } catch (err: any) {
+        // Zero-mock invariant: never synthesize shell output. Report the real
+        // transport failure so a dead backend is visible, not disguised.
+        output = `command failed: ${err?.message || err}`;
       }
 
       if (output) {
@@ -231,18 +286,26 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
   useEffect(() => {
     if (!isOpen || !containerRef.current || !node) return;
 
+    // Fresh mount (including Retry after an engine failure): allow the WS to
+    // connect again — a previous cleanup intentionally closed it.
+    intentionalCloseRef.current = false;
+
     let disposed = false;
     let termInstance: Terminal | null = null;
     let fitAddon: FitAddon | null = null;
 
     async function mountGhostty() {
       try {
-        await loadGhosttyEngine();
+        // ghostty-web@0.4.0 has no implicit global engine: the loaded Ghostty
+        // instance MUST be handed to the Terminal constructor, otherwise it
+        // throws "ghostty-web not initialized" and no canvas is ever created.
+        const ghostty = await loadGhosttyEngine();
         if (disposed || !containerRef.current) return;
 
         containerRef.current.innerHTML = '';
 
         termInstance = new Terminal({
+          ghostty,
           cursorBlink: true,
           fontFamily: '"Fira Code", monospace',
           fontSize: 13,
@@ -252,12 +315,27 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
         fitAddon = new FitAddon();
         termInstance.loadAddon(fitAddon);
         termInstance.open(containerRef.current);
+        if (!containerRef.current.querySelector('canvas')) {
+          throw new Error('ghostty engine opened but produced no canvas');
+        }
         fitAddon.fit();
         fitAddon.observeResize();
+
+        // Start from a blank screen. ghostty-web can keep the previous
+        // instance's rendered buffer in the canvas/WASM state when a new
+        // terminal is opened, which made a freshly connected host show the
+        // previous session's output until it was overwritten.
+        try {
+          termInstance.reset();
+        } catch {
+          // reset() is best-effort; the ANSI clear below still applies.
+        }
+        termInstance.write('\x1b[2J\x1b[3J\x1b[H');
 
         termRef.current = termInstance;
         fitAddonRef.current = fitAddon;
         inputStateRef.current = { buffer: '', history: [], historyIndex: -1 };
+        setEngineError(null);
         setEngineReady(true);
 
         termInstance.write(formatGhosttyBanner(node));
@@ -266,44 +344,103 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
           termInstance.focus();
         }
 
-        // Connect to real-time interactive WebSocket PTY stream
-        try {
-          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-          const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-          wsRef.current = ws;
-
-          ws.onopen = () => {
-            setConnStatus('connected');
-            ws.send(
-              JSON.stringify({
-                type: 'terminal_start',
-                sessionId: session.id,
-                nodeId: node.id,
-                host: node.id,
-              })
-            );
-          };
-
-          ws.onmessage = (event) => {
-            try {
-              const msg = JSON.parse(event.data);
-              if (msg.type === 'terminal_data' && msg.sessionId === session.id) {
-                termInstance?.write(msg.data);
-                setLastOutputText((prev) => (prev + msg.data).slice(-4000));
-              }
-            } catch {}
-          };
-
-          ws.onerror = () => {
-            setConnStatus('reconnecting');
-          };
-
-          ws.onclose = () => {
+        // Connect to real-time interactive WebSocket PTY stream with reconnection logic.
+        // The attempt counter lives in a ref because this closure is captured
+        // once at mount — reading `reconnectAttempt` state here would always be
+        // the initial 0, so backoff never escalated and the cap never tripped.
+        const scheduleReconnect = () => {
+          const attempt = reconnectAttemptRef.current + 1;
+          reconnectAttemptRef.current = attempt;
+          setReconnectAttempt(attempt);
+          if (attempt > WS_RECONNECT_MAX_ATTEMPTS) {
             setConnStatus('disconnected');
-          };
-        } catch {
-          setConnStatus('connected');
-        }
+            return;
+          }
+          const baseDelay = Math.min(
+            WS_RECONNECT_BASE_DELAY * Math.pow(2, attempt - 1),
+            WS_RECONNECT_MAX_DELAY
+          );
+          // Add jitter to prevent thundering herd
+          const jitter = baseDelay * WS_RECONNECT_JITTER * Math.random();
+          reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null;
+            if (mountedRef.current && !intentionalCloseRef.current && !disposed) {
+              connectWebSocket();
+            }
+          }, baseDelay + jitter);
+        };
+
+        const connectWebSocket = () => {
+          if (disposed || !mountedRef.current || intentionalCloseRef.current) return;
+
+          try {
+            const wsUrl = getWebSocketUrl();
+            const ws = new WebSocket(wsUrl);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+              if (disposed || !mountedRef.current) return;
+              setConnStatus('connected');
+              reconnectAttemptRef.current = 0;
+              setReconnectAttempt(0);
+              ws.send(
+                JSON.stringify({
+                  type: 'terminal_start',
+                  sessionId: session.id,
+                  nodeId: node.id,
+                  host: node.id,
+                  cols: termInstance?.cols ?? 80,
+                  rows: termInstance?.rows ?? 24,
+                })
+              );
+            };
+
+            ws.onmessage = (event) => {
+              let msg: any;
+              try {
+                msg = JSON.parse(event.data);
+              } catch (err) {
+                console.warn('TerminalWindow: failed to parse WS message', err, event.data);
+                return;
+              }
+              if (!msg || typeof msg.type !== 'string') return;
+              // Handle both terminal_data and terminal_output (backend may send either)
+              if ((msg.type === 'terminal_data' || msg.type === 'terminal_output') && msg.sessionId === session.id) {
+                if (msg.data) {
+                  termInstance?.write(msg.data);
+                }
+                // Defer lastOutputText update to avoid per-message re-render lag
+                if (msg.data) {
+                  setLastOutputText((prev) => (prev + msg.data).slice(-4000));
+                }
+                return;
+              }
+              if (msg.type === 'terminal_exit' && msg.sessionId === session.id) {
+                termInstance?.write(`\\r\\n[session exited (code ${msg.code ?? 0})]\\r\\n`);
+                setConnStatus('disconnected');
+                return;
+              }
+            };
+
+            ws.onerror = () => {
+              if (disposed || !mountedRef.current) return;
+              setConnStatus('reconnecting');
+            };
+
+            ws.onclose = () => {
+              if (disposed || !mountedRef.current || intentionalCloseRef.current) return;
+              setConnStatus('disconnected');
+              scheduleReconnect();
+            };
+          } catch {
+            if (mountedRef.current && !intentionalCloseRef.current && !disposed) {
+              setConnStatus('reconnecting');
+              scheduleReconnect();
+            }
+          }
+        };
+
+        connectWebSocket();
 
         termInstance.onData((data: string) => {
           if (!termInstance || runningRef.current) return;
@@ -340,14 +477,24 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
         });
       } catch (err) {
         console.error('Failed to initialize libghostty WASM terminal:', err);
+        if (!disposed) {
+          setEngineError(err instanceof Error ? err.message : String(err));
+          setEngineReady(false);
+        }
       }
     }
 
     mountGhostty();
 
     return () => {
+      intentionalCloseRef.current = true;
       disposed = true;
       setEngineReady(false);
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      reconnectAttemptRef.current = 0;
       if (wsRef.current) {
         try {
           if (wsRef.current.readyState === WebSocket.OPEN) {
@@ -375,7 +522,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
       termRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [isOpen, session.id, node?.id, currentThemeMode]);
+  }, [isOpen, session.id, node?.id, currentThemeMode, mountNonce]);
 
   const isMax = session.isMaximized;
   const sshTarget = formatSshTarget(node, session.hostIp);
@@ -468,14 +615,14 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
             {sshTarget}
           </span>
           <span
-            className={`w-2 h-2 rounded-full shrink-0 ${
-              connStatus === 'connected'
-                ? 'bg-[#3fb950]'
-                : connStatus === 'reconnecting'
-                ? 'bg-amber-400 animate-pulse'
-                : 'bg-red-500'
-            }`}
-            title={`Status: ${connStatus}`}
+            data-testid="terminal-conn-status"
+            data-status={connStatus}
+            className={`w-2 h-2 rounded-full shrink-0 ${connStatus === 'connected' ? 'bg-[#3fb950]' : connStatus === 'connecting' ? 'bg-[#8d909b] animate-pulse' : connStatus === 'reconnecting' ? 'bg-amber-400 animate-pulse' : 'bg-red-500'}`}
+            title={
+              connStatus === 'reconnecting'
+                ? `Status: ${connStatus} (attempt ${reconnectAttempt}/${WS_RECONNECT_MAX_ATTEMPTS})`
+                : `Status: ${connStatus}`
+            }
           />
         </div>
 
@@ -546,6 +693,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
           <div className="flex items-center gap-1">
             <button
               type="button"
+              data-testid="terminal-minimize"
               onClick={(e) => {
                 e.stopPropagation();
                 onMinimize();
@@ -557,6 +705,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
             </button>
             <button
               type="button"
+              data-testid="terminal-maximize"
               onClick={(e) => {
                 e.stopPropagation();
                 onToggleMaximize();
@@ -568,6 +717,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
             </button>
             <button
               type="button"
+              data-testid="terminal-close"
               onClick={(e) => {
                 e.stopPropagation();
                 onClose();
@@ -582,15 +732,42 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
       </div>
 
       {/* Terminal Canvas Body */}
-      <div
-        ref={containerRef}
-        onClick={() => {
-          onFocus();
-          termRef.current?.focus();
-        }}
-        data-testid="ghostty-terminal-container"
-        className="flex-1 bg-[#0a0d1f] overflow-hidden relative cursor-text select-text"
-      />
+      <div className="flex-1 relative overflow-hidden">
+        <div
+          ref={containerRef}
+          onClick={() => {
+            onFocus();
+            termRef.current?.focus();
+          }}
+          data-testid="ghostty-terminal-container"
+          className="h-full w-full bg-[#0a0d1f] overflow-hidden relative cursor-text select-text"
+        />
+        {engineError && (
+          <div
+            data-testid="ghostty-engine-error"
+            role="alert"
+            className="absolute inset-0 z-20 bg-[#0a0d1f] flex flex-col items-center justify-center gap-3 p-6 text-center"
+          >
+            <div className="font-mono text-xs font-bold text-[#ffb4ab]">
+              Terminal engine failed to start
+            </div>
+            <div className="font-mono text-[11px] text-[#c3c6d2] max-w-md break-words">
+              {engineError}
+            </div>
+            <button
+              type="button"
+              data-testid="ghostty-engine-retry"
+              onClick={() => {
+                setEngineError(null);
+                setMountNonce((n) => n + 1);
+              }}
+              className="px-3 py-1.5 rounded font-mono text-xs font-bold text-white bg-[#1f6feb] hover:bg-[#388bfd] cursor-pointer"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* Accessible screen-reader mirror */}
       {lastOutputText && (
@@ -603,12 +780,19 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
       <div className="h-7 bg-[#171a2d] px-3.5 flex items-center justify-between font-mono text-[10px] text-[#8d909b] border-t border-[#26293c] shrink-0">
         <div className="flex items-center gap-2">
           <span className="flex items-center gap-1">
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                connStatus === 'connected' ? 'bg-[#3fb950]' : 'bg-red-500'
-              }`}
-            />
-            <span className="capitalize">{connStatus}</span>
+            {connStatus === 'reconnecting' ? (
+              <RotateCcw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+            ) : connStatus === 'connected' ? (
+              <Wifi className="w-3.5 h-3.5 text-[#3fb950]" />
+            ) : connStatus === 'connecting' ? (
+              <Wifi className="w-3.5 h-3.5 text-[#8d909b] animate-pulse" />
+            ) : (
+              <WifiOff className="w-3.5 h-3.5 text-red-500" />
+            )}
+            <span className="capitalize">
+              {connStatus}
+              {connStatus === 'reconnecting' && ` (attempt ${reconnectAttempt}/${WS_RECONNECT_MAX_ATTEMPTS})`}
+            </span>
           </span>
           <span className="text-[#313447]">|</span>
           <span className="truncate max-w-[200px] text-[#c3c6d2]">

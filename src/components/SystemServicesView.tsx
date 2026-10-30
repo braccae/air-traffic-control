@@ -75,7 +75,7 @@ interface SystemdJournalResponse {
 }
 
 interface SystemServicesViewProps {
-  node: NodeItem;
+  node: NodeItem | null;
   onRefresh?: () => void;
   onOpenTask?: (taskId: string) => void;
 }
@@ -84,6 +84,15 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
   node,
   onRefresh,
 }) => {
+  if (!node) {
+    return (
+      <div className="flex flex-col gap-3 font-mono">
+        <div className="bg-[#171a2d] border border-[#26293c] rounded p-3">
+          <div className="text-[11px] text-[#8d909b]">No node selected</div>
+        </div>
+      </div>
+    );
+  }
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [services, setServices] = useState<ServiceUnitItem[]>([]);
@@ -101,6 +110,8 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
   const [journal, setJournal] = useState<SystemdJournalEntry[]>([]);
   const [journalError, setJournalError] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [userManagers, setUserManagers] = useState<Array<{ uid: string; name: string }>>([]);
+  const [selectedUid, setSelectedUid] = useState<string>('');
 
   // Unit list comes from the daemon's systemd routes, which read systemd's own
   // JSON (list-units + list-unit-files) for both the system and user managers.
@@ -110,8 +121,10 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
     setLoading(true);
     setError(null);
     try {
+      const scopeParam =
+        scopeFilter === 'system' ? 'system' : scopeFilter === 'user' ? `user${selectedUid ? `&uid=${encodeURIComponent(selectedUid)}` : ''}` : 'all';
       const sysdRes = await fetch(
-        `/api/nodes/${encodeURIComponent(node.id)}/systemd/units?scope=all`
+        `/api/nodes/${encodeURIComponent(node.id)}/systemd/units?scope=${scopeParam}`
       );
       if (sysdRes.ok) {
         const data: SystemdUnitListResponse = await sysdRes.json();
@@ -145,10 +158,35 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
     }
   };
 
+  // Per-user managers present on the host (drives the user selector).
+  useEffect(() => {
+    let cancelled = false;
+    if (!node?.id) {
+      setUserManagers([]);
+      setSelectedUid('');
+      return;
+    }
+    fetch(`/api/nodes/${encodeURIComponent(node.id)}/systemd/users`)
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (cancelled) return;
+        const users = Array.isArray(data?.users) ? data.users : [];
+        setUserManagers(users);
+        setSelectedUid(prev => (prev && users.some((u: any) => u.uid === prev) ? prev : users[0]?.uid ?? ''));
+      })
+      .catch(() => {
+        if (!cancelled) setUserManagers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [node?.id]);
+
   // Per-unit detail: systemd property state plus that unit's journal.
   const loadUnitDetail = async (unit: ServiceUnitItem) => {
     if (!node?.id) return;
     const scope = unit.scope === 'user' ? 'user' : 'system';
+    const uidParam = scope === 'user' && selectedUid ? `&uid=${encodeURIComponent(selectedUid)}` : '';
     setSelectedUnit(unit);
     setUnitState(null);
     setJournal([]);
@@ -158,10 +196,10 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
     try {
       const [stateRes, journalRes] = await Promise.all([
         fetch(
-          `/api/nodes/${encodeURIComponent(node.id)}/systemd/unit?unit=${encodeURIComponent(unit.unit)}&scope=${scope}`
+          `/api/nodes/${encodeURIComponent(node.id)}/systemd/unit?unit=${encodeURIComponent(unit.unit)}&scope=${scope}${uidParam}`
         ),
         fetch(
-          `/api/nodes/${encodeURIComponent(node.id)}/systemd/journal?unit=${encodeURIComponent(unit.unit)}&scope=${scope}&lines=200`
+          `/api/nodes/${encodeURIComponent(node.id)}/systemd/journal?unit=${encodeURIComponent(unit.unit)}&scope=${scope}${uidParam}&lines=200`
         ),
       ]);
 
@@ -189,7 +227,7 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
 
   useEffect(() => {
     fetchServices();
-  }, [node?.id]);
+  }, [node?.id, scopeFilter, selectedUid]);
 
   const handleServiceAction = async (
     unitName: string,
@@ -381,7 +419,7 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
         (s.description && s.description.toLowerCase().includes(q))
       );
     });
-  }, [services, statusFilter, searchQuery]);
+  }, [services, statusFilter, scopeFilter, searchQuery]);
 
   return (
     <div className="flex flex-col gap-3 font-mono">
@@ -562,6 +600,26 @@ export const SystemServicesView: React.FC<SystemServicesViewProps> = ({
 
         {/* Manager scope filter: system units vs the user manager's units */}
         <div className="flex items-center gap-1 shrink-0">
+          {scopeFilter === 'user' && (
+            <label className="flex items-center gap-1 mr-1 text-[9px] text-[#8d909b] uppercase font-bold">
+              user
+              <select
+                value={selectedUid}
+                onChange={e => setSelectedUid(e.target.value)}
+                data-testid="systemd-user-selector"
+                disabled={userManagers.length === 0}
+                className="bg-[#121528] border border-[#26293c] rounded px-1 py-0.5 text-[9px] font-mono text-[#dfe1fa] normal-case font-normal disabled:opacity-50"
+                title="Per-user systemd manager (/run/user/<uid>)"
+              >
+                {userManagers.length === 0 && <option value="">no user manager</option>}
+                {userManagers.map(u => (
+                  <option key={u.uid} value={u.uid}>
+                    {u.name} ({u.uid})
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {(['all', 'system', 'user'] as const).map(s => (
             <button
               key={s}

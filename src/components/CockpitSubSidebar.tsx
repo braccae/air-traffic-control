@@ -22,7 +22,7 @@ export interface NodePluginItem {
 }
 
 export interface CockpitSubSidebarProps {
-  node: NodeItem;
+  node: NodeItem | null;
   activeItem: string;
   onSelectItem: (item: string) => void;
   onEditNode?: () => void;
@@ -90,6 +90,7 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
     }
     let active = true;
     setLoading(true);
+    if (!node) return;
     fetch(`/api/nodes/${encodeURIComponent(node.id)}/plugins`)
       .then(res => res.json())
       .then((data: NodePluginItem[]) => {
@@ -110,7 +111,15 @@ export const CockpitSubSidebar: React.FC<CockpitSubSidebarProps> = ({
     return () => {
       active = false;
     };
-  }, [node.id, propsPlugins]);
+  }, [node?.id, propsPlugins]);
+
+  if (!node) {
+    return (
+      <aside className="flex flex-col gap-1 p-2 overflow-y-auto overflow-x-hidden font-mono text-xs bg-[#171a2d] border-r border-[#26293c]">
+        <div className="text-[#8d909b] text-[11px] py-4 text-center">No node selected</div>
+      </aside>
+    );
+  }
 
   const activePlugins = propsPlugins !== undefined ? propsPlugins : internalPlugins || [];
 

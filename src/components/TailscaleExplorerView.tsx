@@ -182,6 +182,7 @@ export async function stageTailscaleFeature(
 interface TailscaleExplorerViewProps {
   onOpenTerminalForHost?: (hostIp: string) => void;
   node?: NodeItem;
+  nodes?: NodeItem[];
 }
 
 const FEATURE_TOGGLES: Array<{
@@ -199,6 +200,7 @@ const FEATURE_TOGGLES: Array<{
 export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
   onOpenTerminalForHost,
   node,
+  nodes = [],
 }) => {
   const [peers, setPeers] = useState<PeerData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -336,7 +338,9 @@ export const TailscaleExplorerView: React.FC<TailscaleExplorerViewProps> = ({
         <div>
           <h2 className="text-lg font-bold text-white flex items-center gap-2">
             <Shield className="w-5 h-5 text-[#58a6ff]" />
-            {node ? `Tailscale Mesh — ${node.name}` : 'Tailscale Mesh Explorer (leo-banjo.ts.net)'}
+            {node
+              ? `Tailscale Mesh — ${node.name}`
+              : `Tailscale Mesh Explorer (${nodes.find(n => n.tailscaleHost)?.tailscaleHost?.split('.').slice(1).join('.') || 'unknown'})`}
           </h2>
           <p className="text-xs text-gray-400 font-mono mt-0.5">
             {node

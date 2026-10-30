@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import type { NodeItem } from '../types/index.ts';
 import { PluginActionForm, type ActionSpec } from '../plugins/kit/index.ts';
 
@@ -18,7 +18,7 @@ interface ProxmoxConsole {
   vncTicket?: string;
 }
 
-interface ProxmoxGuest {
+export interface ProxmoxGuest {
   vmid: number;
   name: string;
   node: string;
@@ -35,10 +35,12 @@ interface ProxmoxReadData {
   endpoint?: string;
   version?: string;
   release?: string;
+  /** PVE node this read was scoped to (guests of other members are excluded). */
+  node?: string;
   nodes?: Array<{ node: string; status: string; maxcpu: number; maxmem: number; mem: number }>;
   vms?: ProxmoxGuest[];
   containers?: ProxmoxGuest[];
-  summary?: { nodes: number; vms: number; containers: number; running: number };
+  summary?: { node?: string; nodes: number; vms: number; containers: number; running: number; excluded?: number; filteredTo?: string };
   errors?: string[];
 }
 
@@ -49,6 +51,235 @@ const fmtBytes = (b: number): string => {
 };
 
 const isRunning = (s: string) => s?.toLowerCase() === 'running';
+
+/** Stable identity for a guest row (`qemu-101`, `lxc-201`). */
+export const proxmoxGuestKey = (g: Pick<ProxmoxGuest, 'type' | 'vmid'>): string => `${g.type}-${g.vmid}`;
+
+/** Guest label, e.g. `VM 101 · web01`. */
+export const proxmoxGuestLabel = (g: ProxmoxGuest): string =>
+  `${g.type === 'lxc' ? 'CT' : 'VM'} ${g.vmid}${g.name ? ` · ${g.name}` : ''}`;
+
+/**
+ * Seeds an action's node/vmid/guestType options with the selected guest so the
+ * operator does not have to retype them. Values stay editable; nothing is
+ * submitted without an explicit click. Creation actions only inherit the node:
+ * reusing the selected guest's VMID would collide with the existing guest.
+ */
+export const actionSpecForGuest = (action: ActionSpec, guest: ProxmoxGuest): ActionSpec => {
+  const isCreate = /(^|_)create$/.test(action.name || '');
+  const options = (action.options || []).map(opt => {
+    if (opt.name === 'node' && guest.node) return { ...opt, default: guest.node };
+    if (isCreate) return opt;
+    if (opt.name === 'vmid' && guest.vmid > 0) return { ...opt, default: guest.vmid };
+    if (opt.name === 'guestType') return { ...opt, default: guest.type };
+    return opt;
+  });
+  return { ...action, options };
+};
+
+export interface ProxmoxActionToolbarProps {
+  actions: ActionSpec[];
+  selected: ProxmoxGuest | null;
+  onAction: (action: ActionSpec, guest: ProxmoxGuest) => void;
+  onClearSelection: () => void;
+}
+
+/**
+ * Guest action toolbar. It only exists once a guest is selected: with nothing
+ * selected it renders a hint instead of live Start/Shutdown/Resize buttons.
+ */
+export const ProxmoxActionToolbar: React.FC<ProxmoxActionToolbarProps> = ({
+  actions,
+  selected,
+  onAction,
+  onClearSelection,
+}) => {
+  if (!selected) {
+    return (
+      <div
+        data-testid="proxmox-selection-hint"
+        className="bg-[#171a2d] border border-dashed border-[#26293c] rounded px-3 py-2 text-[11px] text-[#8d909b] flex items-center gap-1.5"
+      >
+        <span className="material-symbols-outlined text-[14px]">ads_click</span>
+        <span>Select a guest to manage it</span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      role="toolbar"
+      aria-label={`Actions for ${proxmoxGuestLabel(selected)}`}
+      data-testid="proxmox-action-toolbar"
+      data-selected-vmid={selected.vmid}
+      className="bg-[#171a2d] border border-[#26293c] rounded px-3 py-2 flex items-center justify-between gap-3 flex-wrap"
+    >
+      <div className="flex items-center gap-1.5 text-[11px] text-[#8d909b]">
+        <span className="material-symbols-outlined text-[14px] text-[#8cd6cb]">check_circle</span>
+        <span>
+          Selected <span className="text-[#dfe1fa] font-semibold">{proxmoxGuestLabel(selected)}</span>
+          {selected.node ? <span className="text-[#8d909b]"> on {selected.node}</span> : null}
+        </span>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        {actions.map(act => (
+          <button
+            key={act.name}
+            type="button"
+            onClick={() => onAction(actionSpecForGuest(act, selected), selected)}
+            title={act.description || act.label || act.name}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] text-xs font-semibold transition-colors border border-[#434750]/40 cursor-pointer"
+          >
+            <span className="material-symbols-outlined text-[14px]">play_circle</span>
+            <span>{act.label || act.name}</span>
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={onClearSelection}
+          title="Clear selection"
+          className="flex items-center gap-1 px-2 py-1 rounded bg-[#26293c] hover:bg-[#35384c] text-[#8d909b] hover:text-[#dfe1fa] text-xs cursor-pointer"
+        >
+          <span className="material-symbols-outlined text-[14px]">close</span>
+          <span>Clear</span>
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export interface ProxmoxGuestsPanelProps {
+  data: ProxmoxReadData;
+  actions: ActionSpec[];
+  /** Optional pre-selected guest (`qemu-101`, `lxc-201`). */
+  initialSelectedKey?: string | null;
+  onAction?: (action: ActionSpec, guest: ProxmoxGuest) => void;
+  onOpenConsole?: (guest: ProxmoxGuest) => void;
+}
+
+/**
+ * Guest tables plus the selection-gated action toolbar. Selecting a row is the
+ * only way to reach lifecycle actions; the resolve below keeps the selection
+ * honest when a guest disappears between refreshes.
+ */
+export const ProxmoxGuestsPanel: React.FC<ProxmoxGuestsPanelProps> = ({
+  data,
+  actions,
+  initialSelectedKey = null,
+  onAction,
+  onOpenConsole,
+}) => {
+  const [selectedKey, setSelectedKey] = useState<string | null>(initialSelectedKey);
+
+  const guests = useMemo(
+    () => [...(data.vms || []), ...(data.containers || [])],
+    [data.vms, data.containers],
+  );
+  const selected = useMemo(
+    () => guests.find(g => proxmoxGuestKey(g) === selectedKey) || null,
+    [guests, selectedKey],
+  );
+
+  const toggleGuest = (guest: ProxmoxGuest) => {
+    const key = proxmoxGuestKey(guest);
+    setSelectedKey(prev => (prev === key ? null : key));
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      {guests.length > 0 && (
+        <ProxmoxActionToolbar
+          actions={actions}
+          selected={selected}
+          onAction={(action, guest) => onAction?.(action, guest)}
+          onClearSelection={() => setSelectedKey(null)}
+        />
+      )}
+
+      {[
+        { title: 'Virtual Machines (QEMU/KVM)', guests: data.vms || [] },
+        { title: 'LXC Containers', guests: data.containers || [] },
+      ].map(section => (
+        <div key={section.title} className="bg-[#171a2d] border border-[#26293c] rounded">
+          <div className="px-3 py-2 text-[11px] uppercase font-bold text-[#8d909b] border-b border-[#26293c]">{section.title}</div>
+          {section.guests.length === 0 ? (
+            <div className="px-3 py-3 text-xs text-[#8d909b]">No guests on this node.</div>
+          ) : (
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-[#8d909b] text-left">
+                  <th className="px-3 py-1.5">VMID</th>
+                  <th className="px-3 py-1.5">NAME</th>
+                  <th className="px-3 py-1.5">NODE</th>
+                  <th className="px-3 py-1.5">STATUS</th>
+                  <th className="px-3 py-1.5">CPU</th>
+                  <th className="px-3 py-1.5">MEM</th>
+                  <th className="px-3 py-1.5">DISK</th>
+                  <th className="px-3 py-1.5">CONSOLE</th>
+                </tr>
+              </thead>
+              <tbody>
+                {section.guests.map(g => {
+                  const key = proxmoxGuestKey(g);
+                  const isSelected = key === selectedKey;
+                  return (
+                    <tr
+                      key={key}
+                      role="row"
+                      aria-selected={isSelected}
+                      data-testid={`proxmox-guest-${key}`}
+                      data-selected={isSelected ? 'true' : 'false'}
+                      tabIndex={0}
+                      onClick={() => toggleGuest(g)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          toggleGuest(g);
+                        }
+                      }}
+                      title={`Select ${proxmoxGuestLabel(g)} to manage it`}
+                      className={`border-t border-[#26293c]/60 cursor-pointer outline-none ${
+                        isSelected
+                          ? 'bg-[#26293c] text-[#dfe1fa] border-l-2 border-l-[#b0c9ff]'
+                          : 'text-[#dfe1fa] hover:bg-[#1b1e31] border-l-2 border-l-transparent'
+                      }`}
+                    >
+                      <td className="px-3 py-1.5">{g.vmid}</td>
+                      <td className="px-3 py-1.5">{g.name}</td>
+                      <td className="px-3 py-1.5">{g.node}</td>
+                      <td className="px-3 py-1.5">
+                        <span className={isRunning(g.status) ? 'text-[#8cd6cb]' : 'text-[#8d909b]'}>{g.status}</span>
+                      </td>
+                      <td className="px-3 py-1.5">{g.maxCpu}</td>
+                      <td className="px-3 py-1.5">{fmtBytes(g.maxMem)}</td>
+                      <td className="px-3 py-1.5">{fmtBytes(g.maxDisk)}</td>
+                      <td className="px-3 py-1.5">
+                        {isRunning(g.status) ? (
+                          <button
+                            type="button"
+                            onClick={e => {
+                              e.stopPropagation();
+                              onOpenConsole?.(g);
+                            }}
+                            className="px-2 py-0.5 rounded bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff]"
+                          >
+                            Open
+                          </button>
+                        ) : (
+                          <span className="text-[#8d909b]">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
 
 export const ProxmoxView: React.FC<ProxmoxViewProps> = ({ node }) => {
   const [data, setData] = useState<ProxmoxReadData | null>(null);
@@ -169,30 +400,23 @@ export const ProxmoxView: React.FC<ProxmoxViewProps> = ({ node }) => {
 
   return (
     <div className="flex flex-col gap-3 font-mono">
-      <div className="bg-[#171a2d] border border-[#26293c] rounded p-4 flex items-center justify-between">
+      <div className="bg-[#171a2d] border border-[#26293c] rounded p-4 flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <span className="material-symbols-outlined text-[#b0c9ff] text-[22px]">cloud</span>
           <div>
             <h3 className="text-sm font-bold text-[#dfe1fa]">Proxmox VE {data?.version} <span className="text-[#8d909b] text-[11px]">({data?.release})</span></h3>
-            <span className="text-[11px] text-[#8d909b]">{data?.endpoint} · {summary?.nodes ?? 0} node(s) · {summary?.vms ?? 0} VM(s) · {summary?.containers ?? 0} CT(s)</span>
+            <span className="text-[11px] text-[#8d909b]">
+              {data?.endpoint}
+              {data?.node ? <> · node <span className="text-[#dfe1fa]">{data.node}</span></> : null}
+              {' '}· {summary?.vms ?? 0} VM(s) · {summary?.containers ?? 0} CT(s)
+              {' '}· {summary?.nodes ?? 0} cluster node(s)
+              {summary?.excluded ? <> · {summary.excluded} guest(s) on other cluster nodes hidden</> : null}
+            </span>
           </div>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {actions.map(act => (
-            <button
-              key={act.name}
-              type="button"
-              onClick={() => setActiveAction(act)}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#26293c] hover:bg-[#35384c] text-[#dfe1fa] text-xs font-semibold transition-colors border border-[#434750]/40 cursor-pointer"
-            >
-              <span className="material-symbols-outlined text-[14px]">play_circle</span>
-              <span>{act.label || act.name}</span>
-            </button>
-          ))}
-          <button type="button" onClick={fetchData} className="p-1 rounded bg-[#26293c] hover:bg-[#35384c] text-[#8d909b] hover:text-[#dfe1fa] cursor-pointer" title="Refresh">
-            <span className="material-symbols-outlined text-[16px]">refresh</span>
-          </button>
-        </div>
+        <button type="button" onClick={fetchData} className="p-1 rounded bg-[#26293c] hover:bg-[#35384c] text-[#8d909b] hover:text-[#dfe1fa] cursor-pointer" title="Refresh">
+          <span className="material-symbols-outlined text-[16px]">refresh</span>
+        </button>
       </div>
 
       {notice && (
@@ -211,56 +435,17 @@ export const ProxmoxView: React.FC<ProxmoxViewProps> = ({ node }) => {
         </div>
       )}
 
-      {[
-        { title: 'Virtual Machines (QEMU/KVM)', guests: data?.vms || [] },
-        { title: 'LXC Containers', guests: data?.containers || [] },
-      ].map(section => (
-        <div key={section.title} className="bg-[#171a2d] border border-[#26293c] rounded">
-          <div className="px-3 py-2 text-[11px] uppercase font-bold text-[#8d909b] border-b border-[#26293c]">{section.title}</div>
-          {section.guests.length === 0 ? (
-            <div className="px-3 py-3 text-xs text-[#8d909b]">No guests.</div>
-          ) : (
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-[#8d909b] text-left">
-                  <th className="px-3 py-1.5">VMID</th>
-                  <th className="px-3 py-1.5">NAME</th>
-                  <th className="px-3 py-1.5">NODE</th>
-                  <th className="px-3 py-1.5">STATUS</th>
-                  <th className="px-3 py-1.5">CPU</th>
-                  <th className="px-3 py-1.5">MEM</th>
-                  <th className="px-3 py-1.5">DISK</th>
-                  <th className="px-3 py-1.5">CONSOLE</th>
-                </tr>
-              </thead>
-              <tbody>
-                {section.guests.map(g => (
-                  <tr key={`${g.type}-${g.vmid}`} className="border-t border-[#26293c]/60 text-[#dfe1fa]">
-                    <td className="px-3 py-1.5">{g.vmid}</td>
-                    <td className="px-3 py-1.5">{g.name}</td>
-                    <td className="px-3 py-1.5">{g.node}</td>
-                    <td className="px-3 py-1.5">
-                      <span className={isRunning(g.status) ? 'text-[#8cd6cb]' : 'text-[#8d909b]'}>{g.status}</span>
-                    </td>
-                    <td className="px-3 py-1.5">{g.maxCpu}</td>
-                    <td className="px-3 py-1.5">{fmtBytes(g.maxMem)}</td>
-                    <td className="px-3 py-1.5">{fmtBytes(g.maxDisk)}</td>
-                    <td className="px-3 py-1.5">
-                      {isRunning(g.status) ? (
-                        <button type="button" onClick={() => setConsoleGuest(g)} className="px-2 py-0.5 rounded bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff]">
-                          Open
-                        </button>
-                      ) : (
-                        <span className="text-[#8d909b]">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      ))}
+      {data && (
+        <ProxmoxGuestsPanel
+          data={data}
+          actions={actions}
+          onAction={action => {
+            setNotice(null);
+            setActiveAction(action);
+          }}
+          onOpenConsole={guest => setConsoleGuest(guest)}
+        />
+      )}
 
       {consoleGuest && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setConsoleGuest(null)}>

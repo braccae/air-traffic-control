@@ -3,7 +3,7 @@ import type { NodeItem, ParsedLogEntry } from '../types/index.ts';
 import { parseLogLine, filterLogEntries } from '../utils/systemLogs.ts';
 
 interface SystemLogsViewProps {
-  node: NodeItem;
+  node: NodeItem | null;
   initialUnit?: string;
 }
 
@@ -31,6 +31,15 @@ const PRIORITIES = [
 const LINE_LIMITS = [50, 100, 250, 500, 1000];
 
 export const SystemLogsView: React.FC<SystemLogsViewProps> = ({ node, initialUnit }) => {
+  if (!node) {
+    return (
+      <div className="flex flex-col gap-3 font-mono">
+        <div className="bg-[#171a2d] border border-[#26293c] rounded p-3">
+          <div className="text-[11px] text-[#8d909b]">No node selected</div>
+        </div>
+      </div>
+    );
+  }
   // Filter states
   const [source, setSource] = useState<'journald' | 'dmesg' | 'audit' | 'sshd'>('journald');
   const [unit, setUnit] = useState<string>(initialUnit || '');

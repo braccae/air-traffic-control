@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToString } from 'react-dom/server';
-import { GlobalSettingsPanel } from './GlobalSettingsPanel.tsx';
+import { GlobalSettingsPanel, stripSecretValues } from './GlobalSettingsPanel.tsx';
 import type { GlobalSettingsPage } from '../types/index.ts';
 
 const atcTailscalePage: GlobalSettingsPage = {
@@ -47,6 +47,28 @@ test('secret fields render masked, never pre-filled with the stored value', () =
 
   // Non-secret fields still render their persisted value.
   assert.match(html, /value="air-traffic-control-tsnet"/);
+});
+
+test('stripSecretValues blanks secrets but preserves non-secret drafts', () => {
+  const values = stripSecretValues(atcTailscalePage.fields, atcTailscalePage.values);
+  assert.equal(values.authKey, '', 'a stored secret must not seed the input value');
+  assert.equal(values.hostname, 'air-traffic-control-tsnet');
+  assert.equal(values.ephemeral, true);
+});
+
+test('a plaintext secret returned by the daemon is never rendered into the input', () => {
+  const html = renderToString(
+    <GlobalSettingsPanel
+      page={{
+        ...atcTailscalePage,
+        values: { authKey: 'tskey-auth-should-not-render', hostname: 'atc-node' },
+      }}
+    />
+  );
+  assert.equal(html.includes('tskey-auth-should-not-render'), false);
+  // The input is still a controlled, typeable field: empty value at rest.
+  const passwordTag = html.slice(html.indexOf('type="password"'));
+  assert.match(passwordTag.slice(0, passwordTag.indexOf('>')), /value=""/);
 });
 
 test('a page with no stored secret says so instead of showing a mask', () => {

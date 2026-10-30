@@ -3,6 +3,8 @@ node_modules
 build/
 /dist/
 coverage/
+test-results/
+e2e-results/
 .DS_Store
 *.log
 .env*
@@ -15,6 +17,9 @@ data/ansible-venv/
 data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
+
+# Embedded tsnet node state and logs (tailnet identity, never commit).
+data/tsnet/
 
 # rclone remote secret-encryption key (generated if ATC_RCLONE_KEY is unset).
 data/.rclone-key
@@ -39,3 +44,7 @@ data/.rclone-key
 # the backend-go module dir. Never track the 45MB binary or real host inventory.
 /backend-go/daemon/
 /backend-go/data/
+# Runtime host-cache snapshot written when the daemon/tests run from the
+# hostcache package dir.
+/backend-go/pkg/hostcache/data/
+data/.vault-password

@@ -278,9 +278,144 @@ type FirewallRuleInput struct {
 	Comment     string `json:"comment,omitempty"`
 	Toport      string `json:"toport,omitempty"`
 	Toaddr      string `json:"toaddr,omitempty"`
+	// Plugin selects the firewall flavour that must receive the rule. Empty
+	// (or "firewalld") keeps the legacy firewalld behaviour; "nftables" and
+	// "iptables" compile raw netfilter commands instead.
+	Plugin string `json:"plugin,omitempty"`
+}
+
+// normalizeFirewallFlavour maps a plugin id or short name onto the supported
+// firewall flavour ("firewalld", "nftables", "iptables", "ufw").
+func normalizeFirewallFlavour(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if i := strings.LastIndex(n, "/"); i >= 0 {
+		n = n[i+1:]
+	}
+	switch n {
+	case "", "firewalld", "firewall-cmd":
+		return "firewalld"
+	case "nftables", "nft":
+		return "nftables"
+	case "iptables", "iptables-legacy":
+		return "iptables"
+	case "ufw":
+		return "ufw"
+	}
+	return n
+}
+
+// natForwardCommand builds an idempotent DNAT + FORWARD pair for raw netfilter
+// backends. Ranges are rejected because a single DNAT destination cannot map a
+// port range deterministically.
+func natForwardCommand(flavour string, rule FirewallRuleInput) (string, error) {
+	portVal := validatePortOrRange(rule.Port)
+	if !portVal.Valid {
+		return "", errors.New(portVal.Error)
+	}
+	toportVal := validatePortOrRange(rule.Toport)
+	if !toportVal.Valid {
+		return "", errors.New(toportVal.Error)
+	}
+	if strings.Contains(portVal.Normalized, "-") || strings.Contains(toportVal.Normalized, "-") {
+		return "", errors.New("port ranges are not supported for nftables/iptables DNAT; provide single ports")
+	}
+
+	protoVal := validateProtocol(rule.Protocol)
+	proto := "tcp"
+	if strings.TrimSpace(rule.Protocol) != "" {
+		if !protoVal.Valid {
+			return "", errors.New(protoVal.Error)
+		}
+		proto = protoVal.Normalized
+	}
+	if proto != "tcp" && proto != "udp" {
+		return "", fmt.Errorf("invalid protocol %q: DNAT forwarding supports tcp or udp", proto)
+	}
+
+	toaddr := strings.TrimSpace(rule.Toaddr)
+	if toaddr != "" {
+		addrVal := validateCidrOrIp(toaddr)
+		if !addrVal.Valid || strings.Contains(addrVal.Normalized, "/") {
+			return "", fmt.Errorf("invalid destination address %q: must be a single IP address", toaddr)
+		}
+		toaddr = addrVal.Normalized
+	}
+
+	if flavour == "nftables" {
+		table := "inet filter"
+		dnatRule := fmt.Sprintf("%s dport %s dnat to %s:%s", proto, portVal.Normalized, toaddr, toportVal.Normalized)
+		acceptRule := fmt.Sprintf("%s dport %s accept", proto, toportVal.Normalized)
+		if toaddr != "" {
+			acceptRule = fmt.Sprintf("ip daddr %s %s dport %s accept", toaddr, proto, toportVal.Normalized)
+		}
+		return strings.Join([]string{
+			fmt.Sprintf("sudo nft list table %s >/dev/null 2>&1 || sudo nft add table %s", table, table),
+			fmt.Sprintf("sudo nft list chain %s prerouting >/dev/null 2>&1 || sudo nft add chain %s prerouting '{ type nat hook prerouting priority dstnat; policy accept; }'", table, table),
+			fmt.Sprintf("sudo nft list chain %s forward >/dev/null 2>&1 || sudo nft add chain %s forward '{ type filter hook forward priority filter; policy accept; }'", table, table),
+			fmt.Sprintf("sudo nft list chain %s prerouting | grep -Fq '%s' || sudo nft add rule %s prerouting %s", table, dnatRule, table, dnatRule),
+			fmt.Sprintf("sudo nft list chain %s forward | grep -Fq '%s' || sudo nft add rule %s forward %s", table, acceptRule, table, acceptRule),
+		}, "; "), nil
+	}
+
+	// iptables: -t nat -A PREROUTING ... -j DNAT --to-destination <toaddr>:<toport>
+	// plus the matching FORWARD accept, guarded with -C for idempotency.
+	dnatRule := fmt.Sprintf("-p %s --dport %s -j DNAT --to-destination %s:%s", proto, portVal.Normalized, toaddr, toportVal.Normalized)
+	forwardRule := fmt.Sprintf("-p %s --dport %s -j ACCEPT", proto, toportVal.Normalized)
+	if toaddr != "" {
+		forwardRule = fmt.Sprintf("-p %s -d %s --dport %s -j ACCEPT", proto, toaddr, toportVal.Normalized)
+	}
+	return fmt.Sprintf(
+		"sudo iptables -t nat -C PREROUTING %s 2>/dev/null || sudo iptables -t nat -A PREROUTING %s; sudo iptables -C FORWARD %s 2>/dev/null || sudo iptables -A FORWARD %s",
+		dnatRule, dnatRule, forwardRule, forwardRule,
+	), nil
+}
+
+// BuildFirewallMasqueradeCommand builds the idempotent command that enables or
+// disables source NAT masquerade for the given firewall flavour.
+func BuildFirewallMasqueradeCommand(pluginName, zone string, enabled bool) (string, error) {
+	switch normalizeFirewallFlavour(pluginName) {
+	case "firewalld":
+		zoneVal := validateZone(zone)
+		action := "--add-masquerade"
+		if !enabled {
+			action = "--remove-masquerade"
+		}
+		return fmt.Sprintf("sudo firewall-cmd --permanent --zone=%s %s && sudo firewall-cmd --reload", zoneVal.Normalized, action), nil
+
+	case "nftables":
+		table := "inet filter"
+		cmds := []string{
+			fmt.Sprintf("sudo nft list table %s >/dev/null 2>&1 || sudo nft add table %s", table, table),
+			fmt.Sprintf("sudo nft list chain %s postrouting >/dev/null 2>&1 || sudo nft add chain %s postrouting '{ type nat hook postrouting priority srcnat; policy accept; }'", table, table),
+		}
+		if enabled {
+			cmds = append(cmds, fmt.Sprintf("sudo nft list chain %s postrouting | grep -qw masquerade || sudo nft add rule %s postrouting masquerade", table, table))
+		} else {
+			cmds = append(cmds, fmt.Sprintf("sudo nft -a list chain %s postrouting 2>/dev/null | awk 'index($0,\"masquerade\"){print $NF}' | while read -r h; do sudo nft delete rule %s postrouting handle \"$h\"; done || true", table, table))
+		}
+		return strings.Join(cmds, "; "), nil
+
+	case "iptables":
+		if enabled {
+			return "sudo iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -j MASQUERADE", nil
+		}
+		return "sudo iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null && sudo iptables -t nat -D POSTROUTING -j MASQUERADE || true", nil
+
+	case "ufw":
+		return "", errors.New("masquerade toggle is not implemented for ufw hosts")
+	}
+	return "", fmt.Errorf("unsupported firewall plugin %q for masquerade", pluginName)
 }
 
 func BuildFirewallAddCommand(rule FirewallRuleInput) (string, error) {
+	flavour := normalizeFirewallFlavour(rule.Plugin)
+	if flavour != "firewalld" {
+		if strings.TrimSpace(rule.Toport) != "" {
+			return natForwardCommand(flavour, rule)
+		}
+		return "", fmt.Errorf("firewall plugin %q has no direct command builder for this rule; stage it through POST /api/nodes/:id/plugins/firewall/%s/actions/allow_port", flavour, flavour)
+	}
+
 	zoneVal := validateZone(rule.Zone)
 	zone := zoneVal.Normalized
 	policy := strings.ToUpper(strings.TrimSpace(rule.Policy))

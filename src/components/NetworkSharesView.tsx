@@ -5,7 +5,7 @@ import { UserManagerModal } from './modals/UserManagerModal.tsx';
 import { filterSharesByScope, type ShareScope } from '../utils/sharesManager.ts';
 
 interface NetworkSharesViewProps {
-  node: NodeItem;
+  node: NodeItem | null;
   /**
    * Restricts the view to a single protocol. 'smb' shows only Samba shares and
    * SMB settings; 'nfs' shows only NFS exports; 'all' (default) is the combined view.
@@ -14,6 +14,15 @@ interface NetworkSharesViewProps {
 }
 
 export const NetworkSharesView: React.FC<NetworkSharesViewProps> = ({ node, scope = 'all' }) => {
+  if (!node) {
+    return (
+      <div className="flex flex-col gap-3 font-mono">
+        <div className="bg-[#171a2d] border border-[#26293c] rounded p-3">
+          <div className="text-[11px] text-[#8d909b]">No node selected</div>
+        </div>
+      </div>
+    );
+  }
   const [loading, setLoading] = useState(false);
   const [shares, setShares] = useState<Array<{
     id: string;

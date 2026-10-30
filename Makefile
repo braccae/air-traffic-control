@@ -3,7 +3,7 @@
 all: lint test go-test build
 
 dev:
-	npm run dev
+	just dev-split
 
 test:
 	npm test -- --run
@@ -12,7 +12,7 @@ go-test:
 	cd backend-go && go test -v ./...
 
 go-build:
-	cd backend-go && go build -o /tmp/air-traffic-control-daemon main.go && ln -sf /tmp/air-traffic-control-daemon /tmp/prox-orch-daemon
+	cd backend-go && go build -p 1 -o /tmp/air-traffic-control-daemon main.go && ln -sf /tmp/air-traffic-control-daemon /tmp/prox-orch-daemon
 
 lint:
 	npm run lint

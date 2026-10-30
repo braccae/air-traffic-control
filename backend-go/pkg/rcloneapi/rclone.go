@@ -19,8 +19,15 @@ import (
 )
 
 const (
-	VaultRefPrefix = "vault:"
+	SecretMaskPrefix = "••••••••"
+	VaultRefPrefix   = "vault:"
 )
+
+// MaskVaultValue renders the masked form "•••••••• (vault: <name>)".
+// Delegated to vaultapi so every package shares one implementation.
+func MaskVaultValue(name string) string {
+	return vaultapi.MaskVaultValue(name)
+}
 
 var (
 	remoteNameRegex  = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -229,13 +236,13 @@ func MaskRemoteConfig(configJSON, remoteName string) map[string]string {
 	for k, v := range parsed {
 		if strings.HasPrefix(v, VaultRefPrefix) {
 			varName := strings.TrimSpace(strings.TrimPrefix(v, VaultRefPrefix))
-			out[k] = vaultapi.MaskVaultValue(varName)
+			out[k] = MaskVaultValue(varName)
 		} else if strings.HasPrefix(v, "enc:v1:") {
 			varName := k
 			if remoteName != "" {
 				varName = BuildRcloneVaultVarName(remoteName, k)
 			}
-			out[k] = vaultapi.MaskVaultValue(varName)
+			out[k] = MaskVaultValue(varName)
 		} else {
 			out[k] = v
 		}

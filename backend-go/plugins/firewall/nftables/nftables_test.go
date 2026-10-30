@@ -119,6 +119,174 @@ func TestNftablesPlugin_ProbeReadAndCompile(t *testing.T) {
 	}
 }
 
+func TestNftablesPlugin_MasqueradeAndForwardPortCompile(t *testing.T) {
+	p, ok := plugin.Get("firewall/nftables")
+	if !ok {
+		t.Fatalf("firewall/nftables not registered")
+	}
+	actor := p.(plugin.Actor)
+	facts := plugin.HostFacts{NodeID: "node1", OSFamily: "linux"}
+
+	// Masquerade enable
+	enableTask, err := actor.Compile(facts, "masquerade", map[string]any{"enabled": true})
+	if err != nil {
+		t.Fatalf("compile masquerade enable failed: %v", err)
+	}
+	if len(enableTask.Steps) != 1 || enableTask.Steps[0].Module != "ansible.builtin.shell" {
+		t.Fatalf("unexpected masquerade enable steps: %+v", enableTask.Steps)
+	}
+	enableCmd, _ := enableTask.Steps[0].Params["cmd"].(string)
+	for _, want := range []string{
+		"nft list table inet filter >/dev/null 2>&1 || nft add table inet filter",
+		"nft add chain inet filter postrouting",
+		"type nat hook postrouting priority srcnat",
+		"grep -qw masquerade || nft add rule inet filter postrouting masquerade",
+	} {
+		if !strings.Contains(enableCmd, want) {
+			t.Errorf("masquerade enable command missing %q: %s", want, enableCmd)
+		}
+	}
+
+	// Masquerade disable
+	disableTask, err := actor.Compile(facts, "masquerade", map[string]any{"enabled": false})
+	if err != nil {
+		t.Fatalf("compile masquerade disable failed: %v", err)
+	}
+	disableCmd, _ := disableTask.Steps[0].Params["cmd"].(string)
+	if !strings.Contains(disableCmd, `index($0,"masquerade")`) || !strings.Contains(disableCmd, "nft delete rule inet filter postrouting handle") {
+		t.Errorf("masquerade disable command missing handle-based delete: %s", disableCmd)
+	}
+	if strings.Contains(disableCmd, "nft add rule inet filter postrouting masquerade") {
+		t.Errorf("masquerade disable command must not add a rule: %s", disableCmd)
+	}
+
+	// Forward port enable
+	fwdTask, err := actor.Compile(facts, "forward_port", map[string]any{
+		"port":   "8080",
+		"proto":  "tcp",
+		"toport": "80",
+		"toaddr": "10.0.0.5",
+	})
+	if err != nil {
+		t.Fatalf("compile forward_port failed: %v", err)
+	}
+	fwdCmd, _ := fwdTask.Steps[0].Params["cmd"].(string)
+	for _, want := range []string{
+		"nft add chain inet filter prerouting",
+		"type nat hook prerouting priority dstnat",
+		"nft list chain inet filter prerouting | grep -Fq 'tcp dport 8080 dnat to 10.0.0.5:80' || nft add rule inet filter prerouting tcp dport 8080 dnat to 10.0.0.5:80",
+		"nft add chain inet filter forward",
+		"nft list chain inet filter forward | grep -Fq 'ip daddr 10.0.0.5 tcp dport 80 accept' || nft add rule inet filter forward ip daddr 10.0.0.5 tcp dport 80 accept",
+	} {
+		if !strings.Contains(fwdCmd, want) {
+			t.Errorf("forward_port command missing %q: %s", want, fwdCmd)
+		}
+	}
+
+	// Forward port removal
+	rmTask, err := actor.Compile(facts, "forward_port", map[string]any{
+		"port":   "8080",
+		"proto":  "tcp",
+		"toport": "80",
+		"toaddr": "10.0.0.5",
+		"state":  "disabled",
+	})
+	if err != nil {
+		t.Fatalf("compile forward_port removal failed: %v", err)
+	}
+	rmCmd, _ := rmTask.Steps[0].Params["cmd"].(string)
+	if !strings.Contains(rmCmd, `index($0,"tcp dport 8080 dnat to 10.0.0.5:80")`) {
+		t.Errorf("forward_port removal missing prerouting match: %s", rmCmd)
+	}
+	if !strings.Contains(rmCmd, `index($0,"ip daddr 10.0.0.5 tcp dport 80 accept")`) {
+		t.Errorf("forward_port removal missing forward match: %s", rmCmd)
+	}
+
+	// Validation failures
+	if _, err := actor.Compile(facts, "forward_port", map[string]any{"port": "8080"}); err == nil {
+		t.Errorf("expected missing toport to fail compile")
+	}
+	if _, err := actor.Compile(facts, "forward_port", map[string]any{"port": "8000-8080", "toport": "80"}); err == nil {
+		t.Errorf("expected port range to fail compile")
+	}
+	if _, err := actor.Compile(facts, "forward_port", map[string]any{"port": "8080", "toport": "80", "toaddr": "not-an-ip"}); err == nil {
+		t.Errorf("expected invalid toaddr to fail compile")
+	}
+}
+
+func TestParseNftNAT(t *testing.T) {
+	raw := `table inet filter {
+	chain prerouting {
+		type nat hook prerouting priority dstnat; policy accept;
+		tcp dport 8080 dnat to 192.168.1.10:80
+		udp dport 5353 dnat to :53
+	}
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+		oifname "eth0" masquerade
+	}
+}`
+
+	masquerade, forwards := nftables.ParseNftNAT(raw)
+	if !masquerade {
+		t.Errorf("expected masquerade=true")
+	}
+	if len(forwards) != 2 {
+		t.Fatalf("expected 2 forward ports, got %d: %+v", len(forwards), forwards)
+	}
+	if forwards[0].Port != "8080" || forwards[0].Proto != "tcp" || forwards[0].ToAddr != "192.168.1.10" || forwards[0].ToPort != "80" {
+		t.Errorf("unexpected first forward: %+v", forwards[0])
+	}
+	if forwards[1].Proto != "udp" || forwards[1].Port != "5353" || forwards[1].ToAddr != "" || forwards[1].ToPort != "53" {
+		t.Errorf("unexpected second forward: %+v", forwards[1])
+	}
+
+	if m, f := nftables.ParseNftNAT("NO_NFT"); m || len(f) != 0 {
+		t.Errorf("expected empty NAT state for NO_NFT, got masquerade=%v forwards=%+v", m, f)
+	}
+}
+
+func TestNftablesPlugin_ReadReportsNATState(t *testing.T) {
+	p, ok := plugin.Get("firewall/nftables")
+	if !ok {
+		t.Fatalf("firewall/nftables not registered")
+	}
+	runner := &mockRunner{
+		responses: map[string]string{
+			"nft list ruleset": `table inet filter {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		tcp dport 22 accept comment "SSH"
+	}
+	chain prerouting {
+		type nat hook prerouting priority dstnat; policy accept;
+		tcp dport 8080 dnat to 192.168.1.10:80
+	}
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+		oifname "eth0" masquerade
+	}
+}`,
+		},
+	}
+
+	data, err := p.(plugin.Reader).Read(context.Background(), runner, plugin.HostFacts{OSFamily: "linux"})
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	m := data.(map[string]any)
+	if m["masquerade"] != true {
+		t.Errorf("expected masquerade=true, got %v", m["masquerade"])
+	}
+	fps, ok := m["forwardPorts"].([]nftables.NATForwardPort)
+	if !ok {
+		t.Fatalf("forwardPorts is not []nftables.NATForwardPort: %T", m["forwardPorts"])
+	}
+	if len(fps) != 1 || fps[0].Port != "8080" || fps[0].Proto != "tcp" || fps[0].ToAddr != "192.168.1.10" || fps[0].ToPort != "80" {
+		t.Errorf("unexpected forwardPorts: %+v", fps)
+	}
+}
+
 func TestNftablesPlugin_V2InterfacesAndCapabilities(t *testing.T) {
 	p, ok := plugin.Get("firewall/nftables")
 	if !ok {
@@ -145,14 +313,20 @@ func TestNftablesPlugin_V2InterfacesAndCapabilities(t *testing.T) {
 		t.Fatalf("expected firewall/nftables to implement newapi.ManagementPlugin")
 	}
 	actions := mgmt.ManagementActions()
-	if len(actions) != 2 {
-		t.Fatalf("expected 2 ManagementActions, got %d", len(actions))
+	if len(actions) != 4 {
+		t.Fatalf("expected 4 ManagementActions, got %d", len(actions))
 	}
 	if actions[0].Name != "allow_port" || actions[0].Category != newapi.ActionCategorySecurity {
 		t.Errorf("unexpected allow_port ManagementActionSpec: %+v", actions[0])
 	}
 	if actions[1].Name != "deny_port" || !actions[1].Dangerous || actions[1].ConfirmPrompt == "" {
 		t.Errorf("unexpected deny_port ManagementActionSpec: %+v", actions[1])
+	}
+	if actions[2].Name != "masquerade" || !actions[2].Idempotent || actions[2].Dangerous {
+		t.Errorf("unexpected masquerade ManagementActionSpec: %+v", actions[2])
+	}
+	if actions[3].Name != "forward_port" || !actions[3].Idempotent {
+		t.Errorf("unexpected forward_port ManagementActionSpec: %+v", actions[3])
 	}
 
 	facts := plugin.HostFacts{NodeID: "node1", OSFamily: "linux"}

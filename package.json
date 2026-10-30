@@ -4,12 +4,14 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --port=5173 --host=0.0.0.0",
+    "dev": "just dev-split",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "node --import tsx --test src/utils/orchestrator.test.ts src/utils/podmanViewModel.test.ts src/utils/navigationViewModel.test.ts src/components/DatacenterSettingsView.test.tsx src/utils/hostCacheDb.test.ts src/utils/ghosttyTerminal.test.ts src/utils/terminalSessionManager.test.ts src/utils/zfsParser.test.ts src/utils/systemLogs.test.ts src/utils/playbookManager.test.ts src/utils/playbookVisualModel.test.ts src/utils/ansibleModuleSpecs.test.ts src/components/PlaybookVisualEditor.test.tsx src/utils/varsParser.test.ts src/utils/themeManager.test.ts src/utils/windowManager.test.ts src/utils/hardwareProbe.test.ts src/utils/sharesManager.test.ts src/utils/firewallRules.test.ts src/utils/privilegeEscalation.test.ts src/utils/packageManager.test.ts src/utils/apiDefensive.test.ts src/utils/quickCommandsManager.test.ts src/utils/ansibleConfigManager.test.ts src/utils/ansibleQueueCompiler.test.ts src/utils/ansibleQueueRunner.test.ts src/utils/drivers/systemDriver.test.ts src/components/TaskQueueTab.test.ts src/utils/telemetryCollector.test.ts src/utils/ansibleVenvManager.test.ts src/utils/vaultManager.test.ts src/utils/rcloneManager.test.ts src/utils/inventoryManager.test.ts src/utils/tailscaleSync.test.ts src/components/modals/AddNodeModal.test.tsx src/components/CockpitSubSidebar.test.tsx src/plugins/kit/PluginKit.test.tsx src/components/HostModulesView.test.tsx src/components/DatacenterVarsPage.test.tsx src/components/DatacenterPlaybooksPage.test.tsx src/components/SystemServicesView.test.tsx src/utils/pluginIcons.test.ts src/utils/pluginLabels.test.ts src/components/PackageUpdatesView.test.tsx src/components/TailscaleExplorerView.test.tsx src/components/LxcContainers.test.ts src/components/ContextMenu.test.tsx src/utils/cronExpression.test.ts src/utils/cronScheduleStore.test.ts src/utils/cronScheduler.test.ts src/utils/cronScheduleExecutor.test.ts src/components/CronSchedulesPanel.test.tsx src/components/VaultAuditPanel.test.tsx src/components/NoSQLView.test.tsx src/components/SQLManagementView.test.tsx"
+    "test": "node --import tsx --test src/utils/orchestrator.test.ts src/utils/podmanViewModel.test.ts src/utils/navigationViewModel.test.ts src/components/GlobalSettingsPanel.test.tsx src/utils/globalSettingsManager.test.ts src/components/DatacenterSettingsView.test.tsx src/utils/ghosttyTerminal.test.ts src/utils/terminalSessionManager.test.ts src/utils/zfsParser.test.ts src/utils/systemLogs.test.ts src/utils/playbookManager.test.ts src/utils/playbookVisualModel.test.ts src/utils/ansibleModuleSpecs.test.ts src/components/PlaybookVisualEditor.test.tsx src/utils/varsParser.test.ts src/utils/themeManager.test.ts src/utils/catppuccinTheme.test.ts src/utils/windowManager.test.ts src/utils/hardwareProbe.test.ts src/utils/sharesManager.test.ts src/utils/firewallRules.test.ts src/utils/privilegeEscalation.test.ts src/utils/packageManager.test.ts src/utils/apiDefensive.test.ts src/utils/quickCommandsManager.test.ts src/utils/ansibleConfigManager.test.ts src/utils/ansibleQueueCompiler.test.ts src/utils/drivers/systemDriver.test.ts src/components/TaskQueueTab.test.ts src/utils/telemetryCollector.test.ts src/utils/ansibleVenvManager.test.ts src/components/modals/AddNodeModal.test.tsx src/components/CockpitSubSidebar.test.tsx src/plugins/kit/PluginKit.test.tsx src/components/HostModulesView.test.tsx src/components/DatacenterVarsPage.test.tsx src/components/DatacenterPlaybooksPage.test.tsx src/components/SystemServicesView.test.tsx src/utils/pluginIcons.test.ts src/utils/pluginLabels.test.ts src/components/PackageUpdatesView.test.tsx src/components/BootcDeploymentsCard.test.tsx src/components/TailscaleExplorerView.test.tsx src/components/LxcContainers.test.ts src/components/ContextMenu.test.tsx src/utils/cronExpression.test.ts src/components/CronSchedulesPanel.test.tsx src/components/VaultAuditPanel.test.tsx src/components/ProxmoxView.test.tsx src/components/NoSQLView.test.tsx src/components/SQLManagementView.test.tsx",
+    "dev:frontend": "vite --port=5173 --host=0.0.0.0",
+    "dev:backend": "cd backend-go && go run . -port 18090"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -24,6 +26,8 @@
     "vite": "^8.3.0"
   },
   "devDependencies": {
+    "@catppuccin/tailwindcss": "^1.0.0",
+    "@playwright/test": "^1.64.1",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

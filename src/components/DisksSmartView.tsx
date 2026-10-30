@@ -25,10 +25,19 @@ export interface DiskDeviceItem {
 }
 
 interface DisksSmartViewProps {
-  node: NodeItem;
+  node: NodeItem | null;
 }
 
 export const DisksSmartView: React.FC<DisksSmartViewProps> = ({ node }) => {
+  if (!node) {
+    return (
+      <div className="flex flex-col gap-3 font-mono">
+        <div className="bg-[#171a2d] border border-[#26293c] rounded p-3">
+          <div className="text-[11px] text-[#8d909b]">No node selected</div>
+        </div>
+      </div>
+    );
+  }
   const [disks, setDisks] = useState<DiskDeviceItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedDisk, setSelectedDisk] = useState<DiskDeviceItem | null>(null);

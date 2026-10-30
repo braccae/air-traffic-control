@@ -477,11 +477,17 @@ func GenerateTaskInventory(task Task) (string, error) {
 		hv.AnsibleConnection = "ssh"
 	}
 
-	if method := firstNonEmpty(conn.BecomeMethod, task.BecomeMethod); method != "" {
+	if method := firstNonEmpty(conn.BecomeMethod, task.BecomeMethod); method != "" && !strings.EqualFold(strings.TrimSpace(user), "root") {
 		hv.AnsibleBecomeMethod = qualifyBecomeMethod(method)
 	}
 	if proxyCmd := ResolveProxyCommand(task); proxyCmd != "" {
 		hv.AnsibleSSHCommonArgs = fmt.Sprintf(`-o ProxyCommand="%s"`, proxyCmd)
+	}
+	// run0 refuses to run without a TTY (community.general.run0 sets
+	// require_tty), and ansible only reports has_tty when -tt is in the ssh
+	// args. Pipelining is already disabled by that become plugin.
+	if strings.Contains(hv.AnsibleBecomeMethod, "run0") {
+		hv.AnsibleSSHCommonArgs = strings.TrimSpace(hv.AnsibleSSHCommonArgs + " -tt")
 	}
 	if len(conn.ExtraArgs) > 0 {
 		hv.AnsibleSSHExtraArgs = strings.Join(conn.ExtraArgs, " ")
@@ -532,6 +538,9 @@ func CompileOnTheFlyPlaybook(task Task) string {
 		port = 22
 	}
 	becomeMethod := qualifyBecomeMethod(firstNonEmpty(conn.BecomeMethod, task.BecomeMethod, "run0"))
+	// A root login needs no privilege escalation, and forcing become there only
+	// adds a TTY/polkit round-trip that can block a non-interactive run.
+	elevationNeeded := !strings.EqualFold(strings.TrimSpace(user), "root")
 
 	lines := []string{
 		"---",
@@ -557,7 +566,7 @@ func CompileOnTheFlyPlaybook(task Task) string {
 	}
 
 	become := "false"
-	if task.BecomeEnabled() {
+	if task.BecomeEnabled() && elevationNeeded {
 		become = "true"
 	}
 	lines = append(lines,
@@ -568,6 +577,9 @@ func CompileOnTheFlyPlaybook(task Task) string {
 
 	for _, step := range task.Steps {
 		lines = append(lines, "    - name: "+jsonQuote(step.Name))
+		if step.IgnoreErrors {
+			lines = append(lines, "      ignore_errors: true")
+		}
 		lines = append(lines, "      "+step.Module+":")
 		keys := make([]string, 0, len(step.Parameters))
 		for k := range step.Parameters {

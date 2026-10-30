@@ -154,11 +154,11 @@ describe('themeManager', () => {
           attributes[name] = value;
         },
         classList: {
-          add: (c: string) => {
-            classes.add(c);
+          add: (...tokens: string[]) => {
+            tokens.forEach((c) => classes.add(c));
           },
-          remove: (c: string) => {
-            classes.delete(c);
+          remove: (...tokens: string[]) => {
+            tokens.forEach((c) => classes.delete(c));
           },
         },
       };
@@ -180,11 +180,11 @@ describe('themeManager', () => {
           attributes[name] = value;
         },
         classList: {
-          add: (c: string) => {
-            classes.add(c);
+          add: (...tokens: string[]) => {
+            tokens.forEach((c) => classes.add(c));
           },
-          remove: (c: string) => {
-            classes.delete(c);
+          remove: (...tokens: string[]) => {
+            tokens.forEach((c) => classes.delete(c));
           },
         },
       };
@@ -206,11 +206,11 @@ describe('themeManager', () => {
           attributes[name] = value;
         },
         classList: {
-          add: (c: string) => {
-            classes.add(c);
+          add: (...tokens: string[]) => {
+            tokens.forEach((c) => classes.add(c));
           },
-          remove: (c: string) => {
-            classes.delete(c);
+          remove: (...tokens: string[]) => {
+            tokens.forEach((c) => classes.delete(c));
           },
         },
       };

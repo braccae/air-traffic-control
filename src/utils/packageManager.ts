@@ -20,6 +20,17 @@ export interface PackageCheckResult {
   lastChecked: string;
   rawOutput?: string;
   rebootRequired?: boolean;
+  /** bootc deployments, from `bootc status --format json`. */
+  currentImage?: string;
+  currentImageVersion?: string;
+  currentImageDigest?: string;
+  stagedImage?: string;
+  stagedImageVersion?: string;
+  stagedImageDigest?: string;
+  fallbackImage?: string;
+  fallbackImageVersion?: string;
+  fallbackImageDigest?: string;
+  error?: string;
 }
 
 /**

@@ -3,12 +3,23 @@ package bootc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"air-traffic-control/backend/pkg/plugin"
 	"air-traffic-control/backend/pkg/plugin/newapi"
 	"air-traffic-control/backend/pkg/plugin/settingsframework"
+)
+
+const (
+	// statusTimeout bounds `bootc status --json` so a hung container registry or
+	// SSH session cannot block a plugin read indefinitely. The frontend treats a
+	// timeout as an offline/unmonitored host instead of spinning forever.
+	statusTimeout = 30 * time.Second
+	// probeTimeout bounds verification that the bootc binary is runnable.
+	probeTimeout = 10 * time.Second
 )
 
 var (
@@ -159,12 +170,22 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		}, nil
 	}
 
-	cmd := "command -v bootc"
-	out, err := r.RunCommand(ctx, cmd)
+	// Bound the probe so a broken or hung bootc binary cannot block plugin
+	// discovery. Verifying `bootc --version` avoids reporting a false positive
+	// for a binary that exists but cannot execute.
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	cmd := "command -v bootc && bootc --version"
+	out, err := r.RunCommand(probeCtx, cmd)
 	if err != nil || strings.TrimSpace(out) == "" {
+		status := "UNAVAILABLE"
+		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+			status = "OFFLINE"
+		}
 		return plugin.Detection{
 			Detected: false,
-			Status:   "UNAVAILABLE",
+			Status:   status,
 			Error:    fmt.Sprintf("bootc probe failed: %v", err),
 		}, nil
 	}
@@ -247,10 +268,20 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}
 
 	// bootc status requires root; prefer passwordless sudo and fall back to a
-	// direct invocation when the runner already has privileges.
-	cmd := "sudo -n bootc status --json 2>/dev/null || bootc status --json"
-	out, err := r.RunCommand(ctx, cmd)
+	// direct invocation when the runner already has privileges. `--format json`
+	// is the current flag; `--json` keeps older bootc builds working.
+	cmd := "sudo -n bootc status --format json 2>/dev/null || bootc status --format json 2>/dev/null || sudo -n bootc status --json 2>/dev/null || bootc status --json"
+
+	// Hard bound on the external command. A hung registry, SSH session or
+	// container runtime must fail fast instead of spinning the UI forever.
+	statusCtx, cancel := context.WithTimeout(ctx, statusTimeout)
+	defer cancel()
+
+	out, err := r.RunCommand(statusCtx, cmd)
 	if err != nil {
+		if errors.Is(statusCtx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("bootc status timed out after %s: %w", statusTimeout, err)
+		}
 		return nil, fmt.Errorf("bootc status failed: %w", err)
 	}
 	raw := strings.TrimSpace(out)
@@ -268,16 +299,43 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 		return nil, fmt.Errorf("failed to parse bootc status JSON: %w", err)
 	}
 
+	currentImage := imageRefOf(doc.Status.Booted)
+	currentVersion := versionOf(doc.Status.Booted)
+	stagedImage := imageRefOf(doc.Status.Staged)
+	stagedVersion := versionOf(doc.Status.Staged)
+	fallbackImage := imageRefOf(doc.Status.Rollback)
+	fallbackVersion := versionOf(doc.Status.Rollback)
+
+	// Normalize the staged deployment into the same update shape emitted by the
+	// dnf/apt/apk readers so the package check endpoint can consume it directly.
+	updates := make([]map[string]any, 0)
+	if stagedImage != "none" {
+		updates = append(updates, map[string]any{
+			"name":           stagedImage,
+			"currentVersion": currentVersion,
+			"newVersion":     stagedVersion,
+			"repository":     "bootc-registry",
+			"security":       false,
+		})
+	}
+	rebootRequired := stagedImage != "none"
+
 	return map[string]any{
-		"currentImage":         imageRefOf(doc.Status.Booted),
-		"currentImageVersion":  versionOf(doc.Status.Booted),
+		"manager":              "bootc",
+		"isImmutable":          true,
+		"currentImage":         currentImage,
+		"currentImageVersion":  currentVersion,
 		"currentImageDigest":   digestOf(doc.Status.Booted),
-		"stagedImage":          imageRefOf(doc.Status.Staged),
-		"stagedImageVersion":   versionOf(doc.Status.Staged),
+		"stagedImage":          stagedImage,
+		"stagedImageVersion":   stagedVersion,
 		"stagedImageDigest":    digestOf(doc.Status.Staged),
-		"fallbackImage":        imageRefOf(doc.Status.Rollback),
-		"fallbackImageVersion": versionOf(doc.Status.Rollback),
+		"fallbackImage":        fallbackImage,
+		"fallbackImageVersion": fallbackVersion,
 		"fallbackImageDigest":  digestOf(doc.Status.Rollback),
+		"updates":              updates,
+		"updatesCount":         len(updates),
+		"rebootRequired":       rebootRequired,
+		"rawOutput":            raw,
 	}, nil
 }
 

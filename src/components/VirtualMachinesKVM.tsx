@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import type { VMItem, NodeItem } from '../types/index.ts';
 
 interface VirtualMachinesKVMProps {
-  node?: NodeItem;
+  node?: NodeItem | null;
   onOpenConsole?: (vmid: number) => void;
   onNewVM?: () => void;
 }

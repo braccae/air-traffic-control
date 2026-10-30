@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import type { NodeItem, PrivilegeStatus } from '../types/index.ts';
 
 interface NodeBreadcrumbBarProps {
-  node: NodeItem;
+  node: NodeItem | null;
   onOpenTerminal: () => void;
   onTriggerRestic: () => void;
   onReboot: (mode: string) => void;
@@ -26,7 +26,7 @@ export const NodeBreadcrumbBar: React.FC<NodeBreadcrumbBarProps> = ({
       <div className="flex items-center gap-2 min-w-0">
         <span className="material-symbols-outlined text-[#b0c9ff] text-[18px]">dns</span>
         <div className="flex items-center gap-1.5 font-mono text-xs truncate">
-          <span className="font-bold text-[#dfe1fa] text-sm tracking-wide">{node.name}</span>
+          <span className="font-bold text-[#dfe1fa] text-sm tracking-wide">{node?.name ?? 'No node selected'}</span>
         </div>
       </div>
 
@@ -98,6 +98,7 @@ export const NodeBreadcrumbBar: React.FC<NodeBreadcrumbBarProps> = ({
         {/* Terminal / SSH button */}
         <button
           type="button"
+          data-testid="open-terminal"
           onClick={onOpenTerminal}
           className="flex items-center gap-1 bg-[#26293c] hover:bg-[#35384c] text-[#b0c9ff] px-2.5 py-1 rounded font-mono text-xs border border-[#434750]/50 transition-colors cursor-pointer"
         >

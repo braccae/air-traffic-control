@@ -37,7 +37,10 @@ dev-split:
     fi
 
     echo ">> Go daemon on :${API_PORT}"
-    ( cd backend-go && exec go run . -port "${API_PORT}" ) &
+    # Always use the repo-root inventory DB. Resolving `data/hosts-cache.sqlite`
+    # relative to backend-go/ silently forks the inventory into
+    # backend-go/data/hosts-cache.sqlite.
+    ( cd backend-go && exec go run . -port "${API_PORT}" -db "../data/hosts-cache.sqlite" ) &
     GO_PID=$!
 
     for _ in $(seq 1 60); do
@@ -52,12 +55,12 @@ dev-split:
       sleep 0.25
     done
 
-    echo ">> Vite on :5173 — open http://localhost:5173"
-    npx vite
+    echo ">> Vite on :5173 — open http://192.168.8.211:5173"
+    npx vite --host 0.0.0.0
 
 # Go daemon only, on :18090 by default. Override with `just dev-backend 9090`.
 dev-backend port="18090":
-    cd backend-go && go run . -port {{port}}
+    cd backend-go && go run . -port {{port}} -db ../data/hosts-cache.sqlite
 
 # Vite dev server only. Requires the Go daemon on :18090 (see dev-split).
 dev-frontend:
@@ -72,6 +75,32 @@ test:
 
 go-test:
     cd backend-go && go test -v ./...
+
+# Containerized Playwright e2e. Start `just dev` in another terminal first.
+# The Playwright image ships its own browsers, so no browserless/CDP is used.
+# Usage: just e2e [playwright args...]   e.g. just e2e tests/e2e/add-node-modal.spec.ts
+e2e *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${CONTAINER_HOST:-}" || "${CONTAINER_HOST}" == "unix:///run/podman/podman.sock" ]]; then
+      if [[ -S "/run/user/$(id -u)/podman/podman.sock" ]]; then
+        export CONTAINER_HOST="unix:///run/user/$(id -u)/podman/podman.sock"
+      fi
+    fi
+    engine="${CONTAINER_ENGINE:-podman}"
+    image="${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v1.64.0-noble}"
+    userns=()
+    if [[ "$engine" == "podman" ]]; then
+      userns=(--userns=keep-id)
+    fi
+    mkdir -p e2e-results
+    "$engine" run --rm --network=host "${userns[@]}" \
+      -e HOME=/tmp \
+      -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+      -e ATC_WEB_URL="${ATC_WEB_URL:-http://127.0.0.1:5173}" \
+      -e ATC_API_URL="${ATC_API_URL:-http://127.0.0.1:18090}" \
+      -v "$PWD:/work:Z" -w /work \
+      "$image" npx playwright test --reporter=line --output=/work/e2e-results {{args}}
 
 lint:
     npm run lint

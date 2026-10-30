@@ -45,6 +45,10 @@ type Step struct {
 	Name       string         `json:"name"`
 	Module     string         `json:"module"`
 	Parameters map[string]any `json:"parameters"`
+	// IgnoreErrors marks a step whose failure is reported but must not halt the
+	// queue (e.g. "nftables.service is disabled, so this rule will not survive
+	// a reboot"). Ansible runs it with ignore_errors: true.
+	IgnoreErrors bool `json:"ignoreErrors,omitempty"`
 }
 
 // PlaybookRun describes an existing playbook file to run on the queue.

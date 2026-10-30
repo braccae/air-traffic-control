@@ -26,6 +26,10 @@ type Config struct {
 	Password    string // fallback password auth when no token is configured (secret)
 	Insecure    bool   // skip TLS verification (PVE ships a self-signed cert)
 	Timeout     time.Duration
+	// NodeName is the operator-declared Proxmox node name this endpoint
+	// represents (proxmox_node_name override). When empty the plugin resolves
+	// the name from the PVE API / SSH identity instead of guessing.
+	NodeName string
 
 	// HTTPClient is optional and only used by tests to inject a transport.
 	HTTPClient *http.Client
@@ -298,6 +302,39 @@ func (c *Client) Resources(ctx context.Context, resourceType string) ([]GuestRes
 	var out []GuestResource
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("proxmox /cluster/resources: %w", err)
+	}
+	return out, nil
+}
+
+// ClusterStatusEntry is one row from /cluster/status. Rows describe either the
+// cluster itself (type "cluster") or a cluster member (type "node"). PVE flags
+// the member that served the request with local=1, which is the authoritative
+// way to learn which node an API endpoint represents.
+type ClusterStatusEntry struct {
+	Type   string `json:"type"`
+	Name   string `json:"name"`
+	NodeID int    `json:"nodeid"`
+	IP     string `json:"ip"`
+	Online int    `json:"online"`
+	Local  int    `json:"local"`
+}
+
+// ClusterStatus returns the rows of /cluster/status.
+func (c *Client) ClusterStatus(ctx context.Context) ([]ClusterStatusEntry, error) {
+	var out []ClusterStatusEntry
+	if err := c.getData(ctx, "/cluster/status", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// NodeStatus returns /nodes/{node}/status for a node. Passing "localhost"
+// addresses the node that serves the API request.
+func (c *Client) NodeStatus(ctx context.Context, node string) (map[string]any, error) {
+	path := fmt.Sprintf("/nodes/%s/status", url.PathEscape(node))
+	var out map[string]any
+	if err := c.getData(ctx, path, &out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

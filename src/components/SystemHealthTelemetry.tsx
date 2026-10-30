@@ -78,7 +78,7 @@ export const SystemHealthTelemetry: React.FC<SystemHealthTelemetryProps> = ({
             <div className="w-full bg-[#26293c] h-1.5 rounded overflow-hidden mt-1.5">
               <div
                 className="bg-[#b0c9ff] h-full transition-all duration-500"
-                style={{ width: `${Math.max(2, telemetry.cpuUsage)}%` }}
+                style={{ width: `${Math.max(2, telemetry.cpuUsage ?? 0)}%` }}
               ></div>
             </div>
             <span className="font-mono text-[10px] text-[#8d909b] mt-1 truncate">
@@ -89,7 +89,7 @@ export const SystemHealthTelemetry: React.FC<SystemHealthTelemetryProps> = ({
           {/* Memory & Cache */}
           <div className="bg-[#1b1e31] p-2 rounded flex flex-col border border-[#26293c]/50">
             <span className="font-mono text-[10px] text-[#8d909b]">
-              MEMORY &amp; {telemetry.arcCacheGiB > 0 ? 'ZFS ARC' : 'BUFF/CACHE'}
+              MEMORY &amp; {(telemetry.arcCacheGiB ?? 0) > 0 ? 'ZFS ARC' : 'BUFF/CACHE'}
             </span>
             <span className="font-mono text-xs text-[#dfe1fa] font-bold mt-0.5">
               {telemetry.memoryUsedGiB}{' '}
@@ -100,17 +100,17 @@ export const SystemHealthTelemetry: React.FC<SystemHealthTelemetryProps> = ({
             <div className="w-full bg-[#26293c] h-1.5 rounded overflow-hidden mt-1.5 flex">
               <div
                 className="bg-[#d9b9ff] h-full"
-                style={{ width: `${Math.min(100, Math.round((telemetry.memoryUsedGiB / Math.max(1, telemetry.memoryTotalGiB)) * 100))}%` }}
+                style={{ width: `${Math.min(100, Math.round(((telemetry.memoryUsedGiB ?? 0) / Math.max(1, telemetry.memoryTotalGiB ?? 1)) * 100))}%` }}
                 title={`Used Memory: ${telemetry.memoryUsedGiB} GiB`}
               ></div>
               <div
                 className="bg-[#8cd6cb] h-full"
-                style={{ width: `${Math.min(40, Math.round(((telemetry.arcCacheGiB || telemetry.buffCacheGiB || 4) / Math.max(1, telemetry.memoryTotalGiB)) * 100))}%` }}
-                title={telemetry.arcCacheGiB > 0 ? `ZFS ARC: ${telemetry.arcCacheGiB} GiB` : `Page Cache: ${telemetry.buffCacheGiB || 'N/A'} GiB`}
+                style={{ width: `${Math.min(40, Math.round((((telemetry.arcCacheGiB ?? telemetry.buffCacheGiB ?? 4) as number) / Math.max(1, telemetry.memoryTotalGiB ?? 1)) * 100))}%` }}
+                title={(telemetry.arcCacheGiB ?? 0) > 0 ? `ZFS ARC: ${telemetry.arcCacheGiB} GiB` : `Page Cache: ${telemetry.buffCacheGiB || 'N/A'} GiB`}
               ></div>
             </div>
             <span className="font-mono text-[10px] text-[#d9b9ff] mt-1 truncate">
-              {telemetry.arcCacheGiB > 0
+              {(telemetry.arcCacheGiB ?? 0) > 0
                 ? `ZFS ARC: ${telemetry.arcCacheGiB} GiB`
                 : `Buff/Cache: ${telemetry.buffCacheGiB ? telemetry.buffCacheGiB + ' GiB' : 'Page Cache'} (ZFS: N/A)`}
             </span>
@@ -119,10 +119,10 @@ export const SystemHealthTelemetry: React.FC<SystemHealthTelemetryProps> = ({
           {/* Storage / ZFS Pool */}
           <div className="bg-[#1b1e31] p-2 rounded flex flex-col border border-[#26293c]/50">
             <span className="font-mono text-[10px] text-[#8d909b]">
-              STORAGE: {telemetry.zfsTankTotalTb > 0 ? 'ZFS POOL' : 'FILESYSTEM'}
+              STORAGE: {(telemetry.zfsTankTotalTb ?? 0) > 0 ? 'ZFS POOL' : 'FILESYSTEM'}
             </span>
             <span className="font-mono text-xs text-[#dfe1fa] font-bold mt-0.5 truncate">
-              {telemetry.zfsTankTotalTb > 0 ? (
+              {(telemetry.zfsTankTotalTb ?? 0) > 0 ? (
                 <>
                   {telemetry.zfsTankUsedTb}{' '}
                   <span className="text-[#8d909b] text-[10px] font-normal">
@@ -137,14 +137,14 @@ export const SystemHealthTelemetry: React.FC<SystemHealthTelemetryProps> = ({
               <div
                 className="bg-[#8cd6cb] h-full"
                 style={{
-                  width: telemetry.zfsTankTotalTb > 0
-                    ? `${Math.min(100, Math.round((telemetry.zfsTankUsedTb / Math.max(0.1, telemetry.zfsTankTotalTb)) * 100))}%`
+                  width: (telemetry.zfsTankTotalTb ?? 0) > 0
+                    ? `${Math.min(100, Math.round(((telemetry.zfsTankUsedTb ?? 0) / Math.max(0.1, telemetry.zfsTankTotalTb ?? 0.1)) * 100))}%`
                     : '45%',
                 }}
               ></div>
             </div>
             <span className="font-mono text-[10px] text-[#8cd6cb] mt-1 truncate">
-              {telemetry.zfsTankTotalTb > 0
+              {(telemetry.zfsTankTotalTb ?? 0) > 0
                 ? `${telemetry.zfsRaidType} • ${telemetry.zfsScrubStatus}`
                 : telemetry.zfsScrubStatus || 'Root FS nominal'}
             </span>

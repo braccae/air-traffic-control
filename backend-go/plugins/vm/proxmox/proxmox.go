@@ -2,6 +2,7 @@ package proxmox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
@@ -30,12 +31,12 @@ const (
 
 // Settings field keys for the Proxmox VE datacenter settings page.
 const (
-	FieldDefaultAPIPort       = "defaultApiPort"
-	FieldDefaultAPIUser       = "defaultApiUser"
-	FieldDefaultStorage       = "defaultStorage"
-	FieldDefaultBridge        = "defaultBridge"
-	FieldTLSInsecure          = "tlsInsecure"
-	FieldAPITokenSecretVault  = "apiTokenSecretVaultVar"
+	FieldDefaultAPIPort      = "defaultApiPort"
+	FieldDefaultAPIUser      = "defaultApiUser"
+	FieldDefaultStorage      = "defaultStorage"
+	FieldDefaultBridge       = "defaultBridge"
+	FieldTLSInsecure         = "tlsInsecure"
+	FieldAPITokenSecretVault = "apiTokenSecretVaultVar"
 )
 
 var (
@@ -108,7 +109,7 @@ func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
 		WithCategory(string(meta.Kind)).
 		WithScope(newapi.SettingsScopeDatacenter).
 		WithOrder(meta.Order).
-		WithDescription("Datacenter-wide Proxmox VE API connectivity, TLS verification, storage pool, and network bridge defaults.").
+		WithDescription("Datacenter-wide Proxmox VE API connectivity, TLS verification, storage pool, and network bridge defaults. Per-host override: set proxmox_node_name when the PVE node a host represents cannot be detected from the API or the host identity.").
 		IntField(
 			FieldDefaultAPIPort,
 			"Default API Port",
@@ -220,6 +221,10 @@ const (
 	ovTokenSecret = "proxmox_api_token_secret"
 	ovPassword    = "proxmox_api_password"
 	ovInsecure    = "proxmox_tls_insecure"
+	// ovNodeName declares which PVE node an inventory host represents. It is
+	// only needed when the node name cannot be derived from the API or the
+	// host's own identity.
+	ovNodeName = "proxmox_node_name"
 )
 
 // configFromFacts derives the Proxmox API connection config from host facts.
@@ -254,6 +259,7 @@ func configFromFacts(h plugin.HostFacts) Config {
 		TokenSecret: ov[ovTokenSecret],
 		Password:    ov[ovPassword],
 		Insecure:    insecure,
+		NodeName:    firstNonEmpty(ov[ovNodeName], ov["node_name"]),
 	}
 }
 
@@ -265,6 +271,35 @@ func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// parsePveshVersion extracts a version string from pvesh JSON/text output.
+func parsePveshVersion(out string) string {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return ""
+	}
+	// Try JSON first.
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(out), &obj); err == nil {
+		if v, ok := obj["version"].(string); ok && v != "" {
+			return v
+		}
+		if v, ok := obj["version"].(float64); ok {
+			return fmt.Sprintf("%v", v)
+		}
+	}
+	// Fall back to a "version" token in plain text.
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(line), "version") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				return parts[1]
+			}
 		}
 	}
 	return ""
@@ -283,6 +318,23 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 	c := NewClient(cfg)
 	ver, err := c.Version(ctx)
 	if err != nil {
+		// Fall back to an SSH-based probe using the node's existing SSH
+		// credential (pvesh ships with every Proxmox host). This lets the
+		// plugin work out of the box for hosts discovered via a tag chunk,
+		// which carry an SSH key but no Proxmox API token.
+		if r != nil {
+			if out, sshErr := r.RunCommand(ctx, "pvesh get /version --output-format json 2>/dev/null || pvesh get /version 2>/dev/null"); sshErr == nil && strings.TrimSpace(out) != "" {
+				version := "unknown"
+				if v := parsePveshVersion(out); v != "" {
+					version = v
+				}
+				return plugin.Detection{
+					Detected: true,
+					Status:   fmt.Sprintf("PVE %s (via SSH)", version),
+					Details:  fmt.Sprintf("Proxmox VE %s at %s (SSH/pvesh fallback)", version, cfg.Host),
+				}, nil
+			}
+		}
 		return plugin.Detection{
 			Detected: false,
 			Status:   "UNREACHABLE",
@@ -318,8 +370,10 @@ type guestSummary struct {
 	Console map[string]any `json:"console,omitempty"`
 }
 
-// Read lists cluster nodes and every VM / LXC container, plus console
-// connection details for running guests.
+// Read lists the cluster nodes plus the VMs / LXC containers that live on the
+// node this host represents, plus console connection details for running
+// guests. Guests hosted by other cluster members are excluded so the view
+// reflects the node the operator opened.
 func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) (any, error) {
 	cfg := configFromFacts(h)
 	if cfg.Host == "" {
@@ -331,6 +385,10 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 
 	ver, err := c.Version(ctx)
 	if err != nil {
+		// SSH fallback when no API credentials are configured.
+		if r != nil && strings.Contains(err.Error(), "authentication is not configured") {
+			return readViaSSH(ctx, r, cfg)
+		}
 		return nil, err // unreachable / auth failure must surface loudly
 	}
 
@@ -339,7 +397,21 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 		return nil, err
 	}
 
-	resources, err := c.Resources(ctx, "vm")
+	nodeName, err := resolveNodeName(ctx, c, r, cfg, nodes)
+	if err != nil {
+		return nil, err
+	}
+	if len(nodes) > 0 && !nodeInCluster(nodeName, nodes) {
+		return nil, fmt.Errorf("proxmox node %q (resolved for %s) is not a member of this cluster (%s); set the proxmox_node_name override to the correct node",
+			nodeName, cfg.Host, nodeList(nodes))
+	}
+
+	allGuests, err := c.Resources(ctx, "vm")
+	if err != nil {
+		return nil, err
+	}
+
+	resources, err := filterGuestsForNode(allGuests, nodeName)
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +421,7 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 		g := guestSummary{
 			VMID:    res.VMID,
 			Name:    res.Name,
-			Node:    res.Node,
+			Node:    nodeName,
 			Type:    res.Type,
 			Status:  res.Status,
 			MaxMem:  res.MaxMem,
@@ -384,16 +456,20 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 	}
 
 	summary := map[string]any{
+		"node":       nodeName,
 		"nodes":      len(nodes),
 		"vms":        len(vms),
 		"containers": len(containers),
 		"running":    countRunning(vms) + countRunning(containers),
+		"excluded":   len(allGuests) - len(resources),
+		"filteredTo": nodeName,
 	}
 
 	return map[string]any{
 		"endpoint":   fmt.Sprintf("%s://%s:%d", cfg.scheme(), cfg.Host, cfg.Port),
 		"version":    strAny(ver["version"]),
 		"release":    strAny(ver["release"]),
+		"node":       nodeName,
 		"nodes":      nodes,
 		"vms":        vms,
 		"containers": containers,

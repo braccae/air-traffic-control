@@ -17,10 +17,19 @@ type mockRunner struct {
 }
 
 func (m *mockRunner) RunCommand(ctx context.Context, cmd string) (string, error) {
-	for pattern, resp := range m.responses {
-		if strings.Contains(cmd, pattern) {
-			return resp, nil
+	// Map iteration order is random, and "ufw status" is a substring of
+	// "ufw status verbose". Prefer the longest matching command so the more
+	// specific fixture always wins.
+	best := ""
+	bestLen := -1
+	for pattern := range m.responses {
+		if strings.Contains(cmd, pattern) && len(pattern) > bestLen {
+			best = pattern
+			bestLen = len(pattern)
 		}
+	}
+	if bestLen >= 0 {
+		return m.responses[best], nil
 	}
 	return "", nil
 }

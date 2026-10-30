@@ -3,11 +3,20 @@ import type { NodeItem } from '../types/index.ts';
 import { ConnectNetworkModal } from './modals/ConnectNetworkModal.tsx';
 
 interface NetworkInterfacesViewProps {
-  node: NodeItem;
+  node: NodeItem | null;
   onRefresh?: () => void;
 }
 
 export const NetworkInterfacesView: React.FC<NetworkInterfacesViewProps> = ({ node }) => {
+  if (!node) {
+    return (
+      <div className="flex flex-col gap-3 font-mono">
+        <div className="bg-[#171a2d] border border-[#26293c] rounded p-3">
+          <div className="text-[11px] text-[#8d909b]">No node selected</div>
+        </div>
+      </div>
+    );
+  }
   const [interfaces, setInterfaces] = useState<Array<{
     name: string;
     type: string;

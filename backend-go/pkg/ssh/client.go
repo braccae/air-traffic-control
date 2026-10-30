@@ -8,21 +8,32 @@ import (
 	"os"
 	"time"
 
+	"air-traffic-control/backend/pkg/types"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-	"air-traffic-control/backend/pkg/types"
 )
 
-// Config represents credentials for SSH connections
+// Config represents credentials for SSH connections.
+//
+// VaultSecretID names an Ansible Vault variable stored in the coordinator's
+// vault_variables table. When set, the pooled transport decrypts it at connect
+// time (see pkg/secrets) and uses it ahead of ssh-agent. Literal Password and
+// PrivateKey remain supported for callers that already hold credentials.
 type Config struct {
-	Host       string
-	Port       int
-	User       string
-	Password   string
-	PrivateKey []byte
-	Passphrase string
-	NodeType   types.NodeType
-	Timeout    time.Duration
+	Host          string
+	Port          int
+	User          string
+	Password      string
+	PrivateKey    []byte
+	Passphrase    string
+	VaultSecretID string
+	AuthMethod    string
+	NodeType      types.NodeType
+	Timeout       time.Duration
+	// Dialer optionally transports the underlying TCP connection (for example
+	// over ATC's own tsnet node when the host has no local tailscaled route).
+	// When nil a direct TCP dial is used.
+	Dialer func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 // ClientManager handles pooling and lifecycle of SSH sessions

@@ -206,7 +206,7 @@ func TestHub_TerminalPTYLifecycle(t *testing.T) {
 	initReq := map[string]any{
 		"type":      "terminal_init",
 		"sessionId": sessionID,
-		"nodeId":    "dev-pc",
+		"nodeId":    "localhost",
 		"cols":      80,
 		"rows":      24,
 	}
@@ -366,5 +366,87 @@ func TestHub_BroadcastStreams(t *testing.T) {
 	}
 	if !receivedConnections {
 		t.Errorf("expected connections_update broadcast")
+	}
+}
+
+func TestHub_Metrics(t *testing.T) {
+	hub := websocket.NewHub()
+	go hub.Run()
+
+	// Initial metrics should be zero
+	metrics := hub.GetMetrics()
+	if metrics["total_connections"].(int64) != 0 {
+		t.Errorf("expected total_connections=0, got %v", metrics["total_connections"])
+	}
+	if metrics["active_connections"].(int64) != 0 {
+		t.Errorf("expected active_connections=0, got %v", metrics["active_connections"])
+	}
+	if metrics["total_pty_sessions"].(int64) != 0 {
+		t.Errorf("expected total_pty_sessions=0, got %v", metrics["total_pty_sessions"])
+	}
+	if metrics["active_pty_sessions"].(int64) != 0 {
+		t.Errorf("expected active_pty_sessions=0, got %v", metrics["active_pty_sessions"])
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hub.ServeWS(w, r)
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	header := http.Header{}
+	header.Set("Origin", "http://localhost:5173")
+
+	ws, _, err := gorilla.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatalf("failed to dial websocket: %v", err)
+	}
+	defer ws.Close()
+
+	// Wait for connection to register
+	time.Sleep(50 * time.Millisecond)
+
+	metrics = hub.GetMetrics()
+	if metrics["total_connections"].(int64) != 1 {
+		t.Errorf("expected total_connections=1 after connect, got %v", metrics["total_connections"])
+	}
+	if metrics["active_connections"].(int64) != 1 {
+		t.Errorf("expected active_connections=1 after connect, got %v", metrics["active_connections"])
+	}
+
+	// Send terminal_init to spawn PTY
+	sessionID := "metrics-test-session"
+	initReq := map[string]any{
+		"type":      "terminal_init",
+		"sessionId": sessionID,
+		"nodeId":    "localhost",
+		"cols":      80,
+		"rows":      24,
+	}
+	if err := ws.WriteJSON(initReq); err != nil {
+		t.Fatalf("failed to send terminal_init: %v", err)
+	}
+
+	// Wait for PTY to spawn
+	time.Sleep(100 * time.Millisecond)
+
+	metrics = hub.GetMetrics()
+	if metrics["total_pty_sessions"].(int64) != 1 {
+		t.Errorf("expected total_pty_sessions=1 after PTY spawn, got %v", metrics["total_pty_sessions"])
+	}
+	if metrics["active_pty_sessions"].(int64) != 1 {
+		t.Errorf("expected active_pty_sessions=1 after PTY spawn, got %v", metrics["active_pty_sessions"])
+	}
+
+	// Close websocket
+	ws.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	metrics = hub.GetMetrics()
+	if metrics["active_connections"].(int64) != 0 {
+		t.Errorf("expected active_connections=0 after disconnect, got %v", metrics["active_connections"])
+	}
+	if metrics["active_pty_sessions"].(int64) != 0 {
+		t.Errorf("expected active_pty_sessions=0 after disconnect, got %v", metrics["active_pty_sessions"])
 	}
 }

@@ -154,14 +154,36 @@ func (a *API) handleVariables(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		var req struct {
-			Name     string `json:"name"`
-			Value    string `json:"value"`
-			Password string `json:"password"`
+			Name         string `json:"name"`
+			VarName      string `json:"varName"`
+			VariableName string `json:"variableName"`
+			Key          string `json:"key"`
+			Value        string `json:"value"`
+			Plaintext    string `json:"plaintext"`
+			Payload      string `json:"payload"`
+			Password     string `json:"password"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "Invalid request payload"})
 			return
 		}
+		if req.Name == "" {
+			if req.VarName != "" {
+				req.Name = req.VarName
+			} else if req.VariableName != "" {
+				req.Name = req.VariableName
+			} else if req.Key != "" {
+				req.Name = req.Key
+			}
+		}
+		if req.Value == "" {
+			if req.Plaintext != "" {
+				req.Value = req.Plaintext
+			} else if req.Payload != "" {
+				req.Value = req.Payload
+			}
+		}
+		req.Name = strings.TrimSpace(req.Name)
 		if !IsValidVaultVariableName(req.Name) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{
 				"success": false,
@@ -195,11 +217,22 @@ func (a *API) handleVariables(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		stored, found, _ := a.store.GetVaultVariable(req.Name)
-		if !found {
-			stored = hostcache.VaultVariable{Name: req.Name, CreatedAt: time.Now().UnixMilli(), UpdatedAt: time.Now().UnixMilli()}
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{"success": true, "variable": toVariableView(stored)})
+			// Record audit event for insert
+			a.recordVaultAuditEvent(hostcache.VaultAuditEvent{
+				ID:             generateEventID(),
+				Timestamp:      time.Now().UnixMilli(),
+				VariableName:   req.Name,
+				Actor:          a.defaultActor,
+				Host:           a.defaultHost,
+				Action:         "POST /api/vault/variables",
+				PasswordSource: "inline",
+			})
+
+			stored, found, _ := a.store.GetVaultVariable(req.Name)
+			if !found {
+				stored = hostcache.VaultVariable{Name: req.Name, CreatedAt: time.Now().UnixMilli(), UpdatedAt: time.Now().UnixMilli()}
+			}
+			writeJSON(w, http.StatusCreated, map[string]any{"success": true, "variable": toVariableView(stored)})
 
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
@@ -289,6 +322,17 @@ func (a *API) handleVariableSubtree(w http.ResponseWriter, r *http.Request) {
 			_, _ = a.store.DeleteVaultVariable(currentName)
 		}
 
+		// Record audit event for update/rename
+		a.recordVaultAuditEvent(hostcache.VaultAuditEvent{
+			ID:             generateEventID(),
+			Timestamp:      time.Now().UnixMilli(),
+			VariableName:   targetName,
+			Actor:          a.defaultActor,
+			Host:           a.defaultHost,
+			Action:         "PUT /api/vault/variables/" + currentName,
+			PasswordSource: "inline",
+		})
+
 		stored, found, _ := a.store.GetVaultVariable(targetName)
 		if !found {
 			stored = hostcache.VaultVariable{Name: targetName, CreatedAt: time.Now().UnixMilli(), UpdatedAt: time.Now().UnixMilli()}
@@ -301,6 +345,18 @@ func (a *API) handleVariableSubtree(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": fmt.Sprintf("Vault variable %q not found", name)})
 			return
 		}
+
+		// Record audit event for delete
+		a.recordVaultAuditEvent(hostcache.VaultAuditEvent{
+			ID:             generateEventID(),
+			Timestamp:      time.Now().UnixMilli(),
+			VariableName:   name,
+			Actor:          a.defaultActor,
+			Host:           a.defaultHost,
+			Action:         "DELETE /api/vault/variables/" + name,
+			PasswordSource: "inline",
+		})
+
 		writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": true, "name": name})
 
 	default:
@@ -315,13 +371,32 @@ func (a *API) handleEncrypt(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Plaintext string `json:"plaintext"`
+		Value     string `json:"value"`
+		Payload   string `json:"payload"`
 		VarName   string `json:"varName"`
+		Name      string `json:"name"`
+		Key       string `json:"key"`
 		Password  string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "Invalid request payload"})
 		return
 	}
+	if req.Plaintext == "" {
+		if req.Value != "" {
+			req.Plaintext = req.Value
+		} else if req.Payload != "" {
+			req.Plaintext = req.Payload
+		}
+	}
+	if req.VarName == "" {
+		if req.Name != "" {
+			req.VarName = req.Name
+		} else if req.Key != "" {
+			req.VarName = req.Key
+		}
+	}
+	req.VarName = strings.TrimSpace(req.VarName)
 	if req.Plaintext == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "Missing or invalid plaintext"})
 		return
@@ -332,6 +407,26 @@ func (a *API) handleEncrypt(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
+
+	// If a variable name was provided and store is available, persist the vault variable.
+	// This ensures SSH keys and other secrets encrypted via this endpoint are durably stored
+	// in the vault_variables table and can be referenced by name (e.g., as vaultSecretId).
+	if req.VarName != "" && a.store != nil {
+		if err := a.store.UpsertVaultVariable(req.VarName, vaultBlock); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+		a.recordVaultAuditEvent(hostcache.VaultAuditEvent{
+			ID:             generateEventID(),
+			Timestamp:      time.Now().UnixMilli(),
+			VariableName:   req.VarName,
+			Actor:          a.defaultActor,
+			Host:           a.defaultHost,
+			Action:         "POST /api/vault/encrypt",
+			PasswordSource: "inline",
+		})
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "vaultBlock": vaultBlock})
 }
 
@@ -405,4 +500,19 @@ func (a *API) handleDecrypt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "plaintext": plaintext})
+}
+
+// generateEventID generates a random 16-character hex string for audit event IDs.
+func generateEventID() string {
+	rnd := make([]byte, 8)
+	_, _ = rand.Read(rnd)
+	return hex.EncodeToString(rnd)
+}
+
+// recordVaultAuditEvent records a vault audit event, ignoring errors to avoid blocking the main operation.
+func (a *API) recordVaultAuditEvent(ev hostcache.VaultAuditEvent) {
+	if a.store == nil {
+		return
+	}
+	_ = a.store.RecordVaultAuditEvent(ev)
 }

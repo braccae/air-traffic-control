@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToString } from 'react-dom/server';
 import { HostModulesView, type NodeModuleItem } from './HostModulesView.tsx';
+import { findLocalNode, resolveModuleNodeId } from '../utils/nodeTarget.ts';
 import type { NodeItem } from '../types/index.ts';
 
 const mockNode: NodeItem = {

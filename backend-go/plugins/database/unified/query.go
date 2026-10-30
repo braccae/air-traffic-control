@@ -13,7 +13,8 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/microsoft/go-mssqldb"
 	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -43,7 +44,26 @@ func (p *Plugin) Query(ctx context.Context, r plugin.Runner, h plugin.HostFacts,
 	}
 
 	spec := specFor(engine)
+	// Containerised databases often publish a non-default host port (e.g.
+	// test-mariadb on 13306). When the caller did not pin a port, discover the
+	// published port BEFORE building the tunnel so the dial target is correct.
+	if req.Port == 0 && firstOverride(h.Overrides, spec.OverrideKeys, "_port") == "" {
+		if p := discoverContainerPort(ctx, r, engine); p > 0 {
+			req.Port = p
+		}
+	}
+	// Containerised SQL databases carry their bootstrap credentials in the
+	// container environment (POSTGRES_PASSWORD / MARIADB_ROOT_PASSWORD). When
+	// the operator has not pinned a password, use them so the data browser
+	// works out of the box.
+	if strings.TrimSpace(req.Password) == "" && firstOverride(h.Overrides, spec.OverrideKeys, "_password") == "" {
+		if user, password := discoverContainerCredentials(ctx, r, engine); password != "" {
+			req.User = user
+			req.Password = password
+		}
+	}
 	cfg := resolveEngineConfig(spec, req, h)
+	applyContainerTarget(ctx, r, engine, &cfg)
 	start := time.Now()
 
 	var (
@@ -159,9 +179,51 @@ func openSQL(ctx context.Context, cfg connConfig) (*sql.DB, error) {
 		return nil, fmt.Errorf("engine %q is not an SQL engine", cfg.Engine)
 	}
 
-	db, err := sql.Open(driverName, dsn)
+	var db *sql.DB
+	var err error
+	if cfg.DialFunc != nil && (driverName == "pgx" || driverName == "mysql") {
+		switch driverName {
+		case "pgx":
+			pcfg, perr := pgx.ParseConfig(dsn)
+			if perr != nil {
+				return nil, perr
+			}
+			pcfg.DialFunc = cfg.DialFunc
+			db = stdlib.OpenDB(*pcfg)
+			err = nil
+		case "mysql":
+			mc := mysql.NewConfig()
+			// Re-parse from DSN is involved; fall back to standard open for
+			// mysql when a custom dialer is required is not supported by the
+			// DSN path, so use the dialer via a connector built from defaults.
+			if dsn2, err2 := mysql.ParseDSN(dsn); err2 == nil {
+				mc = dsn2
+			}
+			mc.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if cfg.DialFunc != nil {
+					return cfg.DialFunc(ctx, network, addr)
+				}
+				var d net.Dialer
+				return d.DialContext(ctx, network, addr)
+			}
+			connector, cerr := mysql.NewConnector(mc)
+			if cerr != nil {
+				return nil, cerr
+			}
+			db = sql.OpenDB(connector)
+			err = nil
+		}
+	} else {
+		db, err = sql.Open(driverName, dsn)
+	}
 	if err != nil {
 		return nil, err
+	}
+	if db == nil {
+		db, err = sql.Open(driverName, dsn)
+		if err != nil {
+			return nil, err
+		}
 	}
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(1)
@@ -260,6 +322,11 @@ func queryRedis(ctx context.Context, cfg connConfig, req plugin.QueryRequest) (p
 		DialTimeout:  5 * time.Second,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
+	}
+	if cfg.DialFunc != nil {
+		opt.Dialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return cfg.DialFunc(ctx, network, addr)
+		}
 	}
 	if cfg.Socket != "" {
 		opt.Network = "unix"
@@ -410,10 +477,14 @@ func formatRedisReply(v any) string {
 var mongoCallPattern = regexp.MustCompile(`(?s)^db\.([A-Za-z0-9_\-]+)\.(find|countDocuments|count)\((.*?)\)\s*;?$`)
 
 func queryMongo(ctx context.Context, cfg connConfig, req plugin.QueryRequest) (plugin.QueryResult, error) {
-	client, err := mongo.Connect(options.Client().
+	mongoOpts := options.Client().
 		ApplyURI(mongoURI(cfg)).
 		SetConnectTimeout(5 * time.Second).
-		SetServerSelectionTimeout(5 * time.Second))
+		SetServerSelectionTimeout(5 * time.Second)
+	if cfg.DialFunc != nil {
+		mongoOpts = mongoOpts.SetDialer(mongoDialer{fn: cfg.DialFunc})
+	}
+	client, err := mongo.Connect(mongoOpts)
 	if err != nil {
 		return plugin.QueryResult{}, err
 	}
@@ -451,8 +522,42 @@ func queryMongo(ctx context.Context, cfg connConfig, req plugin.QueryRequest) (p
 	}
 
 	if strings.HasPrefix(q, "{") {
-		var cmd bson.M
-		if err := json.Unmarshal([]byte(q), &cmd); err != nil {
+		// "find" is an ordered command: the driver rejects unordered bson.M
+		// for it, so handle it through the collection API instead.
+		var rawCmd map[string]json.RawMessage
+		if json.Unmarshal([]byte(q), &rawCmd) == nil {
+			if colRaw, ok := rawCmd["find"]; ok {
+				var col string
+				_ = json.Unmarshal(colRaw, &col)
+				filter := bson.M{}
+				if f, ok := rawCmd["filter"]; ok {
+					_ = json.Unmarshal(f, &filter)
+				}
+				limit := int64(req.Limit)
+				if l, ok := rawCmd["limit"]; ok {
+					_ = json.Unmarshal(l, &limit)
+				}
+				if limit <= 0 {
+					limit = DefaultRowLimit
+				}
+				if col != "" {
+					cur, err := db.Collection(col).Find(queryCtx, filter, options.Find().SetLimit(limit))
+					if err != nil {
+						return plugin.QueryResult{}, err
+					}
+					var docs []bson.M
+					if err := cur.All(queryCtx, &docs); err != nil {
+						return plugin.QueryResult{}, err
+					}
+					encoded, _ := json.Marshal(docs)
+					return plugin.QueryResult{Raw: string(encoded)}, nil
+				}
+			}
+		}
+		// Generic command: preserve key order with bson.D so the command name
+		// stays first.
+		var cmd bson.D
+		if err := bson.UnmarshalExtJSON([]byte(q), false, &cmd); err != nil {
 			return plugin.QueryResult{}, fmt.Errorf("invalid mongo command JSON: %w", err)
 		}
 		var out bson.M
@@ -509,6 +614,211 @@ func queryMongo(ctx context.Context, cfg connConfig, req plugin.QueryRequest) (p
 	}
 
 	return plugin.QueryResult{}, fmt.Errorf("mongo expression not supported by the Go driver; falling back to CLI")
+}
+
+// mongoDialer adapts a plugin DialFunc to mongo's Dialer interface.
+type mongoDialer struct {
+	fn func(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+func (m mongoDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if m.fn == nil {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	return m.fn(ctx, network, addr)
+}
+
+// applyContainerTarget retargets the SSH tunnel at the database container when
+// the engine runs in a container. Published ports are preferred; otherwise the
+// container's bridge IP is used (reachable from the host even when the port is
+// not published, e.g. nextcloud-aio-redis).
+func applyContainerTarget(ctx context.Context, r plugin.Runner, engine string, cfg *connConfig) {
+	if r == nil || cfg == nil || cfg.tunnel == nil {
+		return
+	}
+	spec, ok := map[string]struct {
+		pattern       string
+		containerPort int
+	}{
+		"postgres": {"postgres", 5432},
+		"mariadb":  {"mariadb|mysql", 3306},
+		"redis":    {"redis|valkey", 6379},
+		"mongodb":  {"mongo", 27017},
+	}[engine]
+	if !ok {
+		return
+	}
+	pattern := spec.pattern
+	containerPort := spec.containerPort
+
+	findCmd := fmt.Sprintf(
+		"for rt in podman 'sudo -n podman' docker 'sudo -n docker'; do $rt ps --format '{{.Names}}|{{.Image}}|{{.Ports}}' 2>/dev/null; done | grep -iE '%s' | head -n1",
+		pattern,
+	)
+	out, err := r.RunCommand(ctx, findCmd)
+	if err != nil || strings.TrimSpace(out) == "" {
+		return
+	}
+	line := strings.TrimSpace(out)
+	name := strings.SplitN(line, "|", 2)[0]
+	if name == "" {
+		return
+	}
+	// Published port wins.
+	if m := rePublishedPort.FindStringSubmatch(line); len(m) == 3 {
+		if hostPort, err := strconv.Atoi(m[1]); err == nil && hostPort > 0 {
+			cfg.tunnel.host = "127.0.0.1"
+			cfg.tunnel.port = hostPort
+			return
+		}
+	}
+	// Otherwise use the container's bridge IP.
+	ipCmd := fmt.Sprintf(
+		"for rt in podman 'sudo -n podman' docker 'sudo -n docker'; do $rt inspect %s --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' 2>/dev/null; done | head -n1",
+		name,
+	)
+	ipOut, err := r.RunCommand(ctx, ipCmd)
+	if err != nil {
+		return
+	}
+	for _, ip := range strings.Fields(ipOut) {
+		if net.ParseIP(ip) != nil && ip != "127.0.0.1" {
+			cfg.tunnel.host = ip
+			cfg.tunnel.port = containerPort
+			return
+		}
+	}
+}
+
+var rePublishedPort = regexp.MustCompile(`(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]):(\d+)->(\d+)/tcp`)
+
+// discoverContainerCredentials reads the bootstrap user/password from the
+// engine container's environment (POSTGRES_PASSWORD, MARIADB_ROOT_PASSWORD or
+// MYSQL_ROOT_PASSWORD). Returns empty strings when nothing is found.
+func discoverContainerCredentials(ctx context.Context, r plugin.Runner, engine string) (string, string) {
+	if r == nil {
+		return "", ""
+	}
+	pattern := map[string]string{
+		"postgres": "postgres",
+		"mariadb":  "mariadb|mysql",
+		"redis":    "redis|valkey",
+		"mongodb":  "mongo",
+	}[engine]
+	if pattern == "" {
+		return "", ""
+	}
+	nameCmd := fmt.Sprintf(
+		"for rt in podman 'sudo -n podman' docker 'sudo -n docker'; do $rt ps --format '{{.Names}}|{{.Image}}' 2>/dev/null; done | grep -iE '%s' | head -n1 | cut -d'|' -f1",
+		pattern,
+	)
+	nameOut, err := r.RunCommand(ctx, nameCmd)
+	if err != nil {
+		return "", ""
+	}
+	name := strings.TrimSpace(nameOut)
+	if name == "" {
+		return "", ""
+	}
+	envCmd := fmt.Sprintf(
+		"for rt in podman 'sudo -n podman' docker 'sudo -n docker'; do $rt inspect %s --format '{{json .Config.Env}}' 2>/dev/null; done | head -n1",
+		name,
+	)
+	envOut, err := r.RunCommand(ctx, envCmd)
+	if err != nil {
+		return "", ""
+	}
+	var env []string
+	if json.Unmarshal([]byte(strings.TrimSpace(envOut)), &env) != nil {
+		return "", ""
+	}
+	values := map[string]string{}
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			values[kv[:i]] = kv[i+1:]
+		}
+	}
+	switch engine {
+	case "postgres":
+		if pw := values["POSTGRES_PASSWORD"]; pw != "" {
+			user := values["POSTGRES_USER"]
+			if user == "" {
+				user = "postgres"
+			}
+			return user, pw
+		}
+	case "mariadb":
+		pw := values["MARIADB_ROOT_PASSWORD"]
+		if pw == "" {
+			pw = values["MYSQL_ROOT_PASSWORD"]
+		}
+		if pw != "" {
+			return "root", pw
+		}
+	case "redis":
+		pw := values["REDIS_PASSWORD"]
+		if pw == "" {
+			pw = values["REDIS_HOST_PASSWORD"]
+		}
+		if pw == "" {
+			pw = values["VALKEY_PASSWORD"]
+		}
+		if pw != "" {
+			return "default", pw
+		}
+	case "mongodb":
+		pw := values["MONGO_INITDB_ROOT_PASSWORD"]
+		if pw != "" {
+			user := values["MONGO_INITDB_ROOT_USERNAME"]
+			if user == "" {
+				user = "root"
+			}
+			return user, pw
+		}
+	}
+	return "", ""
+}
+
+// discoverContainerPort finds the published host port for a container whose
+// name or image matches the given engine. Returns 0 when nothing is found.
+func discoverContainerPort(ctx context.Context, r plugin.Runner, engine string) int {
+	if r == nil {
+		return 0
+	}
+	pattern := map[string]string{
+		"postgres": "postgres",
+		"mariadb":  "mariadb|mysql",
+		"redis":    "redis|valkey",
+		"mongodb":  "mongo",
+	}[engine]
+	if pattern == "" {
+		return 0
+	}
+	cmd := fmt.Sprintf(
+		"for rt in podman 'sudo -n podman' docker 'sudo -n docker'; do $rt ps --format '{{.Names}}|{{.Image}}|{{.Ports}}' 2>/dev/null; done | grep -iE '%s' | head -n 5",
+		pattern,
+	)
+	out, err := r.RunCommand(ctx, cmd)
+	if err != nil || strings.TrimSpace(out) == "" {
+		return 0
+	}
+	portRe := regexp.MustCompile(`(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]):(\d+)->(\d+)/tcp`)
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		m := portRe.FindStringSubmatch(line)
+		if len(m) != 3 {
+			continue
+		}
+		hostPort, err := strconv.Atoi(m[1])
+		if err == nil && hostPort > 0 {
+			return hostPort
+		}
+	}
+	return 0
 }
 
 func mongoURI(cfg connConfig) string {

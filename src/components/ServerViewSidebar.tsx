@@ -1,21 +1,9 @@
 import React, { useState } from 'react';
 import type { NodeItem, TagInventoryChunk, CustomFolder } from '../types/index.ts';
 import { useContextMenu } from './ContextMenu.tsx';
-import { buildNodeContextMenu, type ContextMenuItem } from '../utils/contextMenuModel.ts';
+import { buildNodeContextMenu, buildTagContextMenu, buildFolderContextMenu, type ContextMenuItem } from '../utils/contextMenuModel.ts';
 import { copyTextToClipboard } from '../utils/clipboard.ts';
-import {
-  buildInventoryTree,
-  buildHostGroupPills,
-  filterNodesBySearchQuery,
-  resolveNodeIcon,
-  formatNodeTypeBadge,
-  getDatacenterSettingCategories,
-  formatDatacenterRoute,
-  calculateClusterHealthScore,
-  type SidebarViewMode,
-  type DatacenterSection,
-  type DatacenterSettingPageId,
-} from '../utils/navigationViewModel.ts';
+import { buildHostGroupPills, filterNodesBySearchQuery, resolveNodeIcon, formatNodeTypeBadge, getDatacenterSettingCategories, formatDatacenterRoute, calculateClusterHealthScore, buildInventoryTree, type SidebarViewMode, type DatacenterSection, type DatacenterSettingPageId, } from '../utils/navigationViewModel.ts';
 
 interface ServerViewSidebarProps {
   nodes: NodeItem[];
@@ -25,6 +13,8 @@ interface ServerViewSidebarProps {
   onOpenTerminal?: (node: NodeItem) => void;
   onOpenLogs?: (node: NodeItem) => void;
   onDeleteNode?: (nodeId: string) => void;
+  onDeleteChunk?: (chunkId: string) => void;
+  onMoveNodeToFolder?: (nodeId: string, folderId: string | null) => void;
   selectedHostGroup: string;
   onSelectHostGroup: (group: string) => void;
   isOpenMobile?: boolean;
@@ -63,6 +53,8 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   folders = [],
   onCreateFolder,
   onDeleteFolder,
+  onDeleteChunk,
+  onMoveNodeToFolder,
 }) => {
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterText, setFilterText] = useState('');
@@ -72,6 +64,8 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const nodeMenu = useContextMenu();
+  const tagMenu = useContextMenu();
+  const folderMenu = useContextMenu();
 
   const handleNodeCopy = (text: string, label: string) => {
     void copyTextToClipboard(text, label);
@@ -92,6 +86,10 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
           }
         : undefined,
       onCopy: handleNodeCopy,
+      onRemoveFromFolder:
+        onMoveNodeToFolder && node.folder
+          ? (target: NodeItem) => onMoveNodeToFolder(target.id, null)
+          : undefined,
     });
 
   const handleNodeContextMenu = (event: React.MouseEvent, node: NodeItem) => {
@@ -111,8 +109,10 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
   const visibleNodes = filterNodesBySearchQuery(groupFilteredNodes, filterText);
   const hostGroups = buildHostGroupPills(nodes);
 
-  const selectedNode = nodes.find(n => n.id === selectedNodeId) || nodes[0];
-  const datacenterName = selectedNode?.datacenter || 'leo-banjo.ts.net';
+  const selectedNode = nodes.find(n => n.id === selectedNodeId);
+  const tailscaleDc = nodes[0]?.tailscaleHost?.split('.').slice(1).join('.');
+  const autodetectedDc = nodes.find(n => n.datacenter)?.datacenter || tailscaleDc || null;
+  const datacenterName = selectedNode?.datacenter || autodetectedDc || 'unknown';
   const onlineCount = nodes.filter(n => n.status === 'online').length;
   const health = calculateClusterHealthScore(nodes);
   const datacenterSettingCategories = getDatacenterSettingCategories();
@@ -129,8 +129,14 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
     return (
       <div
         key={node.id}
+        draggable
+        onDragStart={event => {
+          event.dataTransfer?.setData('text/plain', node.id);
+          if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+        }}
         onContextMenu={event => handleNodeContextMenu(event, node)}
         data-context-menu="node-row"
+        data-testid={`node-row-${node.id}`}
         className={`group flex items-center gap-1 px-2 py-1.5 rounded transition-all ${
           isSelected
             ? 'bg-[#21263d] text-[#b0c9ff] font-bold border-l-2 border-[#b0c9ff] shadow-[inset_0_0_12px_rgba(176,201,255,0.08)]'
@@ -183,7 +189,7 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
       )}
 
       <aside
-        className={`fixed left-0 top-10 bottom-44 w-72 bg-[#171a2d] z-40 flex flex-col shadow-[0_1px_8px_rgba(0,0,0,0.3)] border-r border-[#26293c] transition-transform duration-200 ${
+        className={`fixed left-0 top-10 bottom-[var(--console-height,176px)] w-72 bg-[#171a2d] z-40 flex flex-col shadow-[0_1px_8px_rgba(0,0,0,0.3)] border-r border-[#26293c] transition-transform duration-200 ${
           isOpenMobile ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         }`}
       >
@@ -409,12 +415,31 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                       <div key={tagGroup.tag} className="space-y-0.5">
                         <button
                           type="button"
+                          data-testid={`tag-row-${tagGroup.tag}`}
+                          onDragOver={event => {
+                            event.preventDefault();
+                            if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+                          }}
+                          onDrop={event => {
+                            event.preventDefault();
+                            const nodeId = event.dataTransfer?.getData('text/plain');
+                            // Dropping a host back on a tag row takes it out of any
+                            // custom folder so it returns to its tag group.
+                            if (nodeId && onMoveNodeToFolder) onMoveNodeToFolder(nodeId, null);
+                          }}
                           onClick={() =>
                             setCollapsedTags(prev => ({
                               ...prev,
                               [tagGroup.tag]: !prev[tagGroup.tag],
                             }))
                           }
+                          onContextMenu={event => {
+                            event.preventDefault();
+                            tagMenu.open(event, buildTagContextMenu(tagGroup.tag, tagGroup.chunk?.id ?? null, {
+                              onDeleteChunk: onDeleteChunk ? (chunkId: string) => onDeleteChunk(chunkId) : undefined,
+                              onCopy: handleNodeCopy,
+                            }));
+                          }}
                           className="w-full flex items-center gap-1 px-2 py-0.5 text-[#c3c6d2] hover:text-[#dfe1fa] cursor-pointer rounded hover:bg-[#1b1e31]"
                         >
                           <span className="material-symbols-outlined text-[14px]">
@@ -422,14 +447,6 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                           </span>
                           <span className="material-symbols-outlined text-[14px] text-[#d9b9ff]">sell</span>
                           <span className="text-[#dfe1fa] font-medium truncate">{tagGroup.tag}</span>
-                          {tagGroup.chunk && tagGroup.nodes.length > 0 && (
-                            <span
-                              className="text-[9px] px-1 py-0.2 rounded bg-[#1f2638] text-[#8cd6cb] font-mono border border-[#8cd6cb]/30 shrink-0"
-                              title={`Dynamic chunk: ${tagGroup.chunk.authMethod}`}
-                            >
-                              chunk
-                            </span>
-                          )}
                           <span className="ml-auto text-[#8cd6cb] font-bold">[{tagGroup.nodes.length}]</span>
                         </button>
 
@@ -472,8 +489,30 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
                   }
 
                   return (
-                    <div key={folderGroup.folder.id} className="space-y-0.5">
-                      <div className="group flex items-center justify-between px-1.5 py-0.5 text-[#c3c6d2] hover:text-[#dfe1fa] rounded hover:bg-[#1b1e31]">
+                    <div
+                      key={folderGroup.folder.id}
+                      data-testid={`folder-row-${folderGroup.folder.id}`}
+                      className="space-y-0.5"
+                      onDragOver={event => {
+                        event.preventDefault();
+                        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+                      }}
+                      onDrop={event => {
+                        event.preventDefault();
+                        const nodeId = event.dataTransfer?.getData('text/plain');
+                        if (nodeId && onMoveNodeToFolder) onMoveNodeToFolder(nodeId, folderGroup.folder.id);
+                      }}
+                    >
+                      <div
+                        className="group flex items-center justify-between px-1.5 py-0.5 text-[#c3c6d2] hover:text-[#dfe1fa] rounded hover:bg-[#1b1e31]"
+                        onContextMenu={event => {
+                          event.preventDefault();
+                          folderMenu.open(event, buildFolderContextMenu(folderGroup.folder, {
+                            onDelete: onDeleteFolder,
+                            onCopy: handleNodeCopy,
+                          }));
+                        }}
+                      >
                         <button
                           type="button"
                           onClick={() =>
@@ -592,6 +631,8 @@ export const ServerViewSidebar: React.FC<ServerViewSidebarProps> = ({
         )}
       </aside>
       {nodeMenu.menu}
+      {tagMenu.menu}
+      {folderMenu.menu}
     </>
   );
 };

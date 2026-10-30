@@ -17,7 +17,7 @@ import {
 import { safeFetchJson } from '../utils/apiDefensive.ts';
 
 interface PodmanManagerProps {
-  selectedNode?: NodeItem;
+  selectedNode?: NodeItem | null;
   pluginId?: string;
   onOpenLogs: (target: string, user?: string, uid?: number) => void;
   onOpenExec: (target: string) => void;

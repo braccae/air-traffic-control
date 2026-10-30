@@ -35,12 +35,17 @@ export default defineConfig(() => {
       },
     },
     server: {
+      // Allow connections from containerized environments (e.g. host.containers.internal)
+      allowedHosts: ['host.containers.internal', 'hermes'],
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {
-        ignored: ['**/data/**', '**/*.sqlite*', '**/backend-go/**'],
+        // e2e-results is rewritten by Playwright (.last-run.json) while the dev
+        // server is up; watching it triggers full page reloads that wipe
+        // in-progress form input.
+        ignored: ['**/data/**', '**/*.sqlite*', '**/backend-go/**', '**/e2e-results/**', '**/test-results/**'],
       },
       // Dev-only: when Vite runs standalone (see justfile `dev-frontend`), forward API + WS
       // traffic to the Go daemon. In Express middlewareMode these options are ignored.

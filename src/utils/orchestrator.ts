@@ -340,7 +340,7 @@ export function getDefaultHostPodmanProbe(): UnprivilegedPodmanUser[] {
           image: 'k8s.gcr.io/pause:3.9',
           status: 'Running',
           cpu: '0.01%',
-          memory: '4.2 MiB',
+          memory: '',
         },
         {
           id: '3f0a9918bc22',
@@ -369,7 +369,7 @@ export function getDefaultHostPodmanProbe(): UnprivilegedPodmanUser[] {
           image: 'ollama/ollama:latest',
           status: 'Running (CUDA 12.4)',
           cpu: '3.8%',
-          memory: '6.4 GiB VRAM',
+          memory: '',
           gpuAcc: 'RTX 4090 [0000:01:00.0]',
         },
         {
@@ -577,12 +577,8 @@ export function parseTerminalCommand(cmd: string, node: NodeItem): { output: str
       return {
         output: [
           'GLANCES v3.4.0.5 - Telemetry Probe',
-          `CPU: ${node.specs?.cpu || 'Multi-core x86_64'} (16 vCPUs) - 1.4% usage, 38°C`,
-          'MEM: 42.4 / 62.8 GiB (67.5% used, ZFS ARC: 12.3 GiB)',
-          'SWAP: 0.0 / 8.0 GiB (0% used)',
-          'ZFS POOL tank0: 14.2 / 48.0 TB (29.5% used, RAIDZ2, Scrub healthy)',
-          'NETWORK: bond0 Rx: 12.4 MB/s, Tx: 8.9 MB/s (10GbE SFP+)',
-          'PROCESSES: 182 total, 1 running, 181 sleeping',
+          'No telemetry data available. Connect to a target node to collect live metrics.',
+          'Usage: glances --stdout-json now,cpu,mem,load (requires Glances REST API on port 61208)',
         ].join('\n'),
         exitCode: 0,
       };

@@ -29,7 +29,13 @@ func IsValidVaultVariableName(name string) bool {
 }
 
 // MaskVaultValue renders the masked form "•••••••• (vault: <name>)".
+// An empty name renders just the mask (no vault reference), matching the
+// rcloneapi helper and the TypeScript vaultMasking implementation.
 func MaskVaultValue(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return VaultValueMask
+	}
 	return fmt.Sprintf("%s (vault: %s)", VaultValueMask, name)
 }
 
@@ -64,12 +70,14 @@ func ResolveVaultPasswordSource(repoRoot string, opts ResolveOptions) PasswordSo
 
 	// Tier 1: Check vaultPasswordFile
 	candidate := opts.VaultPasswordFile
+	cfgDir := ""
 	if candidate == "" {
 		cfgPath := opts.AnsibleCfgPath
 		if cfgPath == "" && repoRoot != "" {
 			cfgPath = filepath.Join(repoRoot, "ansible", "ansible.cfg")
 		}
 		if cfgPath != "" {
+			cfgDir = filepath.Dir(cfgPath)
 			if cfg, _, err := ansibleapi.LoadAnsibleConfig(cfgPath); err == nil && cfg.VaultPasswordFile != "" {
 				candidate = cfg.VaultPasswordFile
 			}
@@ -77,25 +85,32 @@ func ResolveVaultPasswordSource(repoRoot string, opts ResolveOptions) PasswordSo
 	}
 
 	if candidate != "" {
-		resolved := candidate
-		if !filepath.IsAbs(resolved) {
-			if repoRoot != "" {
-				resolved = filepath.Join(repoRoot, candidate)
-				if _, err := os.Stat(resolved); err != nil {
-					ansibleSub := filepath.Join(repoRoot, "ansible", candidate)
-					if _, errSub := os.Stat(ansibleSub); errSub == nil {
-						resolved = ansibleSub
-					}
-				}
+		// Ansible resolves a relative vault_password_file against the directory
+		// containing ansible.cfg, not the process working directory.
+		var attempts []string
+		if filepath.IsAbs(candidate) {
+			attempts = append(attempts, candidate)
+		} else {
+			if cfgDir != "" {
+				attempts = append(attempts, filepath.Join(cfgDir, candidate))
 			}
+			if repoRoot != "" {
+				attempts = append(attempts,
+					filepath.Join(repoRoot, candidate),
+					filepath.Join(repoRoot, "ansible", candidate),
+				)
+			}
+			attempts = append(attempts, candidate)
 		}
-		if data, err := os.ReadFile(resolved); err == nil {
-			pass := strings.TrimSpace(string(data))
-			return PasswordSource{
-				Source:      "file",
-				HasPassword: true,
-				Password:    pass,
-				FilePath:    resolved,
+		for _, resolved := range attempts {
+			if data, err := os.ReadFile(resolved); err == nil {
+				pass := strings.TrimSpace(string(data))
+				return PasswordSource{
+					Source:      "file",
+					HasPassword: true,
+					Password:    pass,
+					FilePath:    resolved,
+				}
 			}
 		}
 	}

@@ -31,17 +31,19 @@ import "encoding/json"
 // present only in the JSON blob (folder, chassis, plugin flags, ...) are carried
 // through NodeJSON untouched; Folder is surfaced as a convenience.
 type NodeRecord struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	ShortName     string          `json:"shortName"`
-	Group         string          `json:"group"`
-	IP            string          `json:"ip"`
-	Port          int             `json:"port"`
-	SSHUser       string          `json:"sshUser"`
-	TailscaleIP   string          `json:"tailscaleIp"`
-	TailscaleHost string          `json:"tailscaleHost"`
-	Status        string          `json:"status"`
-	Folder        string          `json:"folder,omitempty"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	ShortName     string `json:"shortName"`
+	Group         string `json:"group"`
+	IP            string `json:"ip"`
+	Port          int    `json:"port"`
+	SSHUser       string `json:"sshUser"`
+	TailscaleIP   string `json:"tailscaleIp"`
+	TailscaleHost string `json:"tailscaleHost"`
+	Status        string `json:"status"`
+	Folder        string `json:"folder,omitempty"`
+	// VaultSecretID references the vault variable used for SSH authentication.
+	VaultSecretID string          `json:"vaultSecretId,omitempty"`
 	NodeJSON      json.RawMessage `json:"-"`
 	SortOrder     int             `json:"-"`
 	UpdatedAt     int64           `json:"-"`
@@ -134,7 +136,7 @@ type TagChunk struct {
 // VaultVariable mirrors a row of vault_variables.
 type VaultVariable struct {
 	Name       string `json:"name"`
-	VaultBlock string `json:"vaultBlock"`
+	VaultBlock string `json:"-"`
 	CreatedAt  int64  `json:"createdAt"`
 	UpdatedAt  int64  `json:"updatedAt"`
 }
@@ -192,4 +194,3 @@ type CronSchedule struct {
 	LastRunTaskID  *string         `json:"lastRunTaskId,omitempty"`
 	LastRunError   *string         `json:"lastRunError,omitempty"`
 }
-

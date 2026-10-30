@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -d "data/ansible-venv/bin" ]; then
+    export PATH="data/ansible-venv/bin:$PATH"
+fi
+
 echo "=== Air Traffic Control Ansible Playbook Syntax Checker ==="
 
 INVENTORY="inventory/tailscale_inventory.py"

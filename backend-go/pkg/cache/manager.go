@@ -12,27 +12,27 @@ import (
 
 // CacheManager handles background caching of all host data
 type CacheManager struct {
-	store       *hostcache.Store
-	nodeResolver plugin.NodeResolver
+	store          *hostcache.Store
+	nodeResolver   plugin.NodeResolver
 	runnerResolver plugin.RunnerResolver
-	cache       *plugin.ProbeCache
-	interval    time.Duration
-	stop        chan struct{}
-	wg          sync.WaitGroup
-	mu          sync.Mutex
-	lastUpdate  map[string]time.Time
+	cache          *plugin.ProbeCache
+	interval       time.Duration
+	stop           chan struct{}
+	wg             sync.WaitGroup
+	mu             sync.Mutex
+	lastUpdate     map[string]time.Time
 }
 
 // NewCacheManager creates a new cache manager
 func NewCacheManager(store *hostcache.Store, nodeResolver plugin.NodeResolver, runnerResolver plugin.RunnerResolver, cache *plugin.ProbeCache) *CacheManager {
 	return &CacheManager{
-		store:        store,
-		nodeResolver: nodeResolver,
+		store:          store,
+		nodeResolver:   nodeResolver,
 		runnerResolver: runnerResolver,
-		cache:        cache,
-		interval:     3 * time.Second,
-		stop:         make(chan struct{}),
-		lastUpdate:   make(map[string]time.Time),
+		cache:          cache,
+		interval:       3 * time.Second,
+		stop:           make(chan struct{}),
+		lastUpdate:     make(map[string]time.Time),
 	}
 }
 
@@ -144,6 +144,12 @@ func (cm *CacheManager) cachePlugins(ctx context.Context, nodeID string) error {
 
 		// Cache the detection result
 		cm.cache.Set(nodeID, meta.ID, meta.Kind, det)
+
+		// A capability found on the host may need controller-side Ansible
+		// modules; install them now so the next playbook run just works.
+		if det.Detected {
+			plugin.EnsureCollectionsForDetection(p, det, facts)
+		}
 	}
 
 	return nil
