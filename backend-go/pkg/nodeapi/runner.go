@@ -2,6 +2,7 @@ package nodeapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -29,13 +30,55 @@ func NewSSHRunner(pool *ssh.ClientPool) CommandRunner {
 	return &sshRunner{pool: pool}
 }
 
+// extractConnectionOverride reports the connection plugin a node pins in its
+// plugin overrides (or its legacy activeConnection/connectionProtocol fields).
+// An empty result means "probe automatically".
+func extractConnectionOverride(node *Object) string {
+	if node == nil {
+		return ""
+	}
+	for _, field := range []string{"pluginOverrides", "overrides"} {
+		if raw, ok := node.Get(field); ok && len(raw) > 0 && string(raw) != "null" {
+			var m map[string]string
+			if err := json.Unmarshal(raw, &m); err == nil {
+				if conn := strings.TrimSpace(m["connection"]); conn != "" {
+					return conn
+				}
+			}
+		}
+	}
+	if activeConn, ok := node.GetString("activeConnection"); ok && strings.TrimSpace(activeConn) != "" {
+		return strings.TrimSpace(activeConn)
+	}
+	if connProto, ok := node.GetString("connectionProtocol"); ok && strings.TrimSpace(connProto) != "" {
+		return strings.TrimSpace(connProto)
+	}
+	return ""
+}
+
 // IsLocalNode reports whether the given node targets the controller host itself,
 // in which case remote protocols (SSH) must be bypassed in favor of the local
-// execution provider.
+// execution provider. An explicit connection plugin override always wins over
+// address sniffing.
 func IsLocalNode(node *Object) bool {
 	if node == nil {
 		return true
 	}
+	if connOverride := extractConnectionOverride(node); connOverride != "" {
+		switch strings.ToLower(strings.TrimSpace(connOverride)) {
+		case "connection/local", "local":
+			return true
+		case "connection/ssh", "ssh", "connection/tailscale", "tailscale", "tailscale-ssh", "winrm":
+			return false
+		}
+	}
+	if badge, _ := node.GetString("badge"); strings.EqualFold(strings.TrimSpace(badge), "LOCAL") {
+		return true
+	}
+	if authMethod, _ := node.GetString("authMethod"); strings.HasPrefix(strings.ToLower(strings.TrimSpace(authMethod)), "local") {
+		return true
+	}
+
 	ip, _ := node.GetString("ip")
 	tailscaleIp, _ := node.GetString("tailscaleIp")
 	tailscaleHost, _ := node.GetString("tailscaleHost")
@@ -56,6 +99,41 @@ func IsLocalNode(node *Object) bool {
 		return true
 	}
 	return false
+}
+
+// ResolveTargetHost selects the address a node should be reached on, taking an
+// explicit connection override into account and collapsing local nodes onto the
+// loopback address.
+func ResolveTargetHost(node *Object) string {
+	if node == nil {
+		return ""
+	}
+	if IsLocalNode(node) {
+		return "127.0.0.1"
+	}
+
+	ip, _ := node.GetString("ip")
+	tailscaleIp, _ := node.GetString("tailscaleIp")
+	tailscaleHost, _ := node.GetString("tailscaleHost")
+
+	ip = strings.TrimSpace(ip)
+	tailscaleIp = strings.TrimSpace(tailscaleIp)
+	tailscaleHost = strings.TrimSpace(tailscaleHost)
+
+	if conn := strings.ToLower(strings.TrimSpace(extractConnectionOverride(node))); conn == "connection/ssh" || conn == "ssh" {
+		for _, candidate := range []string{ip, tailscaleIp, tailscaleHost} {
+			if candidate != "" && candidate != "127.0.0.1" && candidate != "localhost" {
+				return candidate
+			}
+		}
+	}
+
+	for _, candidate := range []string{tailscaleIp, ip, tailscaleHost} {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // LocalRunner is a CommandRunner that executes commands directly on the

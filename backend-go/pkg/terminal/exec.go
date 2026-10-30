@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -12,7 +13,6 @@ import (
 	"air-traffic-control/backend/pkg/hostcache"
 	"air-traffic-control/backend/pkg/nodeapi"
 )
-
 
 // secretPatterns match inline credentials that must never be persisted into the
 // task history or the console feed (see the secret-protection invariant).
@@ -53,8 +53,33 @@ type API struct {
 	store    Store
 }
 
+// isNilInterface detects a nil value hidden behind a non-nil interface, which is
+// what a typed-nil *nodeapi.API or *ssh.ClientPool looks like once assigned to
+// NodeResolver/CommandRunner/Store. Without this guard those deps pass the
+// `!= nil` checks and panic on first use.
+func isNilInterface(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+		return rv.IsNil()
+	}
+	return false
+}
+
 // NewAPI returns a new terminal API instance.
 func NewAPI(resolver NodeResolver, runner CommandRunner, store Store) *API {
+	if isNilInterface(resolver) {
+		resolver = nil
+	}
+	if isNilInterface(runner) {
+		runner = nil
+	}
+	if isNilInterface(store) {
+		store = nil
+	}
 	return &API{
 		resolver: resolver,
 		runner:   runner,
@@ -70,9 +95,58 @@ type ExecRequestBody struct {
 	User    string `json:"user"`
 }
 
-// Register mounts the /api/terminal/exec endpoint on mux.
+// Register mounts the /api/terminal/exec endpoint on mux. The trailing-slash
+// variant is mounted too because both forms are referenced by the UI and by
+// older clients.
 func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/terminal/exec", a.HandleExec)
+	mux.HandleFunc("/api/terminal/exec/", a.HandleExec)
+}
+
+// resolveFallbackNode resolves a target when the persistent store has nothing
+// (or has no matching host): it consults the grounded baseline inventory first,
+// then falls back to a synthetic loopback target so local terminal execution
+// still works on a cold datastore.
+func resolveFallbackNode(query string) *nodeapi.Object {
+	q := strings.TrimSpace(query)
+	baseline := nodeapi.BaselineNodeObjects()
+	if q == "" {
+		if local := nodeapi.FindNodeInSlice(baseline, "localhost"); local != nil {
+			return local
+		}
+	} else if found := nodeapi.FindNodeInSlice(baseline, q); found != nil {
+		return found
+	}
+
+	switch q {
+	case "", "localhost", "127.0.0.1", "::1", "local", "node-localhost":
+		obj := nodeapi.NewObject()
+		obj.SetString("id", "node-localhost")
+		obj.SetString("name", "localhost")
+		obj.SetString("shortName", "localhost")
+		obj.SetString("ip", "127.0.0.1")
+		return obj
+	}
+	return nil
+}
+
+// cloneNodeWithUser returns a copy of node carrying an explicit SSH user, so a
+// per-request user override never mutates the shared cached node object.
+func cloneNodeWithUser(node *nodeapi.Object, user string) *nodeapi.Object {
+	user = strings.TrimSpace(user)
+	if node == nil || user == "" {
+		return node
+	}
+	raw, err := node.MarshalJSON()
+	if err != nil {
+		return node
+	}
+	cloned, err := nodeapi.ParseObject(raw)
+	if err != nil || cloned == nil {
+		return node
+	}
+	cloned.SetString("sshUser", user)
+	return cloned
 }
 
 // HandleExec handles POST /api/terminal/exec.
@@ -109,14 +183,10 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if targetNode == nil {
-		tq := strings.TrimSpace(targetQuery)
-		if tq == "" || tq == "localhost" || tq == "127.0.0.1" || tq == "::1" || tq == "local" || tq == "node-localhost" {
-			targetNode = nodeapi.NewObject()
-			targetNode.SetString("id", "node-localhost")
-			targetNode.SetString("name", "localhost")
-			targetNode.SetString("shortName", "localhost")
-			targetNode.SetString("ip", "127.0.0.1")
-		}
+		targetNode = resolveFallbackNode(targetQuery)
+	}
+	if req.User != "" {
+		targetNode = cloneNodeWithUser(targetNode, req.User)
 	}
 
 	nodeID := targetQuery
@@ -170,10 +240,17 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 
 	var output string
 	var runErr error
-	if a.runner != nil && targetNode != nil {
-		output, runErr = a.runner.RunNodeCommand(r.Context(), targetNode, fmt.Sprintf("%s 2>&1", cmd), 8*time.Second)
-	} else if a.runner != nil {
-		output, runErr = a.runner.RunNodeCommand(r.Context(), nil, fmt.Sprintf("%s 2>&1", cmd), 8*time.Second)
+	// A terminal still has to work when the daemon is running without a store or
+	// with a nil runner: local targets get a local runner on demand instead of
+	// failing with "no runner or node available".
+	runner := a.runner
+	if runner == nil && targetNode != nil && nodeapi.IsLocalNode(targetNode) {
+		runner = nodeapi.NewLocalRunner("sh", "")
+	}
+	if runner != nil && targetNode != nil {
+		output, runErr = runner.RunNodeCommand(r.Context(), targetNode, fmt.Sprintf("%s 2>&1", cmd), 8*time.Second)
+	} else if runner != nil {
+		output, runErr = runner.RunNodeCommand(r.Context(), nil, fmt.Sprintf("%s 2>&1", cmd), 8*time.Second)
 	} else {
 		runErr = fmt.Errorf("no runner or node available")
 	}
@@ -183,7 +260,7 @@ func (a *API) HandleExec(w http.ResponseWriter, r *http.Request) {
 		if cleanOut == "" {
 			cleanOut = "(command completed with exit code 0)"
 		}
-      execLogJSON, _ := json.Marshal([]string{cleanOut})
+		execLogJSON, _ := json.Marshal([]string{cleanOut})
 		if a.store != nil {
 			_ = a.store.SaveTask(hostcache.Task{
 				ID:          taskID,

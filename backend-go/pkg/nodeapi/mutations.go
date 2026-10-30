@@ -69,6 +69,42 @@ func (a *API) FindNode(query string) (*Object, error) {
 	return fallback, nil
 }
 
+// FindNodeInSlice resolves a target node matching query from an in-memory slice
+// of node objects (e.g. the baseline inventory used when no cache is available).
+// It returns nil when nothing matches so callers can decide on their own
+// fallback, unlike FindNode which always returns the first persisted host.
+func FindNodeInSlice(nodes []*Object, query string) *Object {
+	if len(nodes) == 0 {
+		return nil
+	}
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return nodes[0]
+	}
+	qLower := strings.ToLower(q)
+	for _, obj := range nodes {
+		if obj == nil {
+			continue
+		}
+		id, _ := obj.GetString("id")
+		name, _ := obj.GetString("name")
+		shortName, _ := obj.GetString("shortName")
+		tsHost, _ := obj.GetString("tailscaleHost")
+		tsIP, _ := obj.GetString("tailscaleIp")
+		ip, _ := obj.GetString("ip")
+
+		if strings.ToLower(id) == qLower ||
+			strings.ToLower(name) == qLower ||
+			strings.ToLower(shortName) == qLower ||
+			strings.ToLower(tsHost) == qLower ||
+			tsIP == q ||
+			ip == q {
+			return obj
+		}
+	}
+	return nil
+}
+
 func hostFactsFromNode(node *Object) plugin.HostFacts {
 	id, _ := node.GetString("id")
 	nodeType, _ := node.GetString("nodeType")

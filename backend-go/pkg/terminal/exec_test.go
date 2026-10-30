@@ -207,3 +207,83 @@ func TestRedactSecretsMasksInlineCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestTerminalExec_TrailingSlashRouteAndLocalRunnerFallback(t *testing.T) {
+	// No resolver, no runner, no store: the endpoint must still resolve a
+	// baseline node and execute locally rather than degrading to an error.
+	api := terminal.NewAPI(nil, nil, nil)
+	mux := http.NewServeMux()
+	api.Register(mux)
+
+	for _, endpoint := range []string{"/api/terminal/exec", "/api/terminal/exec/"} {
+		body := bytes.NewBufferString(`{"command": "printf 'atc-terminal-output-ok'", "host": "node-dev-pc", "nodeId": "node-dev-pc"}`)
+		req := httptest.NewRequest(http.MethodPost, endpoint, body)
+		rec := httptest.NewRecorder()
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d (%s)", endpoint, rec.Code, rec.Body.String())
+		}
+
+		var res terminal.ExecResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+			t.Fatalf("%s: failed to decode response: %v", endpoint, err)
+		}
+		if !res.Success || res.ExitCode != 0 || res.Output != "atc-terminal-output-ok" {
+			t.Fatalf("%s: expected output 'atc-terminal-output-ok', got %+v", endpoint, res)
+		}
+	}
+}
+
+func TestTerminalExec_TypedNilDependenciesAreGuarded(t *testing.T) {
+	// A typed-nil pointer assigned to an interface is non-nil to Go, so these
+	// must be normalised in NewAPI or the handler panics on first use.
+	var resolver *mockResolver
+	var runner *mockRunner
+	var store *mockStore
+
+	api := terminal.NewAPI(resolver, runner, store)
+	mux := http.NewServeMux()
+	api.Register(mux)
+
+	body := bytes.NewBufferString(`{"command": "printf 'typed-nil-ok'", "host": "node-dev-pc"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/terminal/exec", body)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var res terminal.ExecResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !res.Success || res.Output != "typed-nil-ok" {
+		t.Fatalf("expected 'typed-nil-ok', got %+v", res)
+	}
+}
+
+func TestTerminalExec_PerRequestUserOverrideDoesNotMutateNode(t *testing.T) {
+	node := nodeapi.NewObject()
+	node.SetString("id", "node-cold-war")
+	node.SetString("name", "cold-war")
+	node.SetString("ip", "100.118.44.7")
+	node.SetString("sshUser", "core")
+
+	runner := &mockRunner{}
+	api := terminal.NewAPI(&mockResolver{node: node}, runner, &mockStore{})
+	mux := http.NewServeMux()
+	api.Register(mux)
+
+	body := bytes.NewBufferString(`{"command": "uname -a", "host": "node-cold-war", "user": "apps"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/terminal/exec", body)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	user, _ := node.GetString("sshUser")
+	if user != "core" {
+		t.Fatalf("expected the cached node to keep sshUser=core, got %q", user)
+	}
+}

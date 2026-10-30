@@ -226,3 +226,68 @@ export function getGhosttyTheme(resolvedTheme?: 'macchiato' | 'latte' | string |
   return resolvedTheme === 'latte' ? CATPPUCCIN_LATTE_GHOSTTY : CATPPUCCIN_MACCHIATO_GHOSTTY;
 }
 
+export interface TerminalWSFrame {
+  type?: string;
+  sessionId?: string;
+  nodeId?: string;
+  data?: string;
+  code?: number;
+}
+
+export interface TerminalWSEvaluation {
+  matchedSession: boolean;
+  ptyActive: boolean;
+  writeData?: string;
+  reprompt?: boolean;
+}
+
+/**
+ * Interprets one WebSocket frame for a terminal session.
+ *
+ * The Go hub reports a PTY that failed to spawn by streaming a
+ * `[pty spawn error: ...]` line over `terminal_data`. Treating that as a normal
+ * frame leaves the socket open with a dead PTY behind it, so keystrokes are
+ * swallowed forever. This evaluates each frame into (a) whether the session is
+ * still live and (b) whether the prompt must be re-rendered so input falls back
+ * to the `/api/terminal/exec` path.
+ */
+export function evaluateTerminalWSMessage(
+  msg: TerminalWSFrame | null | undefined,
+  sessionId: string,
+  currentlyActive: boolean
+): TerminalWSEvaluation {
+  if (!msg || msg.sessionId !== sessionId) {
+    return { matchedSession: false, ptyActive: currentlyActive };
+  }
+  if (msg.type === 'terminal_data' || msg.type === 'terminal_output') {
+    const text = typeof msg.data === 'string' ? msg.data : '';
+    const isSpawnError = text.includes('[pty spawn error:');
+    return {
+      matchedSession: true,
+      ptyActive: !isSpawnError,
+      writeData: text,
+      reprompt: isSpawnError,
+    };
+  }
+  if (msg.type === 'terminal_exit') {
+    return {
+      matchedSession: true,
+      ptyActive: false,
+      reprompt: true,
+    };
+  }
+  return { matchedSession: false, ptyActive: currentlyActive };
+}
+
+/** Builds the POST body for `/api/terminal/exec`. */
+export function buildTerminalExecPayload(
+  command: string,
+  nodeId: string
+): { command: string; host: string; nodeId: string } {
+  return {
+    command: command.trim(),
+    host: nodeId,
+    nodeId,
+  };
+}
+

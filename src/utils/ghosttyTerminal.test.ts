@@ -8,6 +8,8 @@ import {
   getGhosttyTheme,
   CATPPUCCIN_MACCHIATO_GHOSTTY,
   CATPPUCCIN_LATTE_GHOSTTY,
+  evaluateTerminalWSMessage,
+  buildTerminalExecPayload,
 } from './ghosttyTerminal.ts';
 import type { NodeItem } from '../types/index.ts';
 
@@ -104,5 +106,51 @@ describe('libghostty (ghostty-web) terminal formatting and input state', () => {
     assert.equal(getGhosttyTheme('latte').foreground, '#4c4f69');
     assert.deepEqual(getGhosttyTheme(), CATPPUCCIN_MACCHIATO_GHOSTTY);
     assert.deepEqual(getGhosttyTheme('latte'), CATPPUCCIN_LATTE_GHOSTTY);
+  });
+
+  it('tracks PTY liveness across WebSocket frames and builds /api/terminal/exec payloads', () => {
+    const okMsg = evaluateTerminalWSMessage(
+      { type: 'terminal_data', sessionId: 'sess-1', data: 'core@dev-pc:~$ ' },
+      'sess-1',
+      false
+    );
+    assert.equal(okMsg.matchedSession, true);
+    assert.equal(okMsg.ptyActive, true);
+    assert.equal(okMsg.writeData, 'core@dev-pc:~$ ');
+    assert.equal(okMsg.reprompt, false);
+
+    // terminal_output is accepted as an alias for terminal_data.
+    const aliasMsg = evaluateTerminalWSMessage(
+      { type: 'terminal_output', sessionId: 'sess-1', data: 'ok' },
+      'sess-1',
+      true
+    );
+    assert.equal(aliasMsg.matchedSession, true);
+    assert.equal(aliasMsg.writeData, 'ok');
+
+    // A spawn error arrives as ordinary output but means the PTY is dead.
+    const errMsg = evaluateTerminalWSMessage(
+      { type: 'terminal_data', sessionId: 'sess-1', data: '\r\n[pty spawn error: dial tcp refused]\r\n' },
+      'sess-1',
+      true
+    );
+    assert.equal(errMsg.matchedSession, true);
+    assert.equal(errMsg.ptyActive, false);
+    assert.equal(errMsg.reprompt, true);
+
+    const exitMsg = evaluateTerminalWSMessage({ type: 'terminal_exit', sessionId: 'sess-1', code: 1 }, 'sess-1', true);
+    assert.equal(exitMsg.ptyActive, false);
+    assert.equal(exitMsg.reprompt, true);
+
+    // Frames for another session are ignored and never change local state.
+    const otherSess = evaluateTerminalWSMessage({ type: 'terminal_exit', sessionId: 'sess-2', code: 0 }, 'sess-1', true);
+    assert.equal(otherSess.matchedSession, false);
+    assert.equal(otherSess.ptyActive, true);
+
+    assert.deepEqual(buildTerminalExecPayload('  uname -a  ', 'node-dev-pc'), {
+      command: 'uname -a',
+      host: 'node-dev-pc',
+      nodeId: 'node-dev-pc',
+    });
   });
 });

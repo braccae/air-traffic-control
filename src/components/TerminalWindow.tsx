@@ -9,6 +9,8 @@ import {
   applyTerminalInputKey,
   type TerminalInputState,
   getGhosttyTheme,
+  evaluateTerminalWSMessage,
+  buildTerminalExecPayload,
 } from '../utils/ghosttyTerminal.ts';
 import { useDraggable, type DragPosition } from '../hooks/useDraggable.ts';
 import { useResizable, type WindowSize, type ResizeDirection } from '../hooks/useResizable.ts';
@@ -136,6 +138,9 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  // True only while the WebSocket PTY on the far end is alive. A socket that
+  // stays OPEN while its PTY died (spawn error) must stop receiving keystrokes.
+  const ptyActiveRef = useRef(false);
   const inputStateRef = useRef<TerminalInputState>({
     buffer: '',
     history: [],
@@ -237,11 +242,11 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
         const resp = await fetch('/api/terminal/exec', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: trimmed, host: node.id }),
+          body: JSON.stringify(buildTerminalExecPayload(trimmed, node.id)),
         });
         if (resp.ok) {
           const data = await resp.json();
-          output = data.output || '';
+          output = data.output ?? data.stdout ?? data.stderr ?? '';
         } else {
           const data = await resp.json().catch(() => null);
           throw new Error(data?.error || `HTTP ${resp.status}`);
@@ -266,7 +271,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
 
   const handleRunQuickCommand = useCallback(
     (cmd: string) => {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      if (ptyActiveRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(
           JSON.stringify({
             type: 'terminal_data',
@@ -383,6 +388,9 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
               setConnStatus('connected');
               reconnectAttemptRef.current = 0;
               setReconnectAttempt(0);
+              if (termInstance) {
+                ptyActiveRef.current = true;
+              }
               ws.send(
                 JSON.stringify({
                   type: 'terminal_start',
@@ -404,35 +412,40 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
                 return;
               }
               if (!msg || typeof msg.type !== 'string') return;
-              // Handle both terminal_data and terminal_output (backend may send either)
-              if ((msg.type === 'terminal_data' || msg.type === 'terminal_output') && msg.sessionId === session.id) {
-                if (msg.data) {
-                  termInstance?.write(msg.data);
-                }
+              // Handle terminal_data/terminal_output through the shared PTY
+              // evaluator: a `[pty spawn error: ...]` frame means the socket is
+              // still open but the PTY behind it is dead, so we must stop
+              // streaming keystrokes to it and re-render the prompt.
+              const evalResult = evaluateTerminalWSMessage(msg, session.id, ptyActiveRef.current);
+              if (!evalResult.matchedSession) return;
+              ptyActiveRef.current = evalResult.ptyActive;
+              if (evalResult.writeData) {
+                termInstance?.write(evalResult.writeData);
                 // Defer lastOutputText update to avoid per-message re-render lag
-                if (msg.data) {
-                  setLastOutputText((prev) => (prev + msg.data).slice(-4000));
-                }
-                return;
-              }
-              if (msg.type === 'terminal_exit' && msg.sessionId === session.id) {
-                termInstance?.write(`\\r\\n[session exited (code ${msg.code ?? 0})]\\r\\n`);
+                setLastOutputText((prev) => (prev + evalResult.writeData).slice(-4000));
+              } else if (msg.type === 'terminal_exit') {
+                termInstance?.write(`\r\n[session exited (code ${msg.code ?? 0})]\r\n`);
                 setConnStatus('disconnected');
-                return;
+              }
+              if (evalResult.reprompt) {
+                writePrompt(termInstance);
               }
             };
 
             ws.onerror = () => {
               if (disposed || !mountedRef.current) return;
+              ptyActiveRef.current = false;
               setConnStatus('reconnecting');
             };
 
             ws.onclose = () => {
+              ptyActiveRef.current = false;
               if (disposed || !mountedRef.current || intentionalCloseRef.current) return;
               setConnStatus('disconnected');
               scheduleReconnect();
             };
           } catch {
+            ptyActiveRef.current = false;
             if (mountedRef.current && !intentionalCloseRef.current && !disposed) {
               setConnStatus('reconnecting');
               scheduleReconnect();
@@ -446,7 +459,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
           if (!termInstance || runningRef.current) return;
 
           // If interactive WebSocket PTY is active, send stream directly
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          if (ptyActiveRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(
               JSON.stringify({
                 type: 'terminal_data',
@@ -489,6 +502,7 @@ export const TerminalWindow: React.FC<TerminalWindowProps> = ({
     return () => {
       intentionalCloseRef.current = true;
       disposed = true;
+      ptyActiveRef.current = false;
       setEngineReady(false);
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);

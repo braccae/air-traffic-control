@@ -406,6 +406,50 @@ func TestNewAPIsWiredInServerMux(t *testing.T) {
 			t.Fatalf("expected compiled TaskResult, got %+v", result)
 		}
 	})
+
+	// 6. Verify /api/terminal/exec is mounted and that terminal execution still
+	// works when the daemon runs without a persistent store.
+	t.Run("TerminalExecEndpoint", func(t *testing.T) {
+		// The mux above is seeded with a single remote host, so this only asserts
+		// the route is wired on both path forms (trailing slash included).
+		for _, endpoint := range []string{"/api/terminal/exec", "/api/terminal/exec/"} {
+			reqTerm := httptest.NewRequest(http.MethodPost, endpoint, bytes.NewReader([]byte(`{"command":"true","host":"node-likes-it-cold"}`)))
+			recTerm := httptest.NewRecorder()
+			mux.ServeHTTP(recTerm, reqTerm)
+			if recTerm.Code != http.StatusOK {
+				t.Fatalf("POST %s status=%d body=%s", endpoint, recTerm.Code, recTerm.Body.String())
+			}
+			var termResp map[string]any
+			if err := json.NewDecoder(recTerm.Body).Decode(&termResp); err != nil {
+				t.Fatalf("decode %s: %v", endpoint, err)
+			}
+			if _, ok := termResp["nodeId"]; !ok {
+				t.Fatalf("%s did not reach the terminal handler: %+v", endpoint, termResp)
+			}
+		}
+
+		// Storeless mux: no store and no resolver, so the baseline inventory is
+		// consulted and the local node executes the command for real.
+		execBody, _ := json.Marshal(map[string]any{
+			"command": "printf 'mux-terminal-verified'",
+			"host":    "node-dev-pc",
+			"nodeId":  "node-dev-pc",
+		})
+		storelessMux, _ := newServerMux(nil, nil, "", nil)
+		reqStoreless := httptest.NewRequest(http.MethodPost, "/api/terminal/exec", bytes.NewReader(execBody))
+		recStoreless := httptest.NewRecorder()
+		storelessMux.ServeHTTP(recStoreless, reqStoreless)
+		if recStoreless.Code != http.StatusOK {
+			t.Fatalf("storeless POST /api/terminal/exec status=%d body=%s", recStoreless.Code, recStoreless.Body.String())
+		}
+		var storelessResp map[string]any
+		if err := json.NewDecoder(recStoreless.Body).Decode(&storelessResp); err != nil {
+			t.Fatalf("decode storeless /api/terminal/exec: %v", err)
+		}
+		if storelessResp["success"] != true || storelessResp["output"] != "mux-terminal-verified" {
+			t.Fatalf("expected storeless terminal output 'mux-terminal-verified', got %+v", storelessResp)
+		}
+	})
 }
 
 type mockBackupStore struct {
