@@ -1,6 +1,7 @@
 # Air Traffic Control — dev, test, and build entry points.
 #
-#   just dev         Go daemon :18090 + Vite :5173 with /api and /ws proxied
+#   just dev         Go daemon :18090 (`go run .`, auto-restart) + Vite :5173
+#                    with /api and /ws proxied. Reaps any previous dev server.
 #
 # See docs/superpowers/plans/2026-10-20-node-to-pure-go-migration.md
 
@@ -13,58 +14,26 @@ default:
 # dev
 # ---------------------------------------------------------------------------
 
-# Full-stack dev: Go daemon on :18090, Vite on :5173 proxying /api and /ws.
+# Full-stack dev: `go run .` daemon on :18090 + Vite on :5173; reaps the previous run.
 dev: dev-split
 
+# Full-stack dev supervisor — see scripts/dev.sh for ports, reaping and reload.
 dev-split:
-    #!/usr/bin/env bash
-    set -euo pipefail
+    ./scripts/dev.sh
 
-    API_PORT="${API_PORT:-18090}"
-    GO_PID=""
-
-    cleanup() {
-      if [[ -n "$GO_PID" ]] && kill -0 "$GO_PID" 2>/dev/null; then
-        kill "$GO_PID" 2>/dev/null || true
-        wait "$GO_PID" 2>/dev/null || true
-      fi
-    }
-    trap cleanup INT TERM EXIT
-
-    if curl -fsS "http://127.0.0.1:${API_PORT}/api/health" >/dev/null 2>&1; then
-      echo "!! something already listening on :${API_PORT} — stop it first" >&2
-      exit 1
-    fi
-
-    echo ">> Go daemon on :${API_PORT}"
-    # Always use the repo-root inventory DB. Resolving `data/hosts-cache.sqlite`
-    # relative to backend-go/ silently forks the inventory into
-    # backend-go/data/hosts-cache.sqlite.
-    ( cd backend-go && exec go run . -port "${API_PORT}" -db "../data/hosts-cache.sqlite" ) &
-    GO_PID=$!
-
-    for _ in $(seq 1 60); do
-      if curl -fsS "http://127.0.0.1:${API_PORT}/api/health" >/dev/null 2>&1; then
-        echo ">> daemon healthy"
-        break
-      fi
-      if ! kill -0 "$GO_PID" 2>/dev/null; then
-        echo "!! Go daemon exited during startup" >&2
-        exit 1
-      fi
-      sleep 0.25
-    done
-
-    echo ">> Vite on :5173 — open http://192.168.8.211:5173"
-    npx vite --host 0.0.0.0
-
-# Go daemon only, on :18090 by default. Override with `just dev-backend 9090`.
+# Go daemon only on :18090 (override: `just dev-backend 9090`); reaps and live-reloads.
 dev-backend port="18090":
-    cd backend-go && go run . -port {{port}} -db ../data/hosts-cache.sqlite
+    API_PORT={{port}} ./scripts/dev.sh --backend-only
 
-# Vite dev server only. Requires the Go daemon on :18090 (see dev-split).
+# Go daemon with CAP_NET_ADMIN (tsnet SO_MARK instead of SO_BINDTODEVICE).
+# Needed for ATC's own tsnet node when a tunnel such as Cloudflare WARP owns the
+# route to the Tailscale control plane; requires passwordless sudo for setcap.
+dev-privileged port="18090":
+    ATC_CAP_NET_ADMIN=1 API_PORT={{port}} ./scripts/dev.sh --backend-only
+
+# Vite dev server only; requires the daemon on :18090 and leaves it untouched.
 dev-frontend:
-    npx vite
+    ./scripts/dev.sh --frontend-only
 
 # ---------------------------------------------------------------------------
 # test and gates

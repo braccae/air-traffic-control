@@ -1,28 +1,56 @@
+# Air Traffic Control Go daemon (coordinator backend).
+#
+# This is a *system* unit on purpose: CAP_NET_ADMIN — which tailscale/tsnet needs
+# to mark its sockets with SO_MARK so they follow host policy routing instead of
+# being pinned to one interface — is not available to `systemctl --user`
+# services. A user manager never has CAP_NET_ADMIN in its bounding set, so an
+# AmbientCapabilities= line in a user unit is silently ineffective.
+#
+# For local development use `just dev` (unprivileged) or `just dev-privileged`
+# (applies the same capability to the dev binary with setcap, no system unit).
+#
+# Install from the repository root (edit User= below first if the checkout
+# belongs to another account):
+#
+#   sudo cp backend-go/air-traffic-control-daemon.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now air-traffic-control-daemon.service
+#
+# `%h` expands to User='s home directory at runtime. If the checkout lives
+# somewhere other than ~/Projects/go_projects/air-traffic-control, edit the two
+# paths below.
+#
+# Hosts that run a tunnel such as Cloudflare WARP must either let tsnet follow
+# the tunnel's policy route (CAP_NET_ADMIN, below) or exclude the Tailscale
+# control plane (192.200.0.0/24) from the tunnel so the device-bound route works.
+
 [Unit]
-Description=Air Traffic Control Homelab Host Daemon
+Description=Air Traffic Control Go Daemon
 Documentation=https://github.com/your-org/air-traffic-control
-After=network.target network-online.target tailscaled.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=core
-Group=core
-WorkingDirectory=/var/lib/air-traffic-control
-ExecStart=/usr/local/bin/air-traffic-control-daemon -port 18090
+User=developer
+Group=developer
+WorkingDirectory=%h/Projects/go_projects/air-traffic-control
+ExecStart=%h/Projects/go_projects/air-traffic-control/backend-go/air-traffic-control-daemon -port 18090 -db data/hosts-cache.sqlite
 Restart=always
 RestartSec=5s
 LimitNOFILE=65535
 
-# Security hardening
+# tsnet marks outbound control/DERP sockets with SO_MARK so they bypass its own
+# routes. Without CAP_NET_ADMIN it falls back to SO_BINDTODEVICE, which jumps
+# past host policy routing (Cloudflare WARP, VPNs) and can pin the control plane
+# to an interface that cannot reach it.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+# Do not set ProtectHome=read-only: the SQLite inventory lives in the checkout.
 ProtectSystem=full
-ProtectHome=read-only
 PrivateTmp=true
 NoNewPrivileges=true
-
-# Environment
-Environment=PORT=18090
-Environment=GIN_MODE=release
 
 [Install]
 WantedBy=multi-user.target
