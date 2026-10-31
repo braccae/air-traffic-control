@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -67,6 +68,41 @@ func (s *staticRunnerResolver) ResolveRunner(ctx context.Context, facts plugin.H
 		return s.runner, nil
 	}
 	return &dummyRunner{}, nil
+}
+
+type failingRunnerResolver struct{ err error }
+
+func (f *failingRunnerResolver) ResolveRunner(ctx context.Context, facts plugin.HostFacts) (plugin.Runner, error) {
+	return nil, f.err
+}
+
+// An unreachable node exists; only its transport failed. Reporting that as 404
+// "not found" hides the real cause (dial timeout / SSH refused) from the UI.
+func TestAPI_NodeResolveStatusDistinguishesNotFoundFromUnreachable(t *testing.T) {
+	mux := http.NewServeMux()
+	plugin.NewAPI(plugin.APIOptions{
+		NodeResolver:   newMemoryNodeResolver(),
+		RunnerResolver: &failingRunnerResolver{err: fmt.Errorf("dial tcp 100.73.87.87:22: i/o timeout")},
+	}).RegisterRoutes(mux)
+
+	t.Run("unreachable node is 502", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/nodes/node-test-1/plugins", nil))
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502: %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "i/o timeout") {
+			t.Fatalf("body lost the transport error: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("unknown node is 404", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/nodes/node-missing/plugins", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 func TestAPI_ListPlugins(t *testing.T) {
@@ -502,8 +538,8 @@ func TestResolveRunner_SelectsSshForNonLocal(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.route, func(t *testing.T) {
 			facts := plugin.HostFacts{
-				NodeID:         "dev-pc",
-				HostRoute:      tt.route,
+				NodeID:           "dev-pc",
+				HostRoute:        tt.route,
 				ActiveConnection: "",
 			}
 			runner, err := resolver.ResolveRunner(context.Background(), facts)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -192,10 +193,11 @@ func NewSQLiteNodeResolver(dbPath string) (*SQLiteNodeResolver, error) {
 }
 
 // ResolveDBPath locates the hosts cache database. An explicit path or the
-// ATC_DB_PATH environment variable takes precedence. Otherwise it walks upward
-// from the current working directory looking for data/hosts-cache.sqlite, so
-// the daemon works whether it is launched from the repo root or from
-// backend-go/. It never returns an empty string.
+// ATC_DB_PATH environment variable takes precedence. Otherwise it prefers the
+// inventory at the repository root, then walks upward from the current working
+// directory. Preferring the root stops a daemon launched from backend-go/ from
+// silently forking the inventory into backend-go/data/hosts-cache.sqlite.
+// It never returns an empty string.
 func ResolveDBPath(explicit string) string {
 	if explicit != "" {
 		return explicit
@@ -205,6 +207,14 @@ func ResolveDBPath(explicit string) string {
 	}
 
 	const rel = "data/hosts-cache.sqlite"
+
+	if root, ok := repoRoot(); ok {
+		candidate := filepath.Join(root, rel)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
 	if _, err := os.Stat(rel); err == nil {
 		return rel
 	}
@@ -225,6 +235,27 @@ func ResolveDBPath(explicit string) string {
 	}
 
 	return rel
+}
+
+// repoRoot walks up from the working directory looking for the monorepo marker
+// (backend-go/go.mod) so the coordinator and the daemon agree on the inventory
+// location regardless of which directory they were started from.
+func repoRoot() (string, bool) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	dir := wd
+	for {
+		if fi, err := os.Stat(filepath.Join(dir, "backend-go", "go.mod")); err == nil && !fi.IsDir() {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
 }
 
 // Close closes the underlying SQLite database
@@ -817,7 +848,7 @@ func (a *API) handleNodeExec(w http.ResponseWriter, r *http.Request, nodeID stri
 
 	_, runner, err := a.resolveFactsAndRunner(ctx, nodeID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), NodeResolveStatus(err))
 		return
 	}
 
@@ -860,7 +891,7 @@ func (a *API) resolveFactsAndRunner(ctx context.Context, nodeID string) (HostFac
 		return HostFacts{}, nil, fmt.Errorf("failed to resolve node %s: %w", nodeID, err)
 	}
 	if !ok {
-		return HostFacts{}, nil, fmt.Errorf("node %s not found", nodeID)
+		return HostFacts{}, nil, fmt.Errorf("%w: %s", ErrNodeNotFound, nodeID)
 	}
 
 	runner, err := a.runnerResolver.ResolveRunner(ctx, facts)
@@ -871,12 +902,26 @@ func (a *API) resolveFactsAndRunner(ctx context.Context, nodeID string) (HostFac
 	return facts, runner, nil
 }
 
+// ErrNodeNotFound marks a resolve failure caused by an unknown node id. It lets
+// handlers answer 404 for a genuinely missing node without reporting an
+// unreachable one (dial timeout, SSH refused) as "not found".
+var ErrNodeNotFound = errors.New("node not found")
+
+// NodeResolveStatus maps a resolveFactsAndRunner error to an HTTP status:
+// unknown node -> 404, everything else (transport/dial/SSH failures) -> 502.
+func NodeResolveStatus(err error) int {
+	if errors.Is(err, ErrNodeNotFound) {
+		return http.StatusNotFound
+	}
+	return http.StatusBadGateway
+}
+
 // handleNodePlugins implements GET /api/nodes/:id/plugins
 func (a *API) handleNodePlugins(w http.ResponseWriter, r *http.Request, nodeID string) {
 	ctx := r.Context()
 	facts, runner, err := a.resolveFactsAndRunner(ctx, nodeID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), NodeResolveStatus(err))
 		return
 	}
 
@@ -934,7 +979,7 @@ func (a *API) handleNodeModules(w http.ResponseWriter, r *http.Request, nodeID s
 	ctx := r.Context()
 	facts, runner, err := a.resolveFactsAndRunner(ctx, nodeID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), NodeResolveStatus(err))
 		return
 	}
 
@@ -1026,7 +1071,7 @@ func (a *API) handlePluginRead(w http.ResponseWriter, r *http.Request, nodeID st
 
 	facts, runner, err := a.resolveFactsAndRunner(ctx, nodeID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), NodeResolveStatus(err))
 		return
 	}
 
@@ -1106,7 +1151,7 @@ func (a *API) handlePluginAction(w http.ResponseWriter, r *http.Request, nodeID 
 
 	facts, _, err := a.resolveFactsAndRunner(ctx, nodeID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), NodeResolveStatus(err))
 		return
 	}
 
@@ -1159,7 +1204,7 @@ func (a *API) handlePluginQuery(w http.ResponseWriter, r *http.Request, nodeID s
 
 	facts, runner, err := a.resolveFactsAndRunner(ctx, nodeID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), NodeResolveStatus(err))
 		return
 	}
 
