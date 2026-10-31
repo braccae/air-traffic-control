@@ -73,12 +73,8 @@ func getAnsibleDocBinary(repoRoot string) (string, error) {
 	if p := os.Getenv("ANSIBLE_DOC_PATH"); p != "" {
 		return p, nil
 	}
-	venvPath := GetAnsibleVenvPath(repoRoot)
-	bin := filepath.Join(venvPath, "bin", "ansible-doc")
-	if fi, err := os.Stat(bin); err == nil && !fi.IsDir() {
-		return bin, nil
-	}
-	if p, err := exec.LookPath("ansible-doc"); err == nil {
+	bin := filepath.Join(GetAnsibleVenvPath(repoRoot), "bin", "ansible-doc")
+	if p := ResolveAnsibleBinary(repoRoot, "ansible-doc"); p != "" {
 		return p, nil
 	}
 	return "", fmt.Errorf("ansible-doc not found in %s or PATH", bin)

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"air-traffic-control/backend/pkg/ansiblebin"
 	"air-traffic-control/backend/pkg/hostcache"
 	"air-traffic-control/backend/pkg/plugin"
 )
@@ -298,8 +299,11 @@ func ExecuteTaskOneByOne(ctx context.Context, task Task, opts Options) (Executio
 		if venvDir == "" {
 			venvDir = filepath.Join(workdir, "data", "ansible-venv")
 		}
+		// Prefer a venv binary that actually execs. A venv copied from another
+		// host keeps absolute interpreter paths, so a plain existence check
+		// would select a wrapper that fails with ENOENT.
 		candidate := filepath.Join(venvDir, "bin", "ansible-playbook")
-		if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+		if ansiblebin.Runnable(candidate) {
 			ansibleBin = candidate
 		} else {
 			ansibleBin = "ansible-playbook"
@@ -399,6 +403,17 @@ func buildEnv(workdir string, opts Options) map[string]string {
 			env[kv[:i]] = kv[i+1:]
 		}
 	}
+	// ansible-core 2.21+ makes a missing vault password file fatal, so a stale
+	// ANSIBLE_VAULT_PASSWORD_FILE inherited from the operator's shell or an old
+	// unit file would abort every playbook run. The coordinator resolves vault
+	// passwords itself and passes them explicitly, so drop a pointer that no
+	// longer resolves rather than poisoning unrelated tasks.
+	if p := strings.TrimSpace(env["ANSIBLE_VAULT_PASSWORD_FILE"]); p != "" {
+		if _, err := os.Stat(p); err != nil {
+			delete(env, "ANSIBLE_VAULT_PASSWORD_FILE")
+		}
+	}
+
 	env["ANSIBLE_STDOUT_CALLBACK"] = "json"
 	// ansible-core no longer ships the `json` callback (gone in 2.19+), so the
 	// repo carries its own implementation and points ansible at it.

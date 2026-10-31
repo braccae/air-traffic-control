@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"air-traffic-control/backend/pkg/ansiblebin"
 )
 
 // Entry describes one collection in the baseline catalog.
@@ -386,7 +388,9 @@ func galaxyBin(repoRoot string) (string, error) {
 		candidates = append(candidates, filepath.Join(env, "bin", "ansible-galaxy"))
 	}
 	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+		// Runnable, not merely present: a venv copied from another host keeps
+		// absolute interpreter paths that no longer resolve here.
+		if ansiblebin.Runnable(candidate) {
 			return candidate, nil
 		}
 	}

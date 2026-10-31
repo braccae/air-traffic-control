@@ -158,15 +158,11 @@ func BuildDynamicInventory(store *hostcache.Store) (map[string]any, error) {
 }
 
 func resolveGalaxyBin(repoRoot string) (string, error) {
-	venvDir := GetAnsibleVenvPath(repoRoot)
-	galaxyBin := filepath.Join(venvDir, "bin", "ansible-galaxy")
-	if _, err := exec.LookPath(galaxyBin); err == nil {
-		return galaxyBin, nil
-	}
-	if p, err := exec.LookPath("ansible-galaxy"); err == nil {
+	if p := ResolveAnsibleBinary(repoRoot, "ansible-galaxy"); p != "" {
 		return p, nil
 	}
-	return "", fmt.Errorf("ansible-galaxy executable not found")
+	venvBinDir := filepath.Join(GetAnsibleVenvPath(repoRoot), "bin")
+	return "", fmt.Errorf("ansible-galaxy executable not found in %s or PATH", venvBinDir)
 }
 
 // ListGalaxyCollections returns installed Ansible Galaxy collections with version and path metadata.

@@ -1,11 +1,15 @@
 package ansibleapi
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"air-traffic-control/backend/pkg/ansiblebin"
 )
 
 // RequiredVenvPackages lists packages that must be present in the virtualenv.
@@ -75,23 +79,51 @@ func FindUv(repoRoot string) string {
 	return ""
 }
 
-// EnsureAnsibleVenv checks if the virtualenv exists; if missing and uv is available, creates it,
-// and ensures required Galaxy collections (such as community.general for run0) are installed.
+// ResolveAnsibleBinary returns the runnable path for an Ansible executable,
+// preferring the managed virtualenv and falling back to PATH. It returns ""
+// when neither location has a usable binary.
+func ResolveAnsibleBinary(repoRoot, name string) string {
+	venvBinDir := filepath.Join(GetAnsibleVenvPath(repoRoot), "bin")
+	return ansiblebin.Resolve(venvBinDir, name)
+}
+
+// venvHealthy reports whether the virtualenv is usable on this host. Presence
+// is not enough: a venv copied from another machine keeps absolute interpreter
+// paths, so the wrappers exist but exec fails with ENOENT. An --version probe
+// is the only reliable check, and it also catches missing or broken packages.
+func venvHealthy(venvDir string) bool {
+	pythonBin := filepath.Join(venvDir, "bin", "python")
+	if !ansiblebin.Runnable(pythonBin) {
+		return false
+	}
+	ansibleBin := filepath.Join(venvDir, "bin", "ansible")
+	if !ansiblebin.Runnable(ansibleBin) {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, ansibleBin, "--version").Run() == nil
+}
+
+// EnsureAnsibleVenv checks if the virtualenv exists and is runnable; if missing
+// or corrupt it rebuilds it in place with uv, then ensures required Galaxy
+// collections (such as community.general for run0) are installed.
 func EnsureAnsibleVenv(repoRoot string) (string, error) {
 	venvDir := GetAnsibleVenvPath(repoRoot)
-	ansibleBin := filepath.Join(venvDir, "bin", "ansible")
-	if fi, err := os.Stat(ansibleBin); err == nil && !fi.IsDir() {
+	if venvHealthy(venvDir) {
 		ensureRequiredCollections(repoRoot)
 		return venvDir, nil
 	}
 
 	uvPath := FindUv(repoRoot)
 	if uvPath == "" {
-		return "", fmt.Errorf("uv binary not found to bootstrap ansible-venv")
+		return "", fmt.Errorf("ansible-venv at %s is unusable and no uv binary was found to rebuild it", venvDir)
 	}
 
-	// Create venv
-	cmd := exec.Command(uvPath, "venv", venvDir)
+	// --clear rebuilds in place, which is what heals a stale venv: the old
+	// bin/python symlink and script shebangs are replaced with this host's paths.
+	cmd := exec.Command(uvPath, "venv", "--clear", venvDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("uv venv failed (%w): %s", err, string(out))
 	}
@@ -130,14 +162,17 @@ func InspectEnvironment(repoRoot string) EnvironmentInfo {
 	vaultBinary := filepath.Join(binDir, "ansible-vault")
 	pythonBinary := filepath.Join(binDir, "python")
 
+	// Runnable, not merely present: a venv copied from another host keeps
+	// absolute interpreter paths that no longer resolve on this machine.
 	installed := false
-	if fi, err := os.Stat(ansibleBinary); err == nil && !fi.IsDir() {
+	if ansiblebin.Runnable(ansibleBinary) {
 		installed = true
-	} else if fi, err := os.Stat(playbookBinary); err == nil && !fi.IsDir() {
+	} else if ansiblebin.Runnable(playbookBinary) {
 		installed = true
 	} else if p, err := exec.LookPath("ansible-playbook"); err == nil {
 		installed = true
 		playbookBinary = p
+		ansibleBinary = p
 	}
 
 	uvPath := FindUv(repoRoot)
@@ -166,7 +201,7 @@ func InspectEnvironment(repoRoot string) EnvironmentInfo {
 
 	// Ansible version probe
 	ansToRun := playbookBinary
-	if _, err := os.Stat(ansToRun); err != nil {
+	if !ansiblebin.Runnable(ansToRun) {
 		ansToRun, _ = exec.LookPath("ansible-playbook")
 	}
 	if ansToRun != "" {
@@ -178,7 +213,7 @@ func InspectEnvironment(repoRoot string) EnvironmentInfo {
 
 	// Galaxy collections list
 	galaxyToRun := filepath.Join(binDir, "ansible-galaxy")
-	if _, err := os.Stat(galaxyToRun); err != nil {
+	if !ansiblebin.Runnable(galaxyToRun) {
 		galaxyToRun, _ = exec.LookPath("ansible-galaxy")
 	}
 	if galaxyToRun != "" {

@@ -617,6 +617,20 @@ func main() {
 		log.Fatalf("Failed to open host cache: %v", err)
 	}
 
+	// Verify (and if necessary rebuild) the managed Ansible virtualenv before
+	// serving requests. Vault decryption and playbook runs exec ansible-vault /
+	// ansible-playbook out of data/ansible-venv, so a venv that was created on
+	// another host (stale shebangs and a dangling bin/python) would make every
+	// SSH secret resolution fail with ENOENT. A failure here is logged loudly
+	// rather than fatal: the coordinator still serves non-Ansible views, and
+	// Settings → Ansible Engine reports the environment as uninstalled.
+	repoRoot := ansqueue.ResolveWorkDir()
+	if venvDir, err := ansibleapi.EnsureAnsibleVenv(repoRoot); err != nil {
+		log.Printf("ansible environment bootstrap failed: %v", err)
+	} else {
+		log.Printf("ansible environment ready at %s", venvDir)
+	}
+
 	// Periodically snapshot the in-memory cache to disk (300s ticker). In file
 	// mode Backup is a no-op, so this is safe to run unconditionally.
 	updater := NewHostDataUpdater(300 * time.Second)
