@@ -974,19 +974,24 @@ type SelfStatus struct {
 	// Online is what the control plane reports for this node. It is distinct
 	// from Connected (which is only "BackendState == Running"): a node can
 	// have a running backend while control says it is offline.
-	Online       bool     `json:"online"`
-	Mode         string   `json:"mode"` // "tsnet" | "host-socket" | "unconfigured"
-	Hostname     string   `json:"hostname"`
-	DNSName      string   `json:"dnsName,omitempty"`
-	TailscaleIPs []string `json:"tailscaleIps"`
-	BackendState string   `json:"backendState,omitempty"`
-	AuthURL      string   `json:"authUrl,omitempty"`
-	Health       []string `json:"health,omitempty"`
-	KeyExpiry    string   `json:"keyExpiry,omitempty"`
-	PeerCount    int      `json:"peerCount"`
-	LastUpAt     string   `json:"lastUpAt,omitempty"`
-	StateDir     string   `json:"stateDir"`
-	Ephemeral    bool     `json:"ephemeral"`
+	Online   bool   `json:"online"`
+	Mode     string `json:"mode"` // "tsnet" | "host-socket" | "unconfigured"
+	Hostname string `json:"hostname"`
+	// RequestedHostname is the name ATC asked Tailscale for. Hostname is the
+	// name the control plane actually assigned; they differ ("-1" suffix) when
+	// a stale device still holds the requested name.
+	RequestedHostname string   `json:"requestedHostname,omitempty"`
+	NodeID            string   `json:"nodeId,omitempty"`
+	DNSName           string   `json:"dnsName,omitempty"`
+	TailscaleIPs      []string `json:"tailscaleIps"`
+	BackendState      string   `json:"backendState,omitempty"`
+	AuthURL           string   `json:"authUrl,omitempty"`
+	Health            []string `json:"health,omitempty"`
+	KeyExpiry         string   `json:"keyExpiry,omitempty"`
+	PeerCount         int      `json:"peerCount"`
+	LastUpAt          string   `json:"lastUpAt,omitempty"`
+	StateDir          string   `json:"stateDir"`
+	Ephemeral         bool     `json:"ephemeral"`
 	// Proxy is the userspace SOCKS5/HTTP listener state. It is never secret.
 	Proxy ProxyStatus `json:"proxy"`
 	Error string      `json:"error,omitempty"`
@@ -999,11 +1004,12 @@ type SelfStatus struct {
 func (p *Plugin) SelfStatus(ctx context.Context) (status SelfStatus) {
 	cfg := p.effectiveSettings()
 	status = SelfStatus{
-		Mode:         "unconfigured",
-		Hostname:     cfg.Hostname,
-		StateDir:     cfg.StateDir,
-		Ephemeral:    cfg.Ephemeral,
-		TailscaleIPs: []string{},
+		Mode:              "unconfigured",
+		Hostname:          cfg.Hostname,
+		RequestedHostname: cfg.Hostname,
+		StateDir:          cfg.StateDir,
+		Ephemeral:         cfg.Ephemeral,
+		TailscaleIPs:      []string{},
 	}
 	defer func() { status.Proxy = p.proxyStatus() }()
 	if cfg.AuthKey != "" {
@@ -1061,9 +1067,14 @@ func (p *Plugin) SelfStatus(ctx context.Context) (status SelfStatus) {
 	status.AuthURL = st.AuthURL
 	status.Connected = st.BackendState == "Running"
 	if st.Self != nil {
+		requested := cfg.Hostname
 		if st.Self.HostName != "" {
-			status.Hostname = st.Self.HostName
+			requested = st.Self.HostName
 		}
+		status.RequestedHostname = requested
+		// Tailscale assigns the MagicDNS name; HostName is only the request.
+		status.Hostname = tailnetHostname(st.Self.DNSName, requested)
+		status.NodeID = string(st.Self.ID)
 		status.DNSName = st.Self.DNSName
 		status.TailscaleIPs = make([]string, 0, len(st.Self.TailscaleIPs))
 		for _, ip := range st.Self.TailscaleIPs {
@@ -1087,6 +1098,11 @@ func (p *Plugin) SelfStatus(ctx context.Context) (status SelfStatus) {
 			status.PeerCount = len(s.Peer)
 			if s.Self != nil {
 				status.Online = s.Self.Online
+				if s.Self.HostName != "" {
+					status.RequestedHostname = s.Self.HostName
+				}
+				status.Hostname = tailnetHostname(s.Self.DNSName, status.RequestedHostname)
+				status.NodeID = string(s.Self.ID)
 				if s.Self.KeyExpiry != nil {
 					status.KeyExpiry = s.Self.KeyExpiry.UTC().Format(time.RFC3339)
 				}
@@ -1094,6 +1110,21 @@ func (p *Plugin) SelfStatus(ctx context.Context) (status SelfStatus) {
 		}
 	}
 	return status
+}
+
+// tailnetHostname returns the device name the control plane assigned, derived
+// from its MagicDNS name (first label). Tailscale appends -1, -2, ... when the
+// requested hostname is already held by another device, and admin consoles show
+// that assigned name rather than the requested one.
+func tailnetHostname(dnsName, requested string) string {
+	dnsName = strings.TrimSuffix(strings.TrimSpace(dnsName), ".")
+	if dnsName != "" {
+		if i := strings.IndexByte(dnsName, '.'); i > 0 {
+			return dnsName[:i]
+		}
+		return dnsName
+	}
+	return strings.TrimSpace(requested)
 }
 
 // fillHostSocketStatus populates an unreported self view from the host's
@@ -1110,8 +1141,10 @@ func (p *Plugin) fillHostSocketStatus(status *SelfStatus) {
 	status.Connected = host.BackendState == "Running"
 	status.Online = host.Self.Online
 	if host.Self.HostName != "" {
-		status.Hostname = host.Self.HostName
+		status.RequestedHostname = host.Self.HostName
 	}
+	status.Hostname = tailnetHostname(host.Self.DNSName, status.RequestedHostname)
+	status.NodeID = host.Self.ID
 	status.DNSName = host.Self.DNSName
 	if len(host.Self.TailscaleIPs) > 0 {
 		status.TailscaleIPs = append([]string{}, host.Self.TailscaleIPs...)

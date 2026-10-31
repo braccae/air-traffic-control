@@ -20,6 +20,8 @@ export interface TsnetSelfStatus {
   online: boolean;
   mode: string; // "tsnet" | "host-socket" | "unconfigured"
   hostname: string;
+  requestedHostname?: string;
+  nodeId?: string;
   dnsName?: string;
   tailscaleIps: string[];
   backendState?: string;
@@ -252,6 +254,10 @@ export const DatacenterTailscalePage: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px] font-mono">
             <StatusRow label="Transport" value={self.mode} />
             <StatusRow label="Node" value={self.hostname || '—'} />
+            {self.requestedHostname && self.requestedHostname !== self.hostname && (
+              <StatusRow label="Requested name" value={self.requestedHostname} />
+            )}
+            {self.nodeId && <StatusRow label="Node ID" value={self.nodeId} />}
             {self.dnsName && <StatusRow label="Mesh name" value={self.dnsName} />}
             <StatusRow
               label="Addresses"
@@ -290,6 +296,26 @@ export const DatacenterTailscalePage: React.FC = () => {
         {self?.proxy?.error && (
           <div role="alert" className="text-[11px] font-mono text-[#ffb4ab]">
             Userspace proxy: {self.proxy.error}
+          </div>
+        )}
+
+        {self?.requestedHostname && self?.requestedHostname !== self?.hostname && (
+          <div className="rounded border border-[#ffd580]/30 bg-[#291e0f] p-2.5 flex flex-col gap-2 text-[11px] font-mono">
+            <p className="text-[#ffd580]">
+              Tailscale assigned <span className="font-bold">{self.hostname}</span> because{' '}
+              <span className="font-bold">{self.requestedHostname}</span> is still held by another device.
+              Remove the stale device, then ATC renames this node back.
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <a
+                href="https://login.tailscale.com/admin/machines"
+                target="_blank"
+                rel="noreferrer"
+                className="text-[#79c0ff] underline"
+              >
+                Open admin console
+              </a>
+            </div>
           </div>
         )}
 
