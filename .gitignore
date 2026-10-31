@@ -16,6 +16,10 @@ data/ansible-venv/
 # Local archives of retired runtime state (may contain old inventory secrets).
 data/archive/
 
+# Generated SOCKS5/HTTP proxy credentials for exposed userspace listeners.
+data/proxy-credentials.json
+data/proxy-credentials.json.tmp
+
 # Runtime host-cache SQLite — real homelab inventory, never track or publish.
 data/*.sqlite
 data/*.sqlite-shm

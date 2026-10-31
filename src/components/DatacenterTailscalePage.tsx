@@ -30,6 +30,14 @@ export interface TsnetSelfStatus {
   lastUpAt?: string;
   stateDir: string;
   ephemeral: boolean;
+  proxy?: {
+    mode: string; // "off" | "socks" | "http" | "both"
+    socks?: string;
+    http?: string;
+    authenticated: boolean;
+    credentialsFile?: string;
+    error?: string;
+  };
   error?: string;
 }
 
@@ -263,6 +271,25 @@ export const DatacenterTailscalePage: React.FC = () => {
               label="Ephemeral"
               value={`${self.ephemeral ? 'yes' : 'no'} (set by auth key at registration)`}
             />
+            {self.proxy && self.proxy.mode !== 'off' && (
+              <>
+                <StatusRow label="SOCKS5 proxy" value={self.proxy.socks || '—'} />
+                <StatusRow label="HTTP proxy" value={self.proxy.http || '—'} />
+                <StatusRow
+                  label="Proxy auth"
+                  value={self.proxy.authenticated ? 'required' : 'none (loopback only)'}
+                />
+                {self.proxy.credentialsFile && (
+                  <StatusRow label="Proxy credentials" value={self.proxy.credentialsFile} />
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {self?.proxy?.error && (
+          <div role="alert" className="text-[11px] font-mono text-[#ffb4ab]">
+            Userspace proxy: {self.proxy.error}
           </div>
         )}
 
@@ -292,9 +319,12 @@ export const DatacenterTailscalePage: React.FC = () => {
       </div>
       <GlobalSettingsPanel page={page} save={save} />
       <p className="text-[11px] text-[#8d909b] font-mono leading-relaxed">
-        With an auth key set, ATC joins the Tailscale mesh as its own node (direct mesh connectivity).
-        The host-socket fallback is a local-development convenience only: it borrows the host's
-        tailscaled socket when no auth key is configured. Leave it disabled in production.
+        ATC always runs Tailscale in userspace: no <span className="text-[#dfe1fa]">/dev/net/tun</span> and
+        no kernel routing. When the daemon cannot set <span className="text-[#dfe1fa]">CAP_NET_ADMIN</span>,
+        the SOCKS5/HTTP proxy listeners give sibling services access to the tailnet. They bind to loopback
+        on a host and to <span className="text-[#dfe1fa]">0.0.0.0</span> inside a container, with
+        credentials required whenever they are reachable beyond loopback. The host-socket fallback is an
+        explicit local-development option and is never enabled automatically.
       </p>
     </div>
   );

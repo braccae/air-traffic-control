@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -107,6 +108,14 @@ const (
 	FieldStateDir           = "stateDir"
 	FieldControlURL         = "controlURL"
 	FieldEphemeral          = "ephemeral"
+	// FieldProxyMode controls the userspace SOCKS5/HTTP proxy listeners:
+	// auto | socks | http | both | off. "auto" enables both when the daemon
+	// cannot set SO_MARK (unprivileged userspace deployment).
+	FieldProxyMode        = "proxy_mode"
+	FieldProxySocksListen = "proxy_socks_listen"
+	FieldProxyHTTPListen  = "proxy_http_listen"
+	FieldProxyUsername    = "proxy_username"
+	FieldProxyPassword    = "proxy_password"
 )
 
 // CategorizedSettingsPage implements newapi.CategorizedSettingsProvider so ATC's
@@ -162,6 +171,39 @@ func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
 			false,
 			settingsframework.WithDescription("Requested at registration only; the auth key's own ephemerality decides. Inert once the node is registered."),
 		).
+		StringField(
+			FieldProxyMode,
+			"Userspace Proxy Mode",
+			"auto",
+			settingsframework.WithPlaceholder("auto"),
+			settingsframework.WithDescription("auto | socks | http | both | off. ATC always runs Tailscale in userspace (no /dev/net/tun). "+
+				"auto enables both proxies when the daemon lacks CAP_NET_ADMIN; loopback on a host, 0.0.0.0 inside a container."),
+		).
+		StringField(
+			FieldProxySocksListen,
+			"SOCKS5 Listen Address",
+			"",
+			settingsframework.WithPlaceholder("127.0.0.1:1055"),
+			settingsframework.WithDescription("Explicit SOCKS5 bind address. Blank follows the host/container default (127.0.0.1:1055 or 0.0.0.0:1055)."),
+		).
+		StringField(
+			FieldProxyHTTPListen,
+			"HTTP Proxy Listen Address",
+			"",
+			settingsframework.WithPlaceholder("127.0.0.1:1056"),
+			settingsframework.WithDescription("Explicit HTTP CONNECT proxy bind address. Blank follows the host/container default (127.0.0.1:1056 or 0.0.0.0:1056)."),
+		).
+		StringField(
+			FieldProxyUsername,
+			"Proxy Username",
+			"",
+			settingsframework.WithDescription("Optional. When the proxy listens beyond loopback and no credentials are configured, ATC generates and persists a pair."),
+		).
+		SecretField(
+			FieldProxyPassword,
+			"Proxy Password",
+			settingsframework.WithDescription("Optional SOCKS5/HTTP proxy password. Write-only and masked in every API response."),
+		).
 		BuildCategorized()
 }
 
@@ -183,6 +225,11 @@ type tsnetSettings struct {
 	ControlURL         string
 	Ephemeral          bool
 	FallbackHostSocket bool
+	ProxyMode          string
+	ProxySocksListen   string
+	ProxyHTTPListen    string
+	ProxyUsername      string
+	ProxyPassword      string
 }
 
 // fingerprint identifies the configuration a cached tsnet.Server was built
@@ -215,6 +262,13 @@ func (p *Plugin) effectiveSettings() tsnetSettings {
 		ControlURL:         adapter.StringOrDefault(SettingsPageID, FieldControlURL, ""),
 		Ephemeral:          adapter.BoolOrDefault(SettingsPageID, FieldEphemeral, p.ephemeral),
 		FallbackHostSocket: adapter.BoolOrDefault(SettingsPageID, FieldFallbackHostSocket, false),
+		ProxyMode:          adapter.StringOrDefault(SettingsPageID, FieldProxyMode, "auto"),
+		ProxySocksListen:   adapter.StringOrDefault(SettingsPageID, FieldProxySocksListen, ""),
+		ProxyHTTPListen:    adapter.StringOrDefault(SettingsPageID, FieldProxyHTTPListen, ""),
+		ProxyUsername:      strings.TrimSpace(adapter.StringOrDefault(SettingsPageID, FieldProxyUsername, "")),
+	}
+	if secret, ok := adapter.SecretValue(SettingsPageID, FieldProxyPassword); ok {
+		cfg.ProxyPassword = secret
 	}
 	// State dir: persisted value wins; otherwise derive from the data store
 	// location so new installs keep their node state outside /tmp.
@@ -405,6 +459,19 @@ type Plugin struct {
 	tsnetFP     string
 	tsnetAuth   string
 	initialized bool
+
+	// Userspace proxy listeners (SOCKS5 + HTTP CONNECT), bound to the active
+	// dialer. Guarded by mu.
+	proxyMode      string
+	proxySocksLn   net.Listener
+	proxyHTTPLn    net.Listener
+	proxyHTTPsrv   *http.Server
+	proxySocksAddr string
+	proxyHTTPAddr  string
+	proxyAuth      bool
+	proxyCredsPath string
+	proxyErr       string
+	proxyFP        string
 
 	// upSince records when the backend last became Running, so `lastUpAt`
 	// reports a real "up since" instead of the time of the last status read.
@@ -823,7 +890,11 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 		}
 		p.tsDialer = nil
 		p.tsnetFP = ""
-		return &systemNetworkDialer{}, nil
+		// Rebind the userspace proxies to the borrowed host network.
+		dialer := plugin.Dialer(&systemNetworkDialer{})
+		p.closeProxiesLocked()
+		p.ensureProxiesLocked(cfg, dialer)
+		return dialer, nil
 	}
 
 	// Fail loudly instead of hanging on an interactive login when there is no
@@ -853,6 +924,8 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 		p.tsServer = nil
 		p.tsDialer = nil
 		p.tsnetFP = ""
+		// The old dialer is gone; force the proxies to rebind to the new one.
+		p.closeProxiesLocked()
 	}
 
 	if p.tsServer == nil {
@@ -885,6 +958,9 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 		p.tsDialer = &tsnetDialer{srv: p.tsServer}
 	}
 
+	// Keep the userspace SOCKS5/HTTP proxy listeners bound to the live node.
+	p.ensureProxiesLocked(cfg, p.tsDialer)
+
 	return p.tsDialer, nil
 }
 
@@ -911,22 +987,25 @@ type SelfStatus struct {
 	LastUpAt     string   `json:"lastUpAt,omitempty"`
 	StateDir     string   `json:"stateDir"`
 	Ephemeral    bool     `json:"ephemeral"`
-	Error        string   `json:"error,omitempty"`
+	// Proxy is the userspace SOCKS5/HTTP listener state. It is never secret.
+	Proxy ProxyStatus `json:"proxy"`
+	Error string      `json:"error,omitempty"`
 }
 
 // SelfStatus brings ATC's own tsnet node up (idempotently) and reports its real
 // registration state. It is safe to call while other operations are dialing:
 // ensureTsnet reuses a cached server and rebuilds it only when the resolved
 // settings changed.
-func (p *Plugin) SelfStatus(ctx context.Context) SelfStatus {
+func (p *Plugin) SelfStatus(ctx context.Context) (status SelfStatus) {
 	cfg := p.effectiveSettings()
-	status := SelfStatus{
+	status = SelfStatus{
 		Mode:         "unconfigured",
 		Hostname:     cfg.Hostname,
 		StateDir:     cfg.StateDir,
 		Ephemeral:    cfg.Ephemeral,
 		TailscaleIPs: []string{},
 	}
+	defer func() { status.Proxy = p.proxyStatus() }()
 	if cfg.AuthKey != "" {
 		status.Configured = true
 	} else if hasRegisteredNodeState(cfg.StateDir) {
@@ -1392,6 +1471,7 @@ func (p *Plugin) Repair(ctx context.Context) (SelfStatus, []string, error) {
 	p.dialer = nil
 	p.tsnetFP = ""
 	p.tsnetAuth = ""
+	p.closeProxiesLocked()
 	p.mu.Unlock()
 	time.Sleep(1 * time.Second)
 	st = p.SelfStatus(ctx)
@@ -1878,6 +1958,7 @@ func (p *Plugin) Close() error {
 		_ = client.Close()
 	}
 	p.clients = make(map[string]*ssh.Client)
+	p.closeProxiesLocked()
 
 	if p.tsServer != nil {
 		err := p.tsServer.Close()

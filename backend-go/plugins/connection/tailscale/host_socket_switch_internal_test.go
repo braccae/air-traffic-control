@@ -18,6 +18,7 @@ func TestHostSocketSwitchClosesRunningTsnetServer(t *testing.T) {
 	if err := store.Save(SettingsPageID, map[string]any{
 		FieldFallbackHostSocket: true,
 		FieldStateDir:           t.TempDir(),
+		FieldProxyMode:          "off",
 	}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
