@@ -66,14 +66,25 @@ cd air-traffic-control
 # Install dependencies
 npm install
 
-# Build the Go host daemon
-cd backend-go && go build -o /tmp/air-traffic-control-daemon main.go && cd ..
-
-# Launch development environment (Frontend + Express coordinator)
-npm run dev
+# Launch development environment (Go daemon + Vite)
+npm run dev        # or: just dev
 ```
 
-Visit `http://localhost:3000` in your browser.
+`just dev` starts the Go daemon with `go run .` on `:18090` and Vite on `:5173` (Vite proxies
+`/api` and `/ws` to the daemon). No pre-built binary is involved: the supervisor stops any
+dev server left over from a previous run first, so exactly one daemon and one Vite instance are
+ever running, and it restarts the daemon automatically when files under `backend-go/` change.
+Set `ATC_RELOAD=0` to disable the restart watcher, or `API_PORT`/`VITE_PORT` to move either
+server.
+
+Visit `http://localhost:5173` in your browser. Use `just dev-backend [port]` for the daemon
+alone and `just dev-frontend` for Vite alone (it leaves the daemon untouched).
+
+Reaching the dev server under a custom hostname (homelab domain, tailnet name, reverse proxy) requires that name in Vite's `server.allowedHosts` allowlist — otherwise Vite answers with `Blocked request. This host is not allowed.`. Add it with the `ATC_ALLOWED_HOSTS` env var instead of editing code:
+
+```bash
+ATC_ALLOWED_HOSTS="develop.homelabb.cc,atc.leo-banjo.ts.net" npm run dev
+```
 
 ---
 

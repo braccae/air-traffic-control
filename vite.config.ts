@@ -2,7 +2,7 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import fs from 'node:fs';
 import path from 'path';
-import {defineConfig, type Plugin} from 'vite';
+import {defineConfig, loadEnv, type Plugin} from 'vite';
 
 // Dev-only: the legacy Express workflow serves /ghostty-vt.wasm straight out of
 // node_modules. When Vite runs standalone (`just dev-split`) nothing else serves
@@ -26,7 +26,31 @@ function ghosttyWasmPlugin(): Plugin {
   };
 }
 
-export default defineConfig(() => {
+export default defineConfig(({mode}) => {
+  // Vite rejects any Host header it does not recognise (DNS-rebinding guard), so
+  // every dev hostname — container bridge names, tailnet names, homelab domains,
+  // reverse-proxied names — must be listed. Extend without editing code via
+  // ATC_ALLOWED_HOSTS (comma-separated) in the shell or .env, e.g.
+  //   ATC_ALLOWED_HOSTS=atc.leo-banjo.ts.net,atc.lan just dev
+  const env = loadEnv(mode, import.meta.dirname, '');
+  const extraAllowedHosts = (env.ATC_ALLOWED_HOSTS ?? '')
+    .split(',')
+    .map((host) => host.trim())
+    .filter(Boolean);
+  const allowedHosts = [
+    // Containerized environments (e.g. host.containers.internal)
+    'host.containers.internal',
+    'hermes',
+    'develop.homelabb.cc',
+    ...extraAllowedHosts,
+  ];
+
+  // Port of the Go daemon the dev supervisor started (`scripts/dev.sh` exports
+  // ATC_API_PORT). Falls back to the justfile default.
+  const apiPort = process.env.ATC_API_PORT || env.ATC_API_PORT || '18090';
+  const apiTarget = `http://127.0.0.1:${apiPort}`;
+  const apiWsTarget = `ws://127.0.0.1:${apiPort}`;
+
   return {
     plugins: [react(), tailwindcss(), ghosttyWasmPlugin()],
     resolve: {
@@ -35,8 +59,7 @@ export default defineConfig(() => {
       },
     },
     server: {
-      // Allow connections from containerized environments (e.g. host.containers.internal)
-      allowedHosts: ['host.containers.internal', 'hermes'],
+      allowedHosts,
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
@@ -49,10 +72,17 @@ export default defineConfig(() => {
       },
       // Dev-only: when Vite runs standalone (see justfile `dev-frontend`), forward API + WS
       // traffic to the Go daemon. In Express middlewareMode these options are ignored.
+      // The port follows the daemon the dev supervisor actually started, so
+      // `API_PORT=9090 just dev` keeps /api and /ws on the same backend.
       proxy: {
-        '/api': { target: 'http://127.0.0.1:18090', changeOrigin: true },
-        '/ws': { target: 'ws://127.0.0.1:18090', ws: true },
+        '/api': { target: apiTarget, changeOrigin: true },
+        '/ws': { target: apiWsTarget, ws: true },
       },
+    },
+    // `vite preview` keeps its own allowlist; mirror the dev one so the same
+    // hostnames work against a built bundle.
+    preview: {
+      allowedHosts,
     },
   };
 });

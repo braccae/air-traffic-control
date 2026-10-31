@@ -48,3 +48,8 @@ data/.rclone-key
 # hostcache package dir.
 /backend-go/pkg/hostcache/data/
 data/.vault-password
+
+# Python bytecode from the Ansible callback plugins (interpreter-specific and
+# regenerated on demand; a committed 3.14 .pyc breaks nothing but is noise).
+__pycache__/
+*.pyc
