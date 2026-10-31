@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -214,13 +215,39 @@ func TestExtractRawVaultPayloadAndFormatting(t *testing.T) {
 	}
 }
 
+// repoRootForTest walks up to the checkout root so the test does not depend on
+// where the repository was cloned.
+func repoRootForTest(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "backend-go", "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not locate the repository root")
+		}
+		dir = parent
+	}
+}
+
 func TestVaultEncryptPersistsToStore(t *testing.T) {
-	// Ensure ansible-vault can be found
-	os.Setenv("ANSIBLE_VENV_PATH", "/var/home/core/Projects/air-traffic-control/data/ansible-venv")
-	defer os.Unsetenv("ANSIBLE_VENV_PATH")
+	repoRoot := repoRootForTest(t)
+	// Prefer the managed virtualenv when this checkout has one; otherwise fall
+	// back to whatever ansible-vault is on PATH.
+	venvVault := filepath.Join(repoRoot, "data", "ansible-venv", "bin", "ansible-vault")
+	if _, err := os.Stat(venvVault); err == nil {
+		t.Setenv("ANSIBLE_VENV_PATH", filepath.Join(repoRoot, "data", "ansible-venv"))
+	} else if _, err := exec.LookPath("ansible-vault"); err != nil {
+		t.Skip("ansible-vault is not installed; skipping the round-trip test")
+	}
 
 	api, store, dir := setupTestVaultAPI(t)
-	api.repoRoot = "/var/home/core/Projects/air-traffic-control"
+	api.repoRoot = repoRoot
 	mux := http.NewServeMux()
 	api.Register(mux)
 
@@ -274,7 +301,7 @@ func TestVaultEncryptPersistsToStore(t *testing.T) {
 	}
 
 	// 5. Verify round-trip decrypt
-	plaintext, err := DecryptVaultString(context.Background(), "/var/home/core/Projects/air-traffic-control", vv.VaultBlock, DecryptOptions{Password: "test-pass"})
+	plaintext, err := DecryptVaultString(context.Background(), repoRoot, vv.VaultBlock, DecryptOptions{Password: "test-pass"})
 	if err != nil {
 		t.Fatalf("decrypt failed: %v", err)
 	}

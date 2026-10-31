@@ -274,9 +274,8 @@ func EncryptVaultString(ctx context.Context, repoRoot, plaintext, varName string
 
 	vaultBin := "ansible-vault"
 	if repoRoot != "" {
-		venvBin := filepath.Join(ansibleapi.GetAnsibleVenvPath(repoRoot), "bin", "ansible-vault")
-		if _, err := os.Stat(venvBin); err == nil {
-			vaultBin = venvBin
+		if p := ansibleapi.ResolveAnsibleBinary(repoRoot, "ansible-vault"); p != "" {
+			vaultBin = p
 		}
 	}
 
@@ -354,9 +353,8 @@ func DecryptVaultString(ctx context.Context, repoRoot, vaultPayload string, opts
 
 	vaultBin := "ansible-vault"
 	if repoRoot != "" {
-		venvBin := filepath.Join(ansibleapi.GetAnsibleVenvPath(repoRoot), "bin", "ansible-vault")
-		if _, err := os.Stat(venvBin); err == nil {
-			vaultBin = venvBin
+		if p := ansibleapi.ResolveAnsibleBinary(repoRoot, "ansible-vault"); p != "" {
+			vaultBin = p
 		}
 	}
 
