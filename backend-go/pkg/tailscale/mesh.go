@@ -34,7 +34,11 @@ type Status struct {
 		Online       bool     `json:"Online"`
 		ExitNode     bool     `json:"ExitNode"`
 	} `json:"Self"`
-	Peer map[string]PeerStatus `json:"Peer"`
+	// BackendState is the daemon's ipn state ("Running", "Stopped",
+	// "NeedsLogin", ...). It is what tells the UI whether the mesh is actually
+	// up, as opposed to merely having peers in the netmap.
+	BackendState string                `json:"BackendState"`
+	Peer         map[string]PeerStatus `json:"Peer"`
 }
 
 // GetLocalStatus queries tailscale status via the tailscale CLI or local socket

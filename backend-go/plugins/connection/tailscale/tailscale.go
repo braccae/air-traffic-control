@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"tailscale.com/ipn"
+	"tailscale.com/net/netns"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 
@@ -128,8 +131,9 @@ func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
 			FieldFallbackHostSocket,
 			"Allow Host Socket Fallback",
 			false,
-			settingsframework.WithDescription("Local development only. When enabled and no auth key is configured, ATC borrows the host's "+
-				"system tailscaled socket/network stack. Leave disabled in production so ATC joins the mesh with its own auth key."),
+			settingsframework.WithDescription("Local development only. When enabled, ATC borrows the host's system tailscaled "+
+				"socket/network stack instead of running its own tsnet node; the stored auth key is kept for when you disable it. "+
+				"Leave disabled in production so ATC joins the mesh with its own auth key."),
 		).
 		StringField(
 			FieldHostname,
@@ -215,7 +219,10 @@ func (p *Plugin) effectiveSettings() tsnetSettings {
 	// State dir: persisted value wins; otherwise derive from the data store
 	// location so new installs keep their node state outside /tmp.
 	if sd := adapter.StringOrDefault(SettingsPageID, FieldStateDir, ""); sd != "" {
-		cfg.StateDir = sd
+		// Normalize in memory only; migrateLegacyStateDir persists the absolute
+		// form from the startup path. Persisting here would write to the shared
+		// settings store on every read (including from tests probing settings).
+		cfg.StateDir = absoluteStateDir(sd)
 	} else if p.stateDir != "" && p.stateDir != DefaultStateDir {
 		// Explicit plugin option (e.g. WithStateDir in tests) wins.
 		cfg.StateDir = p.stateDir
@@ -228,6 +235,9 @@ func (p *Plugin) effectiveSettings() tsnetSettings {
 			dbPath = plugin.ResolveDBPath("")
 		}
 		if dbPath != "" {
+			if abs, err := filepath.Abs(dbPath); err == nil {
+				dbPath = abs
+			}
 			cfg.StateDir = filepath.Join(filepath.Dir(dbPath), "tsnet")
 		} else {
 			cfg.StateDir = p.stateDir
@@ -255,6 +265,21 @@ func (p *Plugin) effectiveSettings() tsnetSettings {
 	return cfg
 }
 
+// absoluteStateDir resolves a configured state directory to an absolute path.
+// It returns dir unchanged when it is already absolute or cannot be resolved.
+func absoluteStateDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" || filepath.IsAbs(dir) {
+		return dir
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		log.Printf("tsnet: cannot resolve relative state dir %q: %v", dir, err)
+		return dir
+	}
+	return filepath.Clean(abs)
+}
+
 // resetTsnetState removes the persisted tsnet node state so a new auth key
 // registers the node afresh instead of being ignored because the node already
 // exists in the state store.
@@ -269,10 +294,108 @@ func resetTsnetState(stateDir string) error {
 	return nil
 }
 
+// tsnetUpTimeout bounds how long ATC waits for its own node to reach Running.
+// tsnet.Up blocks while the backend sits in NeedsLogin (no auth key, or the
+// control plane is unreachable), so an unbounded call used to burn the caller's
+// whole dial timeout on every host and hang /api/tailscale/self.
+const tsnetUpTimeout = 12 * time.Second
+
+// tsnetFailureCooldown short-circuits repeated dials while the node is known to
+// be unregistered: a cache warmup over N hosts must not spend N × tsnetUpTimeout
+// re-discovering the same failure.
+const tsnetFailureCooldown = 15 * time.Second
+
+// hasRegisteredNodeState reports whether stateDir holds an actual tsnet node
+// registration rather than only a freshly generated machine key. tsnet writes
+// `_machinekey` as soon as it starts, before any login: treating that file as
+// "configured" skipped the missing-auth-key guard and left every dial waiting on
+// an interactive login that can never complete in a headless daemon.
+func hasRegisteredNodeState(stateDir string) bool {
+	if strings.TrimSpace(stateDir) == "" {
+		return false
+	}
+	raw, err := os.ReadFile(filepath.Join(stateDir, "tailscaled.state"))
+	if err != nil {
+		return false
+	}
+	var stored map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		// Unknown/legacy state format: trust it rather than forcing an already
+		// registered node through a needless re-registration.
+		return true
+	}
+	return len(stored[string(ipn.CurrentProfileStateKey)]) > 0
+}
+
+// tsnetStartError renders an actionable error for a node that cannot reach
+// Running, including the live backend state, Tailscale health warnings, and the
+// authorization URL when control is asking for an interactive login.
+func tsnetStartError(srv *tsnet.Server, err error) error {
+	details := []string{fmt.Sprintf("backend error: %v", err)}
+	backendState := ""
+	if lc, lerr := srv.LocalClient(); lerr == nil && lc != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if st, serr := lc.Status(ctx); serr == nil && st != nil {
+			if st.BackendState != "" {
+				backendState = st.BackendState
+				details = append(details, "backend state "+st.BackendState)
+			}
+			for _, h := range st.Health {
+				if strings.TrimSpace(h) != "" {
+					details = append(details, "health: "+h)
+				}
+			}
+			if st.AuthURL != "" {
+				details = append(details, "authorize this node in Tailscale: "+st.AuthURL)
+			}
+		}
+	}
+	if hint := unprivilegedControlHint(backendState, err); hint != "" {
+		details = append(details, hint)
+	}
+	return fmt.Errorf("tsnet node is not connected: %s", strings.Join(details, "; "))
+}
+
+// socketMarkAvailable is a test seam for netns.UseSocketMark, which probes
+// whether the process may set SO_MARK (CAP_NET_ADMIN). When it cannot, tsnet
+// binds its sockets to the default interface instead, which breaks control-plane
+// reachability on hosts that rely on policy routing.
+var socketMarkAvailable = netns.UseSocketMark
+
+// closeTsnetServer is a test seam so a transport switch can be asserted without
+// starting a real tailscaled.
+var closeTsnetServer = func(srv *tsnet.Server) error { return srv.Close() }
+
+// unprivilegedControlHint explains the most common cause of a control-plane
+// timeout on an unprivileged daemon. Tailscale marks its outbound sockets with
+// SO_MARK so they bypass its own routes; that needs CAP_NET_ADMIN. Without it,
+// tsnet falls back to SO_BINDTODEVICE, which also bypasses *host* policy
+// routing (Cloudflare WARP, VPNs), so the control plane can end up pinned to an
+// interface that cannot reach it — every dial then sits in SYN-SENT until the
+// deadline. Only reported when the backend is stuck at NeedsLogin on a network
+// error, so an invalid auth key is not blamed on socket capabilities.
+func unprivilegedControlHint(backendState string, err error) string {
+	if backendState != "NeedsLogin" || socketMarkAvailable() {
+		return ""
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "deadline exceeded") &&
+		!strings.Contains(msg, "network is unreachable") &&
+		!strings.Contains(msg, "i/o timeout") {
+		return ""
+	}
+	return "hint: this daemon lacks CAP_NET_ADMIN, so tsnet binds its sockets to the " +
+		"default interface and cannot follow policy routing (e.g. Cloudflare WARP or a VPN) " +
+		"to the Tailscale control plane; run the daemon with cap_net_admin, or enable the " +
+		"host tailscaled fallback in Datacenter Settings"
+}
+
 // Plugin provides connectivity over the Tailscale mesh using embedded tsnet or custom dialer.
 type Plugin struct {
 	mu          sync.Mutex
 	tsServer    *tsnet.Server
+	tsDialer    *tsnetDialer
 	dialer      plugin.Dialer
 	clients     map[string]*ssh.Client
 	stateDir    string
@@ -656,6 +779,16 @@ func isSystemTailscaledActive() bool {
 	return false
 }
 
+// tailscaledActive is a test seam for the host-socket availability probe.
+var tailscaledActive = isSystemTailscaledActive
+
+// shouldUseHostSocket reports whether the operator opted into borrowing the
+// host's tailscaled. An explicit opt-in wins over a configured auth key so the
+// two modes can be switched without deleting the stored key.
+func shouldUseHostSocket(cfg tsnetSettings) bool {
+	return cfg.FallbackHostSocket && tailscaledActive()
+}
+
 func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 	// Resolve settings before taking the lock: the settings store has its own
 	// locking and must never be held while dialing.
@@ -674,21 +807,34 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 	}
 
 	// Host-socket fallback is opt-in and intended for local development only.
-	// In production the auth key is the primary path: ATC joins the mesh as its
-	// own node instead of silently borrowing the host's tailscaled credentials.
-	if cfg.AuthKey == "" && cfg.FallbackHostSocket && isSystemTailscaledActive() {
+	// When enabled it wins over the auth key: the operator explicitly asked ATC
+	// to borrow the host's tailscaled, and the key is kept for when they switch
+	// back to ATC's own tsnet node. Requiring an empty key made the two modes
+	// mutually exclusive in the UI (switching to the host socket meant
+	// destroying the stored key first).
+	if shouldUseHostSocket(cfg) {
+		// Switching to the host socket must stop ATC's own node. Leaving it
+		// running kept a logged-out tsnet backend retrying the old/invalid auth
+		// key in the background forever, flooding the daemon log and hammering
+		// the control plane long after the operator switched modes.
+		if p.tsServer != nil {
+			_ = closeTsnetServer(p.tsServer)
+			p.tsServer = nil
+		}
+		p.tsDialer = nil
+		p.tsnetFP = ""
 		return &systemNetworkDialer{}, nil
 	}
 
 	// Fail loudly instead of hanging on an interactive login when there is no
 	// auth key and the fallback is disabled — unless prior registered node
-	// state exists that tsnet can reuse without a fresh registration.
-	if cfg.AuthKey == "" {
-		statePath := filepath.Join(cfg.StateDir, "tailscaled.state")
-		if _, err := os.Stat(statePath); err != nil {
-			return nil, fmt.Errorf("tailscale: no auth key configured and host socket fallback disabled; " +
-				"set the Tailscale auth key in Datacenter Settings or enable the local-dev host-socket fallback")
-		}
+	// state exists that tsnet can reuse without a fresh registration. A state
+	// file holding only the machine key is not a registration: tsnet writes it
+	// before it ever logs in, so checking existence alone let the daemon spin on
+	// a login prompt instead of reporting the missing key.
+	if cfg.AuthKey == "" && !hasRegisteredNodeState(cfg.StateDir) {
+		return nil, fmt.Errorf("tailscale: no auth key configured and host socket fallback disabled; " +
+			"set the Tailscale auth key in Datacenter Settings or enable the local-dev host-socket fallback")
 	}
 
 	// A settings change must reach the live node, not just the database: the
@@ -705,6 +851,7 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 		}
 		_ = p.tsServer.Close()
 		p.tsServer = nil
+		p.tsDialer = nil
 		p.tsnetFP = ""
 	}
 
@@ -727,11 +874,18 @@ func (p *Plugin) ensureTsnet() (plugin.Dialer, error) {
 			},
 		}
 		p.tsServer = srv
+		p.tsDialer = &tsnetDialer{srv: srv}
 		p.tsnetFP = cfg.fingerprint()
 		p.tsnetAuth = cfg.AuthKey
 	}
 
-	return &tsnetDialer{srv: p.tsServer}, nil
+	// Reuse one dialer so its "node is up" / "node failed" state survives
+	// across calls: a fresh dialer per dial re-ran tsnet.Up for every host.
+	if p.tsDialer == nil {
+		p.tsDialer = &tsnetDialer{srv: p.tsServer}
+	}
+
+	return p.tsDialer, nil
 }
 
 // SelfStatus is the live view of ATC's own tsnet node. It is derived from the
@@ -775,7 +929,7 @@ func (p *Plugin) SelfStatus(ctx context.Context) SelfStatus {
 	}
 	if cfg.AuthKey != "" {
 		status.Configured = true
-	} else if _, err := os.Stat(filepath.Join(cfg.StateDir, "tailscaled.state")); err == nil {
+	} else if hasRegisteredNodeState(cfg.StateDir) {
 		// Prior registration state lets tsnet come up without a fresh key.
 		status.Configured = true
 	}
@@ -789,15 +943,39 @@ func (p *Plugin) SelfStatus(ctx context.Context) SelfStatus {
 	td, ok := dialer.(*tsnetDialer)
 	if !ok {
 		// Explicit local-dev host-socket fallback: ATC borrows the host's
-		// tailscaled and therefore is not its own mesh node.
+		// tailscaled and therefore is not its own mesh node. Report the
+		// borrowed node's real identity: returning an empty shell here made a
+		// healthy host mesh read as "offline, no addresses, 0 peers".
 		status.Mode = "host-socket"
+		p.fillHostSocketStatus(&status)
 		return status
 	}
 
 	status.Mode = "tsnet"
-	st, err := td.srv.Up(ctx)
+	// Never wait on tsnet.Up forever: it blocks while the backend is in
+	// NeedsLogin, which is exactly the state an unregistered node sits in.
+	// The caller's deadline is clamped rather than replaced: the HTTP handlers
+	// pass 30s, which used to let a NeedsLogin node stall the whole request
+	// instead of failing at tsnetUpTimeout. WithTimeout already inherits the
+	// earlier of the two deadlines.
+	upCtx, cancelUp := context.WithTimeout(ctx, tsnetUpTimeout)
+	defer cancelUp()
+	st, err := td.srv.Up(upCtx)
 	if err != nil {
-		status.Error = fmt.Sprintf("tsnet start failed: %v", err)
+		status.Error = tsnetStartError(td.srv, err).Error()
+		// Still report what the node knows about itself so the UI can show the
+		// real backend state (NeedsLogin, health warnings, auth URL) instead of
+		// only the timeout.
+		if lc, lerr := td.srv.LocalClient(); lerr == nil && lc != nil {
+			sctx, scancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer scancel()
+			if s, serr := lc.Status(sctx); serr == nil && s != nil {
+				status.BackendState = s.BackendState
+				status.AuthURL = s.AuthURL
+				status.Health = s.Health
+				status.PeerCount = len(s.Peer)
+			}
+		}
 		return status
 	}
 	status.BackendState = st.BackendState
@@ -837,6 +1015,30 @@ func (p *Plugin) SelfStatus(ctx context.Context) SelfStatus {
 		}
 	}
 	return status
+}
+
+// fillHostSocketStatus populates an unreported self view from the host's
+// tailscaled. The fallback has no tsnet node of its own, so the borrowed node is
+// the only truthful identity to show; a failure is surfaced in Error instead of
+// leaving a blank-but-successful-looking payload.
+func (p *Plugin) fillHostSocketStatus(status *SelfStatus) {
+	host, err := tailscale.GetLocalStatus()
+	if err != nil {
+		status.Error = fmt.Sprintf("host tailscaled status unavailable: %v", err)
+		return
+	}
+	status.BackendState = host.BackendState
+	status.Connected = host.BackendState == "Running"
+	status.Online = host.Self.Online
+	if host.Self.HostName != "" {
+		status.Hostname = host.Self.HostName
+	}
+	status.DNSName = host.Self.DNSName
+	if len(host.Self.TailscaleIPs) > 0 {
+		status.TailscaleIPs = append([]string{}, host.Self.TailscaleIPs...)
+	}
+	status.PeerCount = len(host.Peer)
+	status.LastUpAt = p.markUp(status.Connected)
 }
 
 // markUp records the moment the backend became Running and returns it as an
@@ -1186,6 +1388,7 @@ func (p *Plugin) Repair(ctx context.Context) (SelfStatus, []string, error) {
 		_ = p.tsServer.Close()
 		p.tsServer = nil
 	}
+	p.tsDialer = nil
 	p.dialer = nil
 	p.tsnetFP = ""
 	p.tsnetAuth = ""
@@ -1208,6 +1411,11 @@ type tsnetDialer struct {
 
 	mu    sync.Mutex
 	ready bool
+
+	// lastErr/lastErrAt short-circuit repeated dials while the node is known to
+	// be unregistered (see tsnetFailureCooldown).
+	lastErr   error
+	lastErrAt time.Time
 }
 
 // ensureRunning brings the tsnet node up before the first dial. Without this,
@@ -1215,14 +1423,35 @@ type tsnetDialer struct {
 // in state NoState" (which the startup cache warmup hit for every host).
 func (td *tsnetDialer) ensureRunning(ctx context.Context) error {
 	td.mu.Lock()
-	defer td.mu.Unlock()
 	if td.ready {
+		td.mu.Unlock()
 		return nil
 	}
-	if _, err := td.srv.Up(ctx); err != nil {
+	// The node is known to be unregistered: fail immediately instead of letting
+	// every caller pay the full Up timeout again.
+	if td.lastErr != nil && time.Since(td.lastErrAt) < tsnetFailureCooldown {
+		err := td.lastErr
+		td.mu.Unlock()
 		return err
 	}
+	td.mu.Unlock()
+
+	upCtx, cancel := context.WithTimeout(ctx, tsnetUpTimeout)
+	defer cancel()
+	if _, err := td.srv.Up(upCtx); err != nil {
+		wrapped := tsnetStartError(td.srv, err)
+		td.mu.Lock()
+		td.lastErr = wrapped
+		td.lastErrAt = time.Now()
+		td.mu.Unlock()
+		return wrapped
+	}
+
+	td.mu.Lock()
+	defer td.mu.Unlock()
+	// Another goroutine may have completed the same handshake meanwhile.
 	td.ready = true
+	td.lastErr = nil
 	return nil
 }
 
@@ -1321,18 +1550,21 @@ func (p *Plugin) EvictClient(h plugin.HostFacts) {
 	_ = authMethods
 }
 
-// isNoisyTsnetLine filters the tsnet internal log stream: keep state, derp,
-// netmap, and health lines, drop the per-packet/keepalive noise that would
-// otherwise flood the daemon log.
 // migrateLegacyStateDir moves a /tmp-based state directory to the data store's
 // directory the first time it runs, preserving the registration. It is a no-op
 // when the state dir is already outside /tmp or the target already exists.
 func (p *Plugin) migrateLegacyStateDir(cfg *tsnetSettings) {
-	log.Printf("tsnet migrate: stateDir=%q", cfg.StateDir)
 	if !strings.HasPrefix(cfg.StateDir, "/tmp/") {
-		log.Printf("tsnet migrate: not a /tmp path, skipping")
+		// Persist the normalized absolute form once. A relative value (written
+		// when the daemon ran from backend-go/) is only meaningful to the
+		// process that wrote it; anchoring it stops a later launch from
+		// silently creating a second, unregistered node elsewhere.
+		if raw := persistedSetting(FieldStateDir); raw != "" && raw != cfg.StateDir {
+			persistStateDir(cfg.StateDir)
+		}
 		return
 	}
+	log.Printf("tsnet migrate: moving legacy state dir %q out of /tmp", cfg.StateDir)
 	dbPath := ""
 	if st := plugin.GlobalSettingsStore(); st != nil {
 		dbPath = st.DBPath()
@@ -1343,10 +1575,14 @@ func (p *Plugin) migrateLegacyStateDir(cfg *tsnetSettings) {
 	if dbPath == "" {
 		return
 	}
+	if abs, err := filepath.Abs(dbPath); err == nil {
+		dbPath = abs
+	}
 	newDir := filepath.Join(filepath.Dir(dbPath), "tsnet")
 	if _, err := os.Stat(newDir); err == nil {
 		// Already migrated (or created): just switch over.
 		cfg.StateDir = newDir
+		persistStateDir(newDir)
 		return
 	}
 	if _, err := os.Stat(cfg.StateDir); err == nil {
@@ -1361,9 +1597,14 @@ func (p *Plugin) migrateLegacyStateDir(cfg *tsnetSettings) {
 		}
 	}
 	cfg.StateDir = newDir
+	persistStateDir(newDir)
+}
+
+// persistStateDir stores the normalized state directory in the settings page.
+func persistStateDir(dir string) {
 	adapter := settingsframework.NewStoreAdapter(nil)
-	if err := adapter.Save(SettingsPageID, map[string]any{FieldStateDir: newDir}); err != nil {
-		log.Printf("tsnet: failed to persist migrated state dir: %v", err)
+	if err := adapter.Save(SettingsPageID, map[string]any{FieldStateDir: dir}); err != nil {
+		log.Printf("tsnet: failed to persist state dir %q: %v", dir, err)
 	}
 }
 
@@ -1408,6 +1649,9 @@ func copyDir(src, dst string) error {
 	return nil
 }
 
+// isNoisyTsnetLine filters the tsnet internal log stream: keep state, derp,
+// netmap, and health lines, drop the per-packet/keepalive noise that would
+// otherwise flood the daemon log.
 func isNoisyTsnetLine(msg string) bool {
 	lower := strings.ToLower(msg)
 	noisy := []string{
