@@ -13,6 +13,9 @@ e2e-results/
 data/bin/
 data/ansible-venv/
 
+# Local archives of retired runtime state (may contain old inventory secrets).
+data/archive/
+
 # Runtime host-cache SQLite — real homelab inventory, never track or publish.
 data/*.sqlite
 data/*.sqlite-shm
