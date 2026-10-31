@@ -116,6 +116,13 @@ const (
 	FieldProxyHTTPListen  = "proxy_http_listen"
 	FieldProxyUsername    = "proxy_username"
 	FieldProxyPassword    = "proxy_password"
+	// FieldAPIKey is an optional Tailscale API key used only for device
+	// management (removing stale nodes and renaming this device). It is a
+	// write-only secret and never leaves the daemon except to api.tailscale.com.
+	FieldAPIKey = "tailscale_api_key"
+	// FieldTailnet selects the tailnet for API calls; "-" means the default
+	// tailnet of the configured API key.
+	FieldTailnet = "tailscale_tailnet"
 )
 
 // CategorizedSettingsPage implements newapi.CategorizedSettingsProvider so ATC's
@@ -204,6 +211,19 @@ func (p *Plugin) CategorizedSettingsPage() newapi.CategorizedSettingsPage {
 			"Proxy Password",
 			settingsframework.WithDescription("Optional SOCKS5/HTTP proxy password. Write-only and masked in every API response."),
 		).
+		SecretField(
+			FieldAPIKey,
+			"Tailscale API Key",
+			settingsframework.WithDescription("Optional. Enables device cleanup and rename through api.tailscale.com "+
+				"(removes stale devices holding this hostname, then names this node correctly). Write-only and masked."),
+		).
+		StringField(
+			FieldTailnet,
+			"Tailscale Tailnet",
+			"-",
+			settingsframework.WithPlaceholder("-"),
+			settingsframework.WithDescription("Tailnet used for API calls. \"-\" selects the default tailnet of the API key."),
+		).
 		BuildCategorized()
 }
 
@@ -230,6 +250,8 @@ type tsnetSettings struct {
 	ProxyHTTPListen    string
 	ProxyUsername      string
 	ProxyPassword      string
+	APIKey             string
+	Tailnet            string
 }
 
 // fingerprint identifies the configuration a cached tsnet.Server was built
@@ -269,6 +291,13 @@ func (p *Plugin) effectiveSettings() tsnetSettings {
 	}
 	if secret, ok := adapter.SecretValue(SettingsPageID, FieldProxyPassword); ok {
 		cfg.ProxyPassword = secret
+	}
+	if secret, ok := adapter.SecretValue(SettingsPageID, FieldAPIKey); ok {
+		cfg.APIKey = strings.TrimSpace(secret)
+	}
+	cfg.Tailnet = strings.TrimSpace(adapter.StringOrDefault(SettingsPageID, FieldTailnet, "-"))
+	if cfg.Tailnet == "" {
+		cfg.Tailnet = "-"
 	}
 	// State dir: persisted value wins; otherwise derive from the data store
 	// location so new installs keep their node state outside /tmp.

@@ -259,6 +259,38 @@ func newServerMux(hub *websocket.Hub, podmanMgr *podman.Manager, dbPath string, 
 	}
 	mux.HandleFunc("/api/tailscale/repair", handleTailscaleRepair)
 
+	handleTailscaleCleanup := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "method not allowed"})
+			return
+		}
+		provider, ok := plugin.Get(tsconn.SettingsPageID)
+		if !ok {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "connection/tailscale plugin is not registered"})
+			return
+		}
+		cleaner, ok := provider.(interface {
+			CleanupDevices(context.Context) (tsconn.DeviceCleanupResult, error)
+		})
+		if !ok {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "connection/tailscale plugin does not expose device cleanup"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		result, err := cleaner.CleanupDevices(ctx)
+		payload := map[string]any{"success": err == nil, "result": result}
+		if err != nil {
+			payload["error"] = err.Error()
+		}
+		_ = json.NewEncoder(w).Encode(payload)
+	}
+	mux.HandleFunc("/api/tailscale/devices/cleanup", handleTailscaleCleanup)
+
 	mux.HandleFunc("/api/restic/snapshots", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		repo := r.URL.Query().Get("repo")

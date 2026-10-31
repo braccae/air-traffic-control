@@ -60,6 +60,8 @@ export const DatacenterTailscalePage: React.FC = () => {
   const [selfLoading, setSelfLoading] = useState(true);
   const [selfError, setSelfError] = useState<string | null>(null);
   const [repairing, setRepairing] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
 
   const loadSelf = useCallback(async () => {
     setSelfLoading(true);
@@ -89,6 +91,27 @@ export const DatacenterTailscalePage: React.FC = () => {
     } finally {
       setRepairing(false);
       await loadSelf();
+    }
+  }, [loadSelf]);
+
+  const cleanupDevices = useCallback(async () => {
+    if (!window.confirm('Remove offline Tailscale devices that still hold this hostname, then rename this node? Online devices are never touched.')) {
+      return;
+    }
+    setCleaning(true);
+    setCleanupMessage(null);
+    try {
+      const res = await fetch('/api/tailscale/devices/cleanup', { method: 'POST' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Cleanup failed (HTTP ${res.status})`);
+      }
+      setCleanupMessage(data.result?.message || 'Cleanup complete');
+      await loadSelf();
+    } catch (err: any) {
+      setCleanupMessage(err?.message || 'Cleanup failed');
+    } finally {
+      setCleaning(false);
     }
   }, [loadSelf]);
 
@@ -307,6 +330,14 @@ export const DatacenterTailscalePage: React.FC = () => {
               Remove the stale device, then ATC renames this node back.
             </p>
             <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void cleanupDevices()}
+                disabled={cleaning}
+                className="px-2 py-1 rounded text-[11px] font-mono font-bold text-white bg-[#1f6feb] hover:bg-[#388bfd] disabled:opacity-50 cursor-pointer"
+              >
+                {cleaning ? 'Cleaning…' : 'Remove stale devices'}
+              </button>
               <a
                 href="https://login.tailscale.com/admin/machines"
                 target="_blank"
@@ -316,6 +347,7 @@ export const DatacenterTailscalePage: React.FC = () => {
                 Open admin console
               </a>
             </div>
+            {cleanupMessage && <p className="text-[#dfe1fa]">{cleanupMessage}</p>}
           </div>
         )}
 
