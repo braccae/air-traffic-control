@@ -887,7 +887,10 @@ func (a *API) handleVmAction(w http.ResponseWriter, r *http.Request, nodeID, vmN
 		nil,
 	)
 
-	cmd := fmt.Sprintf("sudo virsh %s %s", rawAction, cleanVmName)
+	// sudo -n: a privileged mutation must never block on an interactive
+	// password / polkit prompt inside the daemon. Failure is reported, not
+	// silently escalated.
+	cmd := fmt.Sprintf("sudo -n virsh %s %s", rawAction, cleanVmName)
 	out, runErr := a.runCommand(r.Context(), targetNode, cmd, 8*time.Second)
 	if targetID, ok := targetNode.GetString("id"); ok && targetID != "" {
 		_ = a.store.InvalidateHostSections(targetID)

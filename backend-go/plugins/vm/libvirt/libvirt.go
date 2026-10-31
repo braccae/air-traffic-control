@@ -216,7 +216,10 @@ func (p *Plugin) Probe(ctx context.Context, r plugin.Runner, h plugin.HostFacts)
 		}, nil
 	}
 
-	listOut, err := r.RunCommand(ctx, "sudo -n virsh list --all 2>&1 || virsh list --all 2>&1 || true")
+	// Read-only libvirt connection on the unprivileged fallback: a read-write
+	// connection asks polkit for org.libvirt.unix.manage and blocks on a TTY
+	// password prompt when the host has a polkit agent attached.
+	listOut, err := r.RunCommand(ctx, "sudo -n virsh list --all 2>&1 || virsh -r list --all 2>&1 || true")
 	vmCount := 0
 	if err == nil {
 		lines := strings.Split(strings.TrimSpace(listOut), "\n")
@@ -240,7 +243,7 @@ func (p *Plugin) Read(ctx context.Context, r plugin.Runner, h plugin.HostFacts) 
 		return nil, fmt.Errorf("runner is nil")
 	}
 
-	cmd := "which virsh 2>&1 || sudo -n which virsh 2>&1 || echo 'NO_VIRSH'; echo '===VIRSH_LIST==='; sudo -n virsh list --all 2>&1 || virsh list --all 2>&1 || echo 'NO_GUESTS'; echo '===SERVICES==='; systemctl is-active libvirtd virtqemud 2>&1 || true; echo '===KVM==='; lsmod | grep kvm 2>&1 || true"
+	cmd := "which virsh 2>&1 || sudo -n which virsh 2>&1 || echo 'NO_VIRSH'; echo '===VIRSH_LIST==='; sudo -n virsh list --all 2>&1 || virsh -r list --all 2>&1 || echo 'NO_GUESTS'; echo '===SERVICES==='; systemctl is-active libvirtd virtqemud 2>&1 || true; echo '===KVM==='; lsmod | grep kvm 2>&1 || true"
 	out, err := r.RunCommand(ctx, cmd)
 	if err != nil {
 		return nil, err

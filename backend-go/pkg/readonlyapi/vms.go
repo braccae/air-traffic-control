@@ -8,9 +8,16 @@ import (
 )
 
 // vmsCmd is the exact command server.ts runs for GET /api/nodes/:id/vms.
+//
+// The privileged attempt is non-interactive (`sudo -n`), and the unprivileged
+// fallback uses a read-only libvirt connection (`virsh -r`). A bare
+// `virsh list --all` opens a read-write system connection, which trips the
+// org.libvirt.unix.manage polkit action: on a workstation that launches
+// pkttyagent on the daemon's TTY and blocks the probe until someone types a
+// password.
 const vmsCmd = "which virsh 2>&1 || sudo -n which virsh 2>&1 || echo \"NO_VIRSH\"; " +
 	"echo \"===VIRSH_LIST===\"; " +
-	"sudo -n virsh list --all 2>&1 || virsh list --all 2>&1 || echo \"NO_GUESTS\"; " +
+	"sudo -n virsh list --all 2>&1 || virsh -r list --all 2>&1 || echo \"NO_GUESTS\"; " +
 	"echo \"===SERVICES===\"; " +
 	"systemctl is-active libvirtd virtqemud 2>&1 || true; " +
 	"echo \"===KVM===\"; " +
